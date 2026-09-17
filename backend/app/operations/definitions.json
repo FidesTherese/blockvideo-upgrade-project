@@ -1,0 +1,44 @@
+{
+  "operations": [
+    {
+      "schema_version": 1,
+      "operation_id": "project.status.get",
+      "operation_version": 1,
+      "description": "Return the current project and generation status without changing state.",
+      "examples": ["現在の動画の状態を確認する"],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler_key": "project.get_status",
+      "affected_artifacts": [],
+      "precondition_key": "project_exists",
+      "postcondition_key": "state_unchanged"
+    },
+    {
+      "schema_version": 1,
+      "operation_id": "project.subtitle-font-size.set",
+      "operation_version": 1,
+      "description": "Set the project's subtitle font size without starting generation.",
+      "examples": ["字幕の文字サイズを56pxにする"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 120
+          }
+        },
+        "required": ["value"],
+        "additionalProperties": false
+      },
+      "handler_key": "project.set_subtitle_font_size",
+      "affected_artifacts": ["video"],
+      "precondition_key": "project_editable",
+      "postcondition_key": "subtitle_font_size_saved"
+    }
+  ]
+}

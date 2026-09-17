@@ -37,7 +37,7 @@ from app.schemas import (
     QuickCreateResponse,
 )
 from app.services.paths import ensure_project_layout, project_dir
-from app.services.invalidation import invalidate_project_settings
+from app.services.project_settings import apply_project_settings
 from app.services.provider_factory import build_providers_for_project
 from app.services.visual_planner import generate_title
 from app.workers.job_runner import (
@@ -444,10 +444,7 @@ def patch_project(
         raise HTTPException(status_code=404, detail="project not found")
     ensure_project_idle(project_id, db)
     updates = payload.model_dump(exclude_unset=True)
-    changed_fields = {field for field, value in updates.items() if getattr(project, field) != value}
-    for field, value in updates.items():
-        setattr(project, field, value)
-    invalidate_project_settings(project, changed_fields)
+    apply_project_settings(project, updates)
     db.commit()
     db.refresh(project)
     return _project_detail(project)

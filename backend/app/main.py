@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from app import __version__
 from app.api.routes_blocks import router as blocks_router
 from app.api.routes_health import router as health_router
+from app.api.routes_operations import router as operations_router
 from app.api.routes_projects import router as projects_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, log
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api")
     app.include_router(projects_router, prefix="/api")
     app.include_router(blocks_router, prefix="/api")
+    app.include_router(operations_router, prefix="/api")
 
     @app.exception_handler(Exception)
     async def _unhandled(_request, exc: Exception):  # pragma: no cover
