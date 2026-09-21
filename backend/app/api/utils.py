@@ -15,16 +15,11 @@ from app.core.config import get_settings
 
 
 def ensure_project_idle(project_id: int, db) -> None:
-    """Reject concurrent writes to one project's output in this local process."""
-    from sqlalchemy import select
-    from app.models.job import GenerationJob
+    """Reject writes while a durable or process-local generation is active."""
+    from app.services.job_records import has_active_project_job
     from app.workers.job_runner import job_registry
 
-    ids = db.scalars(select(GenerationJob.id).where(
-        GenerationJob.project_id == project_id,
-        GenerationJob.status.in_(["pending", "running"]),
-    ))
-    if any(job_registry.is_running(job_id) for job_id in ids):
+    if has_active_project_job(db, project_id, job_registry.is_running):
         raise HTTPException(status_code=409, detail="このプロジェクトは生成中です。完了後に再実行してください。")
 
 

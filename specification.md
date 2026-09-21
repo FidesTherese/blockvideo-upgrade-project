@@ -1,4 +1,196 @@
-# BlockVideo Plan C Specification — Work Units 01–10
+# BlockVideo Plan C Specification — Work Units 01–30
+
+## D30 functional candidate acceptance
+
+`docs/plan-c/work-unit-30.md` verifies the normal application path with retrieval
+disabled and with retained readiness-annotated retrieval enabled. The user chose
+an isolated demo startup menu, with the configured mode shown in the UI. This
+does not expose Hard Filter or let model/client proposals choose an execution
+mode. G5 evidence must distinguish automated checks, real inference/media,
+independent review, human acceptance and approved-commit integration.
+
+## D29 controlled development comparison
+
+`docs/plan-c/work-unit-29.md` connects B0, B1, B2, P1 and B0+ to the same
+language orchestration and operation core through an experiment-only runner.
+The ordinary application defaults do not change. Every mode allows clarification
+and non-execution. Hard Filter retains unchecked-argument candidates and its
+restricted pool remains binding during fallback. Held-out data stays unused.
+
+
+## D28 retained candidates with provisional readiness
+
+`docs/plan-c/work-unit-28.md` adds host-computed candidate state to semantic
+interpretation without removing blocked operations or treating unknown arguments
+as fully ready. Snapshots and current read-only refresh are separate from durable
+results and final core validation. The user selected speech-speed changes during
+generation: refuse the edit without cancelling generation or queuing the change.
+Hard Filter remains an evaluation-only helper; D29 shared comparison is separate.
+
+## D27 semantic candidates
+
+`docs/plan-c/work-unit-27.md` defines optional local semantic retrieval and bounded
+candidate expansion above the existing interpreter. Search failure is distinct
+from unsupported, and no similarity score authorizes an effect. Approved
+development recall and final proposal agreement are reported separately. The
+existing All Tools default, durable replay, value guards and generation permission
+remain unchanged. D28/D29 are separate work.
+
+## D26 operation-derived vector index
+
+`docs/plan-c/work-unit-26.md` defines an explicitly rebuilt local vector index,
+source/version/model manifests and capability/application/exact-version filtering.
+The user selected existing Nomic for index lifecycle checks; Japanese retrieval
+quality remains D27. Generated index data never becomes the operation authority.
+The current All Tools flow is unchanged, with no model index-update capability.
+
+## D25 local-model usability and diagnostics
+
+`docs/plan-c/work-unit-25.md` defines development-only tuning, pseudonymous
+allowlisted operation logs, durable diagnostic metadata and waiting/failed-delivery
+UI. The user selected a30-second slow notice. Interpretation and video-generation
+time are separate; the notice never retries or cancels an operation. D24 pending
+labels remain excluded, and the held-out corpus is not used for tuning.
+
+## D24 evaluation material and human approval gate
+
+`docs/plan-c/work-unit-24.md` defines synthetic Japanese cases grouped by source
+request, separate development/held-out storage, independent label review and
+content-bound human approval. This does not change application behavior or tune
+the model. Human-unapproved cases are excluded from final metrics. A safe refusal
+on an unambiguous executable request is not successful task completion.
+
+## D23 local model configuration
+
+`docs/plan-c/work-unit-23.md` defines the local configuration display/check and
+observed real-inference probe. Reuse the existing loopback-only adapter and the
+user-selected downloaded model. A reachable model listing is distinct from
+successful inference. Never substitute a cloud model or fixed reply on failure.
+After real-model failures, the user authorized preventing accidental saves in
+D23 while retaining immediate save for grounded settings. Unspecified numeric
+values, missing explicit speech speed and dropped known pending settings ask
+before any partial save. Response model identity must match the selected ID.
+These checks do not claim general semantic correctness; see the D23 report.
+
+## D22 compound intent contract
+
+`docs/plan-c/work-unit-22.md` extends DEC-07 with atomic multi-setting saves,
+relative changes resolved by the core, and a separately confirmed generation
+bound to the saved revision. Model repair is limited to one additional attempt
+within a shared deadline and cannot execute or replay operations. Existing v1
+receipts and single-operation requests remain compatible.
+
+## D21 connection audit
+
+`docs/plan-c/work-unit-21.md` defines the authorized next step after the user's D20
+video acceptance. Inventory the initial settings through the existing shared core,
+prioritizing subtitle mode, speech speed, speaker and pronunciation. Reuse existing
+handlers and specialist validation; classify exclusions rather than adding duplicate
+operation IDs. D22 compound intents and retrieval remain separate work.
+
+## D20 acceptance scope
+
+`docs/plan-c/work-unit-20.md` defines G3 acceptance: a continuous browser journey,
+UI/DB/media reconciliation, regression checks, a short demo and updated remaining
+work/cost/schedule. Synthetic provider verification and human/real-speech acceptance
+are separate judgments. D21 is now separately authorized above; retrieval remains deferred.
+`docs/plan-c/work-report-20.md` records the initial controlled test and the subsequent
+real-model/VOICEVOX run. On 2026-09-20 the user accepted the demonstration video and
+instructed work to proceed. D21 is authorized on that basis; hands-on user operation
+was not reported and must not be recorded as performed. The initial twelve fixed
+replies remain separate from the subsequent real-inference evidence (38/39 probes).
+
+## D19 implementation contract
+
+`docs/plan-c/work-unit-19.md` defines durable linked answers/corrections, pending
+intent invalidation, explicit target switching and bounded dialogue context.
+Corrections use the current saved value and new IDs. Old answers and superseded
+confirmations must fail current-state checks before any effect.
+The implementation and executed checks are recorded in `docs/plan-c/work-report-19.md`.
+Dialogue utterances are stored locally, bounded per turn, separately from immutable
+core receipts; application logs do not contain their bodies. The model receives at
+most eight prior turns and 6000 characters of serialized dialogue plus current text.
+Project switching retains pending requests per original target; this is an explicit
+implementation assumption, not a user-confirmed preference. D20 remains separate.
+
+## D18 implementation
+
+`docs/plan-c/work-unit-18.md` defines the inline natural-language panel and result
+card above the existing detail-page forms. The user chose the top-of-page layout.
+Use D17's durable language API, confirmed core results, recorded setting differences
+and verified job/artifact state. Reload looks up existing requests; only explicit
+user actions submit or confirm. Retrieval remains D26–D27 and multi-turn state D19.
+Executed browser and automated checks are recorded in `docs/plan-c/work-report-18.md`.
+
+## D17 implementation
+
+`docs/plan-c/work-unit-17.md` defines All Tools orchestration above the unchanged
+read-only interpreter and existing operation core. Persist interpretation identity
+before execution, reuse durable core receipts, bind target/revision outside the
+model, and require explicit permission for generation proposals. D18 UI and D19
+multi-turn corrections remain separate. Product choices and actual verification
+are recorded in `docs/plan-c/work-report-17.md`. Settings save immediately;
+generation requires separate confirmation. Ambiguous increments ask, while the
+existing "slightly" rule remains 2 px. Explicit job/history references are checked
+outside the model before execution; original structured interpretations remain
+inspectable even when the application rejects a guessed reference.
+
+## D16 implementation boundary
+
+The user requested D16. `docs/plan-c/work-unit-16.md` defines the separate,
+read-only model interpretation boundary and synthetic probe. Model output is a
+strictly validated proposal and never executes an operation itself. D17 orchestration
+is separate from that interpreter; D18 adds the product UI above. The D12–D15 guarantees below
+continue unchanged.
+D16 is verified with deterministic tests and the selected local Ternary Bonsai
+model. `docs/plan-c/work-report-16.md` records the confirmed connection settings,
+five synthetic cases, observed failures, corrections, and remaining D17/D18 scope.
+
+## Current delivery: D12–D15
+
+D12–D15 is implemented and verified. Read `docs/plan-c/work-report-12-15.md`
+for executed evidence. Follow
+`docs/plan-c/work-unit-12-15.md` for the implementation contract and the user's
+choices: all successful video history, no edits while generating, arbitrary recorded
+configuration restore, cooperative cancellation, and explicit retry using current
+settings. Model interpretation is added separately in D16 above.
+
+## Historical D11 amendment (superseded where D12–D15 extends it)
+
+The user requested D11 from the production schedule. The following contract
+extends the G1 baseline below; work units 12+ remain separate.
+
+- Persist a globally unique client `request_id`, normalized request content,
+  resolved project, base/result revision, resolved absolute arguments, explicit
+  generation intent, job reference, and the original operation result.
+- For durable setting requests, require both `request_id` and integer
+  `base_revision`. Same ID/content returns the stored result before looking at
+  current settings, readiness, or resolving a relative value. Different content
+  with that ID returns HTTP 409. Rejected/uncommitted requests do not reserve IDs.
+- Add `project.subtitle-font-size.adjust` v1 with strict integer `delta`.
+  `delta: 2` represents the existing "slightly larger" rule. Resolve it once
+  within the transaction; the final value must remain within 16–120.
+- Add durable `Project.revision`, initially 1. Successful changed settings and
+  user block edits advance it once; progress and artifact writes do not.
+- Serialize short setting transactions with SQLite `BEGIN IMMEDIATE`. Revision
+  validation, relative resolution, mutation, receipt and optional pending job
+  insertion commit together or roll back together. Handler functions do not commit.
+- `generation_requested: true` explicitly requests the existing full pipeline;
+  a pending job is saved in the same transaction even for unchanged settings.
+  A dispatcher picks up pending receipt-linked jobs, including after restart.
+  Pending/running durable jobs block further project edits. Running jobs whose
+  process was lost are reported failed at single-server startup, never blindly
+  reissued to external providers. Full running-job recovery is D14 work.
+- Preserve legacy absolute v1 calls without an ID (no replay guarantee) and the
+  existing UI/API. ID-bearing status reads save a receipt but do not mutate the
+  project. GET `/api/operations/requests/{request_id}` returns the saved result.
+- No model call, new dependency, destructive migration, or D12 dependency planner
+  is introduced. Verify same/different content, concurrent processes, crash before
+  and after commit, restart replay, revision conflicts, and pending-job recovery.
+
+The historical sections below describe work units 01–10. D11 details and migration
+instructions are in `docs/plan-c/work-unit-11.md` and supersede the observation-only
+revision and handler-owned-commit descriptions below.
 
 ## Goal
 

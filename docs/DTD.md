@@ -1,4 +1,229 @@
-# BlockVideo Plan C Work Units 01–10 — Detailed Technical Design
+# BlockVideo Plan C — Detailed Technical Design
+
+## D30 functional candidate boundary
+
+Connection metadata reports the host-configured all_tools/semantic/stateful mode
+without loading an index or exposing paths. The UI displays configuration rather
+than asserting successful search. An isolated demo startup script selects ordinary
+configuration before importing the application, then serves the built frontend
+on loopback. It never imports the D29 comparison selector or injects experiment
+state into product prompts. Search, parser, guards and execution remain separate.
+See `plan-c/work-unit-30.md` for acceptance and outstanding decision boundaries.
+
+## D29 comparison boundary
+
+`evaluation.comparison` composes the existing Interpreter/SemanticInterpreter;
+`evaluation.comparison_runner` supplies isolated databases to the unchanged
+LanguageOperationService and registered OperationService. A structural candidate
+interpreter protocol keeps application imports independent of evaluation code.
+All modes share a frozen, allowlisted raw state snapshot, parser, value/reference
+guards, final readiness, confirmations and transactions. Only candidate membership,
+readiness presentation and the documented search stages differ. Experiment-only
+CLI configuration enables Hard Filter; ordinary application configuration does not.
+Review follow-up reporting excludes host-only/unmeasured trials from model timing,
+separates deadline from transport failures, and retains partial reports after a
+started experiment fails. Submit scoring additionally checks project status and
+the full settings-history sequence. Reanalysis of immutable evidence is labelled
+as offline rescoring, not new inference or a new acceptance run.
+See `plan-c/work-unit-29.md` and `plan-c/comparison-modes.md`.
+
+
+## D28 provisional candidate-state boundary
+
+`operations.candidate_readiness` uses the existing target/busy check without
+constructing an executable request. Immutable candidate DTOs belong to operation
+contracts. Language orchestration supplies a read-only snapshot callback to the
+semantic interpreter; the latter still cannot import DB/execution modules. Each
+stage includes exact-version annotations without changing rank/membership. The
+interpreter accepts only annotations for its offered candidates and selected target.
+The language read-only refresh endpoint reads current state for recorded candidate
+IDs, never runs a model/index/executor and never overwrites the old response.
+`evaluation.readiness_filter` is an experiment-only consumer of these snapshots,
+not imported by product modules. See `plan-c/work-unit-28.md`.
+
+## D27 semantic interpretation boundary
+
+`app.retrieval.ranking` adds read-only exact cosine ranking. The optional
+`onnx_embeddings` adapter loads hash-pinned E5 data locally and uses masked mean
+pooling with no silent truncation. `app.semantic_interpretation` composes retrieval
+and the existing read-only interpreter; it cannot import a DB or an executor.
+Language orchestration may inject this component after the durable claim and
+before the unchanged guards/core. Source freshness is checked before and after
+inference; fallback never widens static scope. See `plan-c/work-unit-27.md` for
+the bounded5→8→full-scope policy, deadline and diagnostic contract. Index path
+configuration is opt-in; no `.env`, default flow or comparison-mode UI changes.
+
+## D26 index boundary
+
+`app.retrieval` reads operation contracts/catalog only. `sources` extracts public
+description/example/input documents and exact app/capability bindings from
+`operations/search_scope.json`. `embeddings` returns normalized finite vectors
+through a bounded loopback HTTP adapter. `builder` writes a content-addressed
+bundle and atomically replaces its manifest; only `scripts.operation_index`
+invokes it. `reader` checks current source hashes, model profile and regenerated
+documents, then filters exact scope without inspecting live readiness. No package
+imports execution, handlers, DB, evaluation corpora or language orchestration.
+Existing application entry points do not import retrieval in D26.
+
+This is index lifecycle infrastructure. D27 supplies cosine ranking and candidate
+fallback; D28 adds state/readiness presentation; D29 connects comparison modes.
+The developer CLI validates local weight bytes against the profile fingerprint;
+the HTTP response must match the model ID and dimension. The local serving process
+is trusted to use those weights: an API model name alone cannot attest its bytes.
+No new dependency, migration or runtime configuration default is introduced.
+
+## D25 diagnostic and development-probe boundary
+
+See `plan-c/work-unit-25.md`. Language orchestration records additive timing and
+candidate metadata in its existing response JSON; receipts still own effects.
+Its observability helper emits a fixed allowlist, with process-local HMAC aliases
+for identifiers, and never logs free text or exceptions. The interpreter remains
+read-only. The frontend retains the frozen request while showing elapsed waiting
+and the user-selected30-second notice separately from video progress.
+
+The new development probe is an explicitly invoked script with loopback transport,
+not a product dependency. It reads only approved development cases through the
+D24 gate and records synthetic proposal accuracy separately from core effect tests.
+The existing offline `scripts.evaluation_cases` still has no inference/network path.
+
+D25 also changes model-facing argument property presentation. Settings output
+uses three equivalent schema alternatives (alphabetical, common settings first,
+and canonical order) because local constrained decoding can depend on key order.
+Every alternative has exactly the catalog's fields and constraints. No candidate
+is removed; the core schema, validation, transactions and generation permission
+are unchanged. Probe manifests fingerprint the ordered payload and response
+schema as well as the prompt/catalog/corpus. This is output compatibility, not
+retrieval or final-evaluation scoring. See the D25 report for measured tradeoffs.
+
+## D24 offline evaluation tooling
+
+`backend/evaluation` owns data validation, content fingerprints, review ledgers
+and offline review rendering. It reads operation metadata for label-schema checks;
+the application never imports it. `scripts.evaluation_cases` has no interpreter,
+database, provider or network execution path. Development examples remain in
+`evaluation/d24`; held-out text/labels live outside the implementation workspace.
+Only group/count/hash and review-status metadata returns to the implementation
+agent. Approved subset manifests require separate, matching human and independent
+AI ledgers. Later runners must use that eligibility gate; old development probes
+do not become approved final evaluators automatically.
+
+## D23 connection observability
+
+See `plan-c/work-unit-23.md`. A separate read-only language connection route uses
+the interpreter's transport URL validation and a bounded model-list reader. It
+does not receive project input, invoke inference, select models or access the
+operation executor. The UI shows only an allowlist of connection settings and
+fixed status messages. Development probes own metrics and synthetic evidence;
+production request/model bodies are not added to application logs.
+
+The user authorized fixes for observed real-model accidental saves. Language
+orchestration now checks supplied subtitle quantities, other numeric settings,
+explicit speech-speed presence and known pending compound fields before creating
+an executable request. Untrusted prior proposals may veto a partial save but
+never provide executable arguments. Uncertain values ask; no automatic rewriting
+or additional semantic repair call is added. LocalChatAdapter also rejects a
+missing/mismatched response model ID before returning content to the interpreter.
+
+## D22 compound intent and repair
+
+See `plan-c/work-unit-22.md`. The interpreter still has no execution capability.
+Version 2 of settings.update normalizes relative arguments in the core writer
+transaction, then uses the existing settings handler. Language orchestration
+persists generation intent and reconstructs a separate revision-bound generation
+request from the settings receipt. Both receipts remain authoritative; no model
+call or provider call runs inside a database writer transaction.
+
+## D21 connection audit
+
+See `plan-c/work-unit-21.md`. The settings editor already submits
+`project.settings.update` through the durable core, as does language orchestration.
+The legacy PATCH also uses `validate_settings` and `apply_project_settings`.
+Verify specialized pronunciation validation and stage invalidation through these
+entry points without adding a second settings writer or duplicate field handlers.
+
+## D20 acceptance boundary
+
+See `plan-c/work-unit-20.md`. Exercise existing production APIs, dialogue/core and
+the managed generation pipeline in isolated synthetic storage. Fault injection
+belongs only to the test runner. Acceptance fixes must preserve the dependency
+direction and the immutable request/revision/confirmation contracts below.
+
+## D19 dialogue boundary
+
+See `plan-c/work-unit-19.md`. A dialogue ledger and orchestration helper retain
+bounded context separately from immutable operation receipts. Models store data;
+only orchestration reads it into a read-only interpretation context. An optional
+server-injected core guard checks dialogue invalidation inside the same writer
+transaction as effects, after replay lookup. No reverse import or model-defined
+callable is permitted. Frontend continuation mode always creates a new request ID.
+The language pronunciation helper binds proposed readings to supplied utterances
+and merges additions into stored entries without exposing the existing glossary
+to the model. Core revision/readiness validation still authorizes the final save.
+`plan-c/work-report-19.md` records the final tests and actual model/browser/video
+evidence. The additive `language_turns` table contains local utterance text; old
+language records without a turn keep their replay behavior but cannot be continued.
+
+## D18 UI boundary
+
+See `plan-c/work-unit-18.md`. Frontend language contracts/client, durable session
+storage, a request lifecycle hook and result presentation are separate modules.
+The project page composes the panel with existing controls/history. No new model
+interpreter, executor, retrieval or automatic generation path is introduced.
+Server receipts and revision history own displayed effects; model prose does not.
+Unknown HTTP delivery refreshes observed project/history state but never implies a
+successful request. Explicit resend retains the exact input; reload only looks up.
+`plan-c/work-report-18.md` records implementation and executed verification.
+
+## D17 orchestration
+
+See `plan-c/work-unit-17.md`. `language_operations` depends on interpretation,
+operation metadata/core and the new language-request ledger. API routes compose
+these parts; no reverse import into orchestration from operations or shared
+services is permitted. The interpreter continues to have no execution capability.
+Interpretation runs outside writer transactions. Core receipts own committed
+effects and recover the gap between core commit and orchestration acknowledgement.
+The reference-binding check rejects model-guessed job/history IDs before preparing
+an executable request. It retains the model's parsed proposal and returns a separate
+application clarification. Generation proposals always need a confirmation bound
+to the stored request. See `plan-c/work-report-17.md` for verification and API use.
+
+## D16 model boundary
+
+The current requested addition is specified in `plan-c/work-unit-16.md`.
+The new `app.interpretation` package depends only on operation metadata/schema,
+its own contracts, and an injected transport. It must never depend on operation
+execution/bootstrap/handlers, database/models, or workers. A synthetic CLI probe
+owns HTTP transport lifetime. D17 separately adds orchestration/API routes, while
+this interpreter has no execution capability. D18 adds the product UI above.
+Local HTTP structured output support is checked against official LM Studio docs
+and an actual synthetic probe; new SDK assumptions are not introduced.
+The verified local configuration explicitly disables thinking for the bounded
+768-token output (`reasoning_effort: "none"`). This setting is opt-in at the
+transport boundary and does not weaken schema validation or add retries.
+Actual test outcomes and limits are in `plan-c/work-report-16.md`.
+
+## Current implementation contract: D12–D15
+
+The user's D15 request and answered initial product questions authorize the work in
+`plan-c/work-unit-12-15.md`. It supersedes D11's full-pipeline-only dispatch,
+interrupted-job failure policy and deferred history/control statements below.
+D11 replay/transaction guarantees and dependency direction remain mandatory.
+Executed verification and G2 judgment are in `plan-c/work-report-12-15.md`.
+`generation_plan` declares dependencies, `generation_snapshots` freezes inputs,
+`artifact_store` verifies/publicizes immutable outputs, and `external_calls` journals
+provider effects. API/history and operation handlers use these services; services
+never import API/operations. Project/job ID reservations prevent reference reuse.
+
+## Historical amendment: D11 (2026-09-19)
+
+Read `plan-c/work-unit-11.md` for the approved-by-task D11 implementation contract.
+It extends the G1 design below with durable receipts, integer project revisions,
+transaction-owned commits, relative subtitle changes and a transactional pending
+generation job. It supersedes G1's timestamp token and deferred-request sections.
+The existing dependency direction remains: models and shared services never import
+operations; the dispatcher depends on persisted models and the existing worker.
+The user request authorizes this separate D11 change; units 01–10 records remain
+historical evidence. No claim of a separate human design-review meeting is made.
 
 ## 1. Document Control
 

@@ -42,7 +42,14 @@ def test_lists_definitions_from_the_catalog(client: TestClient) -> None:
     response = client.get("/api/operations")
     assert response.status_code == 200
     assert [item["operation_id"] for item in response.json()] == [
+        "project.generation.cancel",
+        "project.generation.retry",
+        "project.generation.start",
+        "project.settings.restore",
+        "project.settings.update",
+        "project.settings.update",  # v2 with atomic relative settings.
         "project.status.get",
+        "project.subtitle-font-size.adjust",
         "project.subtitle-font-size.set",
     ]
 

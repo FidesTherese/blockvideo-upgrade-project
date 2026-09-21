@@ -1,0 +1,511 @@
+{
+  "$defs": {
+    "Continuation": {
+      "additionalProperties": false,
+      "properties": {
+        "parent_request_id": {
+          "minLength": 1,
+          "title": "Parent Request Id",
+          "type": "string"
+        },
+        "relation": {
+          "enum": [
+            "answer",
+            "correction",
+            "dismiss"
+          ],
+          "title": "Relation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "parent_request_id",
+        "relation"
+      ],
+      "title": "Continuation",
+      "type": "object"
+    },
+    "Effects": {
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "enum": [
+            "saved",
+            "saved_awaiting_confirmation",
+            "awaiting_confirmation",
+            "queried",
+            "needs_input",
+            "unsupported",
+            "dismissed",
+            "blocked",
+            "replayed",
+            "cancel_requested",
+            "cancelled",
+            "unchanged",
+            "generation_queued"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "question_for": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Question For",
+          "type": "array"
+        },
+        "settings_delta": {
+          "additionalProperties": true,
+          "title": "Settings Delta",
+          "type": "object"
+        },
+        "revision_delta": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Revision Delta",
+          "type": "integer"
+        },
+        "new_jobs": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "New Jobs",
+          "type": "integer"
+        },
+        "confirmation_required": {
+          "title": "Confirmation Required",
+          "type": "boolean"
+        },
+        "job_assertions": {
+          "additionalProperties": true,
+          "title": "Job Assertions",
+          "type": "object"
+        },
+        "artifact_policy": {
+          "enum": [
+            "preserve_all_no_new_publication",
+            "job_may_publish_on_success"
+          ],
+          "title": "Artifact Policy",
+          "type": "string"
+        },
+        "receipt_rule": {
+          "enum": [
+            "new_request",
+            "first_result",
+            "same_id_conflict",
+            "none"
+          ],
+          "title": "Receipt Rule",
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome",
+        "reason",
+        "question_for",
+        "settings_delta",
+        "revision_delta",
+        "new_jobs",
+        "confirmation_required",
+        "job_assertions",
+        "artifact_policy",
+        "receipt_rule"
+      ],
+      "title": "Effects",
+      "type": "object"
+    },
+    "Event": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "none",
+            "resend_identical",
+            "restart_resend",
+            "same_id_different_body",
+            "concurrent_identical",
+            "revision_race",
+            "confirm_generation",
+            "confirm_twice",
+            "switch_target"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "details"
+      ],
+      "title": "Event",
+      "type": "object"
+    },
+    "Expected": {
+      "additionalProperties": false,
+      "properties": {
+        "interpretation": {
+          "enum": [
+            "operation",
+            "clarification",
+            "unsupported",
+            "no_operation",
+            "not_called"
+          ],
+          "title": "Interpretation",
+          "type": "string"
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/$defs/Proposal"
+          },
+          "title": "Operations",
+          "type": "array"
+        },
+        "target_project_id": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target Project Id"
+        },
+        "submit": {
+          "$ref": "#/$defs/Effects"
+        },
+        "after_event": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effects"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rationale": {
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "rule_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Rule Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "interpretation",
+        "operations",
+        "target_project_id",
+        "submit",
+        "after_event",
+        "rationale",
+        "rule_ids"
+      ],
+      "title": "Expected",
+      "type": "object"
+    },
+    "InitialState": {
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "minimum": 1,
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "settings": {
+          "additionalProperties": true,
+          "title": "Settings",
+          "type": "object"
+        },
+        "project_status": {
+          "title": "Project Status",
+          "type": "string"
+        },
+        "jobs": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Jobs",
+          "type": "array"
+        },
+        "history": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "History",
+          "type": "array"
+        },
+        "artifact_revisions": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Artifact Revisions",
+          "type": "array"
+        },
+        "prior_turns": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Prior Turns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "project_id",
+        "revision",
+        "settings",
+        "project_status",
+        "jobs",
+        "history",
+        "artifact_revisions",
+        "prior_turns"
+      ],
+      "title": "InitialState",
+      "type": "object"
+    },
+    "Proposal": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "operation_version": {
+          "minimum": 1,
+          "title": "Operation Version",
+          "type": "integer"
+        },
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "generate_after_save": {
+          "title": "Generate After Save",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation_id",
+        "operation_version",
+        "arguments",
+        "generate_after_save"
+      ],
+      "title": "Proposal",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "new_synthetic",
+            "prior_development"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "reference": {
+          "minLength": 1,
+          "title": "Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "reference"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "Request": {
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "target_project_id": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target Project Id"
+        },
+        "base_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Base Revision"
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Continuation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "request_id",
+        "text",
+        "target_project_id",
+        "base_revision",
+        "continuation"
+      ],
+      "title": "Request",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "case_id": {
+      "pattern": "^D24-[DH]\\d{3}$",
+      "title": "Case Id",
+      "type": "string"
+    },
+    "group_id": {
+      "pattern": "^D24-[DH]G\\d{2}$",
+      "title": "Group Id",
+      "type": "string"
+    },
+    "split": {
+      "enum": [
+        "development",
+        "held_out"
+      ],
+      "title": "Split",
+      "type": "string"
+    },
+    "source_request": {
+      "minLength": 1,
+      "title": "Source Request",
+      "type": "string"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "tags": {
+      "items": {
+        "enum": [
+          "paraphrase",
+          "negation",
+          "omission",
+          "correction",
+          "compound",
+          "blocked",
+          "unsupported",
+          "resend",
+          "race",
+          "boundary",
+          "target",
+          "confirmation",
+          "history",
+          "failure",
+          "status"
+        ],
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Tags",
+      "type": "array"
+    },
+    "situation": {
+      "minLength": 1,
+      "title": "Situation",
+      "type": "string"
+    },
+    "initial": {
+      "$ref": "#/$defs/InitialState"
+    },
+    "request": {
+      "$ref": "#/$defs/Request"
+    },
+    "event": {
+      "$ref": "#/$defs/Event"
+    },
+    "expected": {
+      "$ref": "#/$defs/Expected"
+    },
+    "known_limitation": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Known Limitation"
+    }
+  },
+  "required": [
+    "schema_version",
+    "case_id",
+    "group_id",
+    "split",
+    "source_request",
+    "provenance",
+    "tags",
+    "situation",
+    "initial",
+    "request",
+    "event",
+    "expected"
+  ],
+  "title": "Case",
+  "type": "object"
+}

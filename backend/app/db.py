@@ -69,7 +69,7 @@ def get_engine():
         url = _make_engine_url(settings.database_url)
         _engine = create_engine(
             url,
-            connect_args={"check_same_thread": False},
+            connect_args={"check_same_thread": False, "timeout": 30},
             future=True,
         )
     return _engine
@@ -103,6 +103,13 @@ def init_db() -> None:
     from app.models import block as _block  # noqa: F401
     from app.models import job as _job  # noqa: F401
     from app.models import project as _project  # noqa: F401
+    from app.models import operation_request as _operation_request  # noqa: F401
+    from app.models import artifact as _artifact  # noqa: F401
+    from app.models import external_call as _external_call  # noqa: F401
+    from app.models import settings_revision as _settings_revision  # noqa: F401
+    from app.models import project_identity as _project_identity  # noqa: F401
+    from app.models import language_request as _language_request  # noqa: F401
+    from app.models import language_turn as _language_turn  # noqa: F401
 
     engine = get_engine()
     Base.metadata.create_all(bind=engine)

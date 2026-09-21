@@ -5,11 +5,24 @@ from pathlib import Path
 
 from app.operations.catalog import load_catalog
 from app.operations.handlers import get_project_status, set_subtitle_font_size
+from app.operations.control_handlers import (
+    update_settings, start_generation, cancel_generation, retry_generation, restore_settings,
+)
 from app.operations.registry import HandlerRegistry, RegistryError
 from app.operations.service import OperationService
 
 _DEFAULT_CATALOG = Path(__file__).with_name("definitions.json")
 _HANDLER_POLICIES = {
+    "project.update_settings_v2": ("project.settings.update", 2, "project_editable", "settings_saved", frozenset({"video"})),
+    "project.update_settings": ("project.settings.update", 1, "project_editable", "settings_saved", frozenset({"video"})),
+    "project.start_generation": ("project.generation.start", 1, "project_editable", "job_queued", frozenset({"video"})),
+    "project.cancel_generation": ("project.generation.cancel", 1, "project_exists", "cancellation_requested", frozenset({"video"})),
+    "project.retry_generation": ("project.generation.retry", 1, "project_editable", "job_queued", frozenset({"video"})),
+    "project.restore_settings": ("project.settings.restore", 1, "project_editable", "settings_restored", frozenset({"video"})),
+    "project.adjust_subtitle_font_size": (
+        "project.subtitle-font-size.adjust", 1, "project_editable",
+        "subtitle_font_size_saved", frozenset({"video"}),
+    ),
     "project.get_status": (
         "project.status.get",
         1,
@@ -30,8 +43,16 @@ _HANDLER_POLICIES = {
 def build_operation_service(catalog_path: Path = _DEFAULT_CATALOG) -> OperationService:
     """Build and cross-check catalog metadata against handler safety policy."""
     registry = HandlerRegistry()
+    registry.register("project.update_settings", update_settings)
+    registry.register("project.update_settings_v2", update_settings)
+    registry.register("project.start_generation", start_generation)
+    registry.register("project.cancel_generation", cancel_generation)
+    registry.register("project.retry_generation", retry_generation)
+    registry.register("project.restore_settings", restore_settings)
     registry.register("project.get_status", get_project_status)
     registry.register("project.set_subtitle_font_size", set_subtitle_font_size)
+    # Relative arguments are resolved and validated before the same absolute setter.
+    registry.register("project.adjust_subtitle_font_size", set_subtitle_font_size)
     catalog = load_catalog(catalog_path)
     for definition in catalog.definitions:
         registry.require(definition.handler_key)

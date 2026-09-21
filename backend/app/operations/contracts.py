@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -50,6 +50,9 @@ class OperationRequest(BaseModel):
     target: OperationTarget = Field(default_factory=OperationTarget)
     arguments: dict[str, Any] = Field(default_factory=dict)
     observed_state_revision: str | None = None
+    request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    base_revision: int | None = Field(default=None, ge=1, strict=True)
+    generation_requested: bool = Field(default=False, strict=True)
 
 
 class ReadinessResult(BaseModel):
@@ -63,6 +66,33 @@ class ReadinessResult(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     project_id: int | None = None
     state_revision: str | None = None
+    revision: int | None = None
+
+
+class CandidateReadiness(BaseModel):
+    """Target/state hint before argument interpretation, never an execution permit."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    operation_id: str = Field(min_length=1, max_length=128)
+    operation_version: int = Field(ge=1)
+    phase: Literal["candidate_preview"] = "candidate_preview"
+    arguments_checked: Literal[False] = False
+    readiness: Literal["ready", "needs_input", "blocked", "unsupported"]
+    reason_code: Literal["target_required", "target_not_found", "project_busy",
+                         "arguments_unchecked", "operation_not_found"] | None = None
+    missing_fields: tuple[str, ...] = Field(default=(), max_length=32, strict=False)
+    project_id: int | None = Field(default=None, ge=1)
+    revision: int | None = Field(default=None, ge=1)
+
+
+class CandidateReadinessSnapshot(BaseModel):
+    """Time-bound observation; generation state can change without a new revision."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    observed_at: float = Field(ge=0)
+    candidates: tuple[CandidateReadiness, ...] = Field(max_length=32, strict=False)
 
 
 class OperationResult(BaseModel):
@@ -75,6 +105,13 @@ class OperationResult(BaseModel):
     changed: bool
     state_revision: str
     data: dict[str, Any]
+    revision: int = 1
+    request_id: str | None = None
+    base_revision: int | None = None
+    resolved_arguments: dict[str, Any] = Field(default_factory=dict)
+    generation_requested: bool = False
+    job_id: int | None = None
+    result_ref: str | None = None
 
 
 class OperationDefinition(BaseModel):

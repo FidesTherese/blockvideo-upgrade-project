@@ -18,6 +18,8 @@ import abc
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.external_calls import ExternalOutcomeUnknown
+
 
 @dataclass
 class LLMMessage:
@@ -184,7 +186,7 @@ async def safe_chat_json(provider: LLMProvider, request: LLMRequest) -> dict[str
     """
     try:
         return await provider.chat_json(request)
-    except ProviderError:
+    except (ProviderError, ExternalOutcomeUnknown):
         raise
     except Exception as exc:  # pragma: no cover - defensive
         raise ProviderError(str(exc), safe=True, original=exc) from exc

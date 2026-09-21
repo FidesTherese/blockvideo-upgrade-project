@@ -19,6 +19,7 @@ from app.models.project import Project
 from app.models.job import GenerationJob
 from app.models.block import BlockStatus
 from app.schemas import BlockPatch, BlockSummary, GenerateAllResponse, JobSummary
+from app.services.transactions import begin_write
 from app.workers.job_runner import (
     enqueue_block_audio_rerun,
     enqueue_block_visual_rerun,
@@ -71,6 +72,7 @@ def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db
         regeneration job.
 
     """
+    begin_write(db)
     block = db.get(Block, block_id)
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
@@ -130,6 +132,8 @@ def patch_block(block_id: int, payload: BlockPatch, db: Session = Depends(get_db
         # An explicit plan is ready to render, including when source_text was
         # edited in this request. Null deliberately asks the planner to rebuild.
         block.status_visual_plan = BlockStatus.completed if plan is not None else BlockStatus.pending
+    if db.is_modified(block, include_collections=False):
+        block.project.revision += 1
     db.commit()
     db.refresh(block)
     return _block_summary(block)

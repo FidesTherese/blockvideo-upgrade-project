@@ -1,10 +1,8 @@
 """Resolve project targets and evaluate current execution readiness."""
 from __future__ import annotations
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.job import GenerationJob, JobStatus
 from app.models.project import Project
 from app.operations.contracts import (
     OperationDefinition,
@@ -13,11 +11,12 @@ from app.operations.contracts import (
     ReadinessResult,
 )
 from app.workers.job_runner import job_registry
+from app.services.job_records import has_active_project_job
 
 
 def project_state_revision(project: Project) -> str:
-    """Return the current observation token without claiming durable revision semantics."""
-    return project.updated_at.isoformat() if project.updated_at else "uncommitted"
+    """Keep the string token field compatible while using a durable revision."""
+    return str(project.revision)
 
 
 def resolve_project(db: Session, target: OperationTarget) -> Project | None:
@@ -27,14 +26,8 @@ def resolve_project(db: Session, target: OperationTarget) -> Project | None:
 
 
 def has_live_job(db: Session, project_id: int) -> bool:
-    """Return whether a pending/running row also has a live process task."""
-    job_ids = db.scalars(
-        select(GenerationJob.id).where(
-            GenerationJob.project_id == project_id,
-            GenerationJob.status.in_([JobStatus.pending, JobStatus.running]),
-        )
-    )
-    return any(job_registry.is_running(job_id) for job_id in job_ids)
+    """Return whether durable intent or a live process task blocks mutation."""
+    return has_active_project_job(db, project_id, job_registry.is_running)
 
 
 def evaluate_readiness(
@@ -66,10 +59,12 @@ def evaluate_readiness(
             reason_code="project_busy",
             project_id=project_id,
             state_revision=project_state_revision(project),
+            revision=project.revision,
         )
     return ReadinessResult(
         operation_id=definition.operation_id,
         readiness=Readiness.ready,
         project_id=project_id,
         state_revision=project_state_revision(project),
+        revision=project.revision,
     )

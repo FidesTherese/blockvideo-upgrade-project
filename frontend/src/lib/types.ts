@@ -8,7 +8,8 @@ export type ProjectStatus =
   | 'rendering'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'unknown';
 
 /** Per-stage block status values. */
 export type BlockStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
@@ -39,6 +40,7 @@ export type VisualType =
 /** Compact project row used by the project list. */
 export interface ProjectSummary {
   id: number;
+  revision: number;
   title: string;
   status: ProjectStatus;
   progress: number;
@@ -110,6 +112,73 @@ export interface JobSummary {
   started_at: string | null;
   finished_at: string | null;
   error_message: string | null;
+  cancel_requested?: boolean;
+  input_revision?: number | null;
+  parent_job_id?: number | null;
+  recovery_message?: string | null;
+  retryable?: boolean;
+  retry_blocked_reason?: string | null;
+  plan?: { stages: string[] } | null;
+}
+
+export type ProjectSettings = Omit<CreateProjectInput, 'source_script' | 'use_fake_providers' | 'providers'>;
+
+export interface VideoArtifact {
+  id: number;
+  job_id: number | null;
+  revision: number | null;
+  created_at: string;
+  video_url: string;
+  subtitle_url: string | null;
+  is_current: boolean;
+  available: boolean;
+}
+
+export interface SettingsVersion {
+  revision: number;
+  created_at: string;
+  restored_from_revision: number | null;
+  changed_fields: string[];
+  settings: Record<string, unknown>;
+}
+
+export interface ProjectHistory {
+  revision: number;
+  output_state: 'none' | 'current' | 'stale' | 'missing';
+  current_artifact_id: number | null;
+  artifacts: VideoArtifact[];
+  settings_versions: SettingsVersion[];
+  jobs: JobSummary[];
+}
+
+export type ProjectOperationId =
+  | 'project.status.get'
+  | 'project.subtitle-font-size.set'
+  | 'project.subtitle-font-size.adjust'
+  | 'project.settings.update'
+  | 'project.settings.restore'
+  | 'project.generation.start'
+  | 'project.generation.cancel'
+  | 'project.generation.retry';
+
+export type PartialGenerationKind = 'rerender' | 'block_visual' | 'block_audio';
+
+export interface OperationRequest {
+  request_id: string;
+  operation_id: ProjectOperationId;
+  operation_version: 1 | 2;
+  target: { project_id: number };
+  base_revision: number;
+  arguments: Record<string, unknown>;
+  generation_requested?: boolean;
+}
+
+export interface OperationResult {
+  operation_id: string;
+  request_id: string;
+  revision: number;
+  job_id: number | null;
+  data: Record<string, unknown>;
 }
 
 /** Full form payload for the detailed project-creation screen. */

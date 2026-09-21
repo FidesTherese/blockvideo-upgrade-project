@@ -317,6 +317,7 @@ class ProjectSummary(BaseModel):
     """
 
     id: int
+    revision: int = 1
     title: str
     status: str
     progress: float
@@ -433,6 +434,13 @@ class JobSummary(BaseModel):
     started_at: str | None
     finished_at: str | None
     error_message: str | None
+    cancel_requested: bool = False
+    input_revision: int | None = None
+    parent_job_id: int | None = None
+    recovery_message: str | None = None
+    retryable: bool = False
+    retry_blocked_reason: str | None = None
+    plan: dict[str, list[str]] | None = None
 
 
 class GenerateAllResponse(BaseModel):

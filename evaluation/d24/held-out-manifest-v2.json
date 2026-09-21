@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "metadata_only": true,
+  "sealed_directory": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2",
+  "case_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\held-out.jsonl",
+  "review_html_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\human-review.changed-only.html",
+  "human_ledger_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\human-review.carried.json",
+  "original_human_ledger_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\human-approval.original-conversation.json",
+  "human_provenance_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\human-approval.provenance.json",
+  "independent_review_ledger_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\independent-ai-review.current.json",
+  "private_review_report_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\independent-review.private.md",
+  "eligible_subset_manifest_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\eligible-subset.current.json",
+  "eligible_case_file_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\eligible-cases.current.jsonl",
+  "review_seal_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v2\\REVIEW-SEALED.json",
+  "counts": {
+    "cases": 200,
+    "groups": 20,
+    "cases_per_group": 10,
+    "changed_from_v1": 32,
+    "unchanged_from_v1": 168,
+    "independent_ai_approved": 200,
+    "independent_ai_pending": 0,
+    "independent_ai_rejected": 0,
+    "human_approved": 168,
+    "human_pending": 32,
+    "human_rejected": 0,
+    "eligible_count": 168
+  },
+  "hashes": {
+    "corpus_sha256": "42168b7d4987bc72d32ca530aa84c419e76f214028ebf8d2e89ebc46e942aca9",
+    "original_v1_corpus_sha256": "adb6f907ac90ff28c59276c81e6e03f4a49805d63d7927ba12c6566b693ca12b",
+    "case_file_sha256": "3396dbd5c76438b96fcfffb17caf00c32a9bf64653dd7ccd9928974cafc736d5",
+    "independent_review_ledger_sha256": "0692639d069b0c20c23ed429c50355506ef24726de9f489b98d6c0671b5a665e",
+    "human_ledger_sha256": "3efd6978e44fb77fa31e1951b3e0c9fadd2e84eaa60a0a0c0ab834e14ce23cfa",
+    "review_html_sha256": "7970f6581f3b7db250347192be6036deb988c2128d5b8973e9e0f6b645307c9e",
+    "eligible_subset_manifest_sha256": "8dde4952ca1d85c69c7a1659e7db6703da59f73b82767f507b4663f74d2c82e3",
+    "eligible_case_file_sha256": "0d07ac1658dd19b6fc394e7875893bc9fb263f08bacaa89da66be30e05d5d8fb",
+    "review_seal_sha256": "3c5156c5e305d5e4f3efcc0ab12b2c6a014fc904c44fbd3bbd87ca75377d3b92",
+    "development_corpus_sha256": "636bf76424480bb6f6bfb71b2971edfed729a90781eaf55105174d71c3f148ae"
+  },
+  "split_checks": {
+    "shared_groups": 0,
+    "shared_normalized_origins": 0,
+    "shared_normalized_requests": 0
+  },
+  "reviewer": "d24_correction_review (independent AI; separate from corpus author and implementation agent)",
+  "reviewed_at": "2026-09-20T12:22:29.668417+00:00",
+  "root_read_content": false,
+  "model_calls": 0,
+  "application_operations_executed": 0,
+  "inference_score": null,
+  "approval_source": "Explicit user conversation report, transcribed to original corpus hashes; no UI export or clicks claimed. Only entire-case hash matches carry forward.",
+  "provenance": {
+    "synthetic_origin_count": 20,
+    "user_authored_origin_count": 0,
+    "original_source_requests_changed": 0,
+    "original_request_objects_changed": 0,
+    "original_group_ids_changed": 0,
+    "original_v1_preserved": true,
+    "prior_candidate_archived": true
+  },
+  "review_artifact_checks": {
+    "html_cases": 200,
+    "html_seeded_human_approved": 168,
+    "html_seeded_human_pending": 32,
+    "html_payload_exactly_bound": true,
+    "all_pending_eligible_cli_exit_code": 2,
+    "all_pending_output_created": false,
+    "visual_qa_this_revision": false
+  },
+  "limitations": [
+    "Procedural isolation is not OS access enforcement.",
+    "200 variants derive from 20 synthetic origins; they are not 200 independent user requests.",
+    "Shared simple operation families and rubric-required state transitions are expected; string checks alone are not semantic independence.",
+    "Changed cases remain human pending and are excluded from the sealed eligible subset.",
+    "Historical Claude browser results are prior evidence; the current seeded approval/filter page has only static binding verification in this review.",
+    "No model inference or comparative score was produced."
+  ]
+}

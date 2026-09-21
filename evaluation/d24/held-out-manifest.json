@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "metadata_only": true,
+  "sealed_directory": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v1",
+  "case_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v1\\held-out.jsonl",
+  "review_html_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v1\\human-review.html",
+  "pending_human_ledger_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v1\\human-review.pending.json",
+  "independent_review_ledger_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v1\\independent-ai-review.json",
+  "private_review_report_path": "C:\\Users\\Danir\\Documents\\BlockVideo-Evaluation\\D24\\held-out-v1\\independent-review.private.md",
+  "counts": {
+    "cases": 200,
+    "groups": 20,
+    "cases_per_group": 10,
+    "independent_ai_approved": 200,
+    "independent_ai_pending": 0,
+    "independent_ai_rejected": 0,
+    "human_approved": 0,
+    "human_pending": 200,
+    "human_rejected": 0,
+    "eligible_count": 0
+  },
+  "hashes": {
+    "corpus_sha256": "adb6f907ac90ff28c59276c81e6e03f4a49805d63d7927ba12c6566b693ca12b",
+    "case_file_sha256": "8c09f552c6a6a89a0e11b1a72ce49c27cb80936369d4015b1d01a366512d21ba",
+    "independent_review_ledger_sha256": "8b4fd0e8e231f51efa255c120269d151eee1cd2fc5a33e54ee75aeb8a7d263b9",
+    "pending_human_ledger_sha256": "076bdddb7263a8cc1051723e42d974d7028825a86951506a02a6c3c1db47ad4f",
+    "review_html_sha256": "b5ad09907fbc3262e6f7abe93ccda7990e75d877e5c03a245f30a82e7591a482",
+    "development_corpus_sha256": "e095e460bd5d969d25caf1a679581441297f100a81ecece363fbce96b969830c"
+  },
+  "split_checks": {
+    "shared_groups": 0,
+    "shared_normalized_origins": 0,
+    "shared_normalized_requests": 0
+  },
+  "prior_evidence_checks": {
+    "distinct_strings_inspected": 94,
+    "normalized_exact_origin_matches": 0,
+    "normalized_exact_request_matches": 0,
+    "distinctive_overlap_groups_replaced_before_freeze": 4,
+    "unresolved_distinctive_overlap_groups": 0
+  },
+  "authorship_and_process": "AI-authored synthetic held-out origins created by a separate author from normative specification/catalog. Independent reviewer inspected every case and compared prior development evidence. All variants stay within their original group. No user-authored sample or human approval is claimed.",
+  "limitations": [
+    "Procedural isolation, not OS access enforcement.",
+    "Authorship/process independence is not statistical independence or unseen-operation generalization.",
+    "Common catalog task families and rubric-prescribed state transitions intentionally overlap development.",
+    "200 cases are variants of 20 synthetic origins, not 200 independent user requests.",
+    "All human reviews remain pending; no final aggregation eligible.",
+    "Browser visual QA unperformed; no local-file policy workaround attempted."
+  ],
+  "reviewer": "d24_label_reviewer",
+  "reviewed_at": "2026-09-19T18:41:06.941911+00:00",
+  "generated_at": "2026-09-19T18:42:58.054981+00:00",
+  "root_read_content": false,
+  "model_calls": 0,
+  "application_operations_executed": 0,
+  "inference_score": null,
+  "validation": "Strict case/catalog/minimal-state/dialogue loader, content-bound ledgers, split_summary, and per-case semantic review passed.",
+  "review_artifact_checks": {
+    "html_cases": 200,
+    "html_initial_human_pending": 200,
+    "html_initial_human_approved": 0,
+    "eligible_cli_refused": true,
+    "aggregate_output_created": false,
+    "visual_qa_performed": false
+  }
+}

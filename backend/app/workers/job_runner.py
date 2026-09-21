@@ -18,17 +18,17 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
-
 from app.core.logging import log
 from app.db import get_session_factory
 from app.models.job import GenerationJob, JobStatus
-from app.services.pipeline import (
-    rerender_project,
-    rerun_block_audio,
-    rerun_block_visual,
-    run_full_pipeline,
-)
+from app.models.project import Project, ProjectStatus
+from app.services.pipeline import run_generation_job
+from app.services.external_calls import ExternalOutcomeUnknown, has_unresolved_calls, job_call_context
+from app.services.generation_snapshots import GenerationCancelled
+from app.services.job_control import cancel_job
+
+from app.services.transactions import atomic_write
+from app.services.job_records import ProjectBusyError, create_pending_job, has_active_project_job
 
 
 class JobRegistry:
@@ -52,7 +52,7 @@ class JobRegistry:
     def submit(
         self,
         job_id: int,
-        coro_factory: Callable[[], Awaitable[Any]],
+        coro_factory: Callable[[Callable[[], bool]], Awaitable[Any]],
     ) -> asyncio.Task:
         """Start a task that owns status commits and cleanup.
 
@@ -70,42 +70,65 @@ class JobRegistry:
             private session, and removes registry entries.
 
         """
+        existing = self._tasks.get(job_id)
+        if existing is not None:
+            return existing
         cancel = asyncio.Event()
         self._cancel_flags[job_id] = cancel
 
         async def _runner() -> None:
-            factory = get_session_factory()
-            db = factory()
             try:
-                job = db.execute(
-                    select(GenerationJob).where(GenerationJob.id == job_id)
-                ).scalar_one_or_none()
-                if job is None:
-                    return
-                job.status = JobStatus.running
-                job.started_at = datetime.now(timezone.utc)
-                db.commit()
+                with get_session_factory()() as db, atomic_write(db):
+                    job = db.get(GenerationJob, job_id)
+                    if job is None or job.status != JobStatus.pending:
+                        return
+                    if job.cancel_requested:
+                        job.status = JobStatus.cancelled
+                        job.finished_at = datetime.now(timezone.utc)
+                        return
+                    job.status = JobStatus.running
+                    job.started_at = datetime.now(timezone.utc)
+                outcome, message = JobStatus.completed, None
                 try:
                     def cancel_check() -> bool:
-                        return cancel.is_set() or self._is_cancel_requested(job_id, db)
-                    await coro_factory(cancel_check)
-                    job.status = JobStatus.completed
-                    job.finished_at = datetime.now(timezone.utc)
-                    job.progress = 1.0
-                    job.error_message = None
+                        with get_session_factory()() as check_db:
+                            return cancel.is_set() or self._is_cancel_requested(job_id, check_db)
+                    with job_call_context(job_id):
+                        await coro_factory(cancel_check)
+                except ExternalOutcomeUnknown:
+                    outcome = JobStatus.unknown
+                    message = "外部処理の結果が未確定です。重複実行を避けるため再送していません。"
+                except GenerationCancelled:
+                    outcome = JobStatus.cancelled
+                except asyncio.CancelledError:
+                    # Leave the durable running checkpoint for startup reconciliation.
+                    raise
                 except Exception as exc:
-                    job.status = JobStatus.cancelled if cancel.is_set() else JobStatus.failed
+                    outcome = JobStatus.failed
+                    message = f"生成処理に失敗しました ({exc.__class__.__name__})"
+                    log.error("job failed id={job_id} error={error}", job_id=job_id, error=exc.__class__.__name__)
+                with get_session_factory()() as db, atomic_write(db):
+                    job = db.get(GenerationJob, job_id)
+                    if job is None or job.status == JobStatus.completed:
+                        # Publication has already committed success; a later cancel loses.
+                        return
+                    if has_unresolved_calls(db, job_id):
+                        outcome = JobStatus.unknown
+                        message = "外部処理の結果が未確定です。自動再送は停止しています。"
+                    elif job.cancel_requested or cancel.is_set():
+                        outcome = JobStatus.cancelled
+                    job.status = outcome
                     job.finished_at = datetime.now(timezone.utc)
-                    job.error_message = f"{exc.__class__.__name__}: {str(exc)[:300]}"
-                    log.error(
-                        "job failed id={job_id} error={error}",
-                        job_id=job_id,
-                        error=exc.__class__.__name__,
-                    )
-                finally:
-                    db.commit()
+                    job.error_message = message
+                    if outcome == JobStatus.completed:
+                        job.progress = 1.0
+                    project = db.get(Project, job.project_id)
+                    if project is not None and (job.input_revision is None or project.revision == job.input_revision):
+                        project.status = (ProjectStatus.completed if outcome == JobStatus.completed else
+                                          ProjectStatus.cancelled if outcome == JobStatus.cancelled else ProjectStatus.failed)
+                        project.current_stage = outcome.value
+                        project.error_message = message
             finally:
-                db.close()
                 self._tasks.pop(job_id, None)
                 self._cancel_flags.pop(job_id, None)
 
@@ -128,25 +151,16 @@ class JobRegistry:
             ``cancel_requested`` flag for jobs not currently tracked here.
 
         """
-        ev = self._cancel_flags.get(job_id)
-        if ev is not None:
-            ev.set()
-            return True
-        # job is not currently running in this process; mark the row as
-        # cancelled so the next worker pickup stops.
-        factory = get_session_factory()
-        db = factory()
-        try:
-            job = db.execute(
-                select(GenerationJob).where(GenerationJob.id == job_id)
-            ).scalar_one_or_none()
+        with get_session_factory()() as db, atomic_write(db):
+            job = db.get(GenerationJob, job_id)
             if job is None:
                 return False
-            job.cancel_requested = True
-            db.commit()
-            return True
-        finally:
-            db.close()
+            changed = cancel_job(db, job)
+        if changed:
+            ev = self._cancel_flags.get(job_id)
+            if ev is not None:
+                ev.set()
+        return changed
 
     def is_running(self, job_id: int) -> bool:
         """Return whether this process currently tracks a live task.
@@ -172,14 +186,26 @@ class JobRegistry:
             when the row no longer exists.
 
         """
-        job = db.execute(
-            select(GenerationJob).where(GenerationJob.id == job_id)
-        ).scalar_one_or_none()
+        job = db.get(GenerationJob, job_id, populate_existing=True)
         return bool(job and job.cancel_requested)
 
 
 # Process-wide singleton used by route handlers to signal live tasks.
 job_registry = JobRegistry()
+
+
+def _enqueue(
+    project_id: int, stage: str,
+) -> GenerationJob:
+    """Serialize legacy job creation with durable operation settings/intent writes."""
+    with get_session_factory()() as db:
+        with atomic_write(db):
+            if has_active_project_job(db, project_id, job_registry.is_running):
+                raise ProjectBusyError("このプロジェクトは生成中です。完了後に再実行してください。")
+            job = create_pending_job(db, project_id, stage)
+        db.refresh(job)
+        job_registry.submit(job.id, lambda cancel: run_generation_job(job.id, cancel))
+        return job
 
 
 async def enqueue_full_pipeline(project_id: int) -> GenerationJob:
@@ -196,24 +222,7 @@ async def enqueue_full_pipeline(project_id: int) -> GenerationJob:
         enqueueing session.  The returned ORM object is detached afterward.
 
     """
-    factory = get_session_factory()
-    db = factory()
-    try:
-        job = GenerationJob(
-            project_id=project_id,
-            current_stage="queued",
-            status=JobStatus.pending,
-        )
-        db.add(job)
-        db.commit()
-        db.refresh(job)
-        job_registry.submit(
-            job.id,
-            lambda cancel: run_full_pipeline(project_id, cancel_check=cancel),
-        )
-        return job
-    finally:
-        db.close()
+    return _enqueue(project_id, "queued")
 
 
 async def enqueue_rerender(project_id: int) -> GenerationJob:
@@ -230,21 +239,7 @@ async def enqueue_rerender(project_id: int) -> GenerationJob:
         registry.
 
     """
-    factory = get_session_factory()
-    db = factory()
-    try:
-        job = GenerationJob(
-            project_id=project_id,
-            current_stage="rerender",
-            status=JobStatus.pending,
-        )
-        db.add(job)
-        db.commit()
-        db.refresh(job)
-        job_registry.submit(job.id, lambda cancel: rerender_project(project_id))
-        return job
-    finally:
-        db.close()
+    return _enqueue(project_id, "rerender")
 
 
 async def enqueue_block_visual_rerun(project_id: int, block_index: int) -> GenerationJob:
@@ -258,23 +253,7 @@ async def enqueue_block_visual_rerun(project_id: int, block_index: int) -> Gener
         Newly committed pending job whose current stage identifies the block.
 
     """
-    factory = get_session_factory()
-    db = factory()
-    try:
-        job = GenerationJob(
-            project_id=project_id,
-            current_stage=f"block_visual:{block_index}",
-            status=JobStatus.pending,
-        )
-        db.add(job)
-        db.commit()
-        db.refresh(job)
-        job_registry.submit(
-            job.id, lambda cancel: rerun_block_visual(project_id, block_index)
-        )
-        return job
-    finally:
-        db.close()
+    return _enqueue(project_id, f"block_visual:{block_index}")
 
 
 async def enqueue_block_audio_rerun(project_id: int, block_index: int) -> GenerationJob:
@@ -288,20 +267,4 @@ async def enqueue_block_audio_rerun(project_id: int, block_index: int) -> Genera
         Newly committed pending job whose current stage identifies the block.
 
     """
-    factory = get_session_factory()
-    db = factory()
-    try:
-        job = GenerationJob(
-            project_id=project_id,
-            current_stage=f"block_audio:{block_index}",
-            status=JobStatus.pending,
-        )
-        db.add(job)
-        db.commit()
-        db.refresh(job)
-        job_registry.submit(
-            job.id, lambda cancel: rerun_block_audio(project_id, block_index)
-        )
-        return job
-    finally:
-        db.close()
+    return _enqueue(project_id, f"block_audio:{block_index}")

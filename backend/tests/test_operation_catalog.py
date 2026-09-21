@@ -38,14 +38,22 @@ def _definition(**changes) -> dict:
     return value
 
 
-def test_package_catalog_loads_two_versioned_operations() -> None:
+def test_package_catalog_loads_versioned_operations() -> None:
     path = Path(__file__).parents[1] / "app" / "operations" / "definitions.json"
     catalog = load_catalog(path)
     assert [item.operation_id for item in catalog.definitions] == [
+        "project.generation.cancel",
+        "project.generation.retry",
+        "project.generation.start",
+        "project.settings.restore",
+        "project.settings.update",
+        "project.settings.update",  # v2 keeps the v1 contract available.
         "project.status.get",
+        "project.subtitle-font-size.adjust",
         "project.subtitle-font-size.set",
     ]
-    assert all(item.operation_version == 1 for item in catalog.definitions)
+    assert all(item.operation_version == 1 or (item.operation_id == "project.settings.update" and item.operation_version == 2)
+               for item in catalog.definitions)
 
 
 def test_duplicate_operation_id_and_version_is_rejected(tmp_path: Path) -> None:
