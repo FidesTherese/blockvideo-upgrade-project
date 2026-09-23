@@ -56,6 +56,8 @@ def assert_negative_retry_veto(response: Any, before: dict[str, Any], after: dic
     assert response.prepared_request is None
     assert response.confirmation_token is None
     assert response.diagnostics.guard_code == "negative_intent"
+    assert response.interpretation.status == "proposed"
+    assert response.interpretation.proposal.model_dump(mode="json", exclude_defaults=True) == _RETRY_PROPOSAL
     assert after == before
 
 
@@ -119,10 +121,24 @@ async def test_stateful_semantic_candidate_cannot_bypass_negative_retry_veto(
         client.close()
     seed_failed_job(project_id)
 
+    adapter = Replies([_RETRY_PROPOSAL])
     response, before, after = await submit_negative_retry(
-        LanguageOperationService(operation_service, Replies([_RETRY_PROPOSAL]), semantic=runner),
+        LanguageOperationService(
+            operation_service,
+            adapter,
+            semantic=runner,
+            readiness_annotations=True,
+        ),
         project_id,
     )
 
     assert response.mode == "semantic"
+    assert response.diagnostics.retrieval is not None
+    assert all(stage.candidate_state is not None for stage in response.diagnostics.retrieval.stages)
+    retry_candidate = next(
+        candidate
+        for candidate in adapter.calls[0]["candidates"]
+        if candidate["operation_id"] == "project.generation.retry"
+    )
+    assert retry_candidate["readiness_hint"]["project_id"] == project_id
     assert_negative_retry_veto(response, before, after)
