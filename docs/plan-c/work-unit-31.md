@@ -15,7 +15,8 @@ mode-specific wording patches.
 - Correct the known `do not retry job 7` cancellation interpretation safely across
   All Tools and stateful retrieval.
 - Ensure API errors and logs expose fixed reason codes rather than raw exception,
-  prompt, path, secret, source-script, or request content.
+  prompt, raw request path, filesystem/private path, secret, source-script, or request
+  content. A matched framework route template may remain as bounded log metadata.
 - Keep model output proposal-only. Registered callables, application-bound targets,
   revisions, confirmations, dialogue currency, and final readiness remain mandatory.
 

@@ -75,11 +75,15 @@ without a prepared request, confirmation token, receipt, or core effect.
   jobs and live legacy jobs block setting writes and project deletion.
 - Legacy absolute calls without request identity retain compatibility but no replay guarantee.
 - Unexpected API exceptions return a fixed `internal_error` payload with a
-  correlation ID. Logs retain bounded metadata, not exception text, request/model
-  bodies, prompts, paths, or credentials.
+  correlation ID. Logs retain the exception class, correlation ID, and matched route
+  template, not exception text, request/model bodies, prompts, raw request paths,
+  filesystem/private paths, or credentials.
 - Deterministic adversarial verification compares exact persisted content for
   settings/revision, jobs/cancellation, receipts and artifacts in both All Tools and
-  stateful modes. This safety evidence is separate from real-model proposal quality.
+  stateful modes. Those counters do not measure provider calls or dispatch. Separate
+  structural boundaries keep guarded/unknown proposals from core dispatch and keep
+  the direct runner out of the worker/media-provider pipeline. This safety evidence
+  is separate from real-model proposal quality.
 - See `docs/plan-c/work-unit-12-15.md` for migration, retention and restart behavior,
   and `docs/plan-c/work-report-31.md` for D31 evidence and limits.
 

@@ -10,11 +10,16 @@ untrusted and dispatch remains limited to registered callables after target, rev
 confirmation, reference, dialogue-currency, and current-state checks.
 
 Focused backend: 208 passed with one existing Starlette/httpx warning. Full backend:
-1108 passed, 7 ONNX asset/runtime tests skipped, one existing warning. Frontend:
-123 passed across 16 files; Ruff, TypeScript/Vite build, ESLint, and whitespace checks
-passed. The 26-case deterministic corpus passed 13/13 in All Tools and 13/13 in
-stateful mode with zero forbidden setting, job, cancellation, receipt, or artifact
-effects; positive controls produced their exact required effects.
+1108 passed, 7 ONNX asset/runtime tests skipped, one existing warning. Fresh frontend
+reruns: 123 passed across 16 files, 0 skipped/failed/warnings; TypeScript/Vite built
+188 modules with 0 build warnings; ESLint had 0 errors/warnings. Ruff and whitespace
+checks passed. The 26-case deterministic corpus passed 13/13 in All Tools and 13/13
+in stateful mode with zero forbidden setting, job, cancellation, receipt, or artifact
+effects; positive controls produced their exact required effects. Those five counters
+do not measure provider calls or arbitrary dispatch. Existing structural/test evidence
+shows vetoed requests cannot reach core execution, unknown/unregistered proposals
+cannot reach a handler, and the direct runner never starts the worker/media-provider
+pipeline; see the work report's Acceptance review.
 
 Keep deterministic safety separate from model proposal quality. A bounded real local-
 model run was not performed because read-only configuration had no `LANGUAGE_MODEL`

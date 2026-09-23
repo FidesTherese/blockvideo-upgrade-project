@@ -250,9 +250,11 @@ only IDs, status, booleans, and counts; it never contains corpus/model text.
 {"detail":{"reason_code":"internal_error","message":"処理に失敗しました。再読み込み後も続く場合は記録番号を確認してください。","correlation_id":"..."}}
 ```
 
-Raw exception strings, request bodies, model bodies, prompts, paths, and credentials
-must not appear in application logs or this response. Existing narrow domain errors
-retain fixed user messages but must not forward arbitrary provider exception text.
+Raw exception strings, request bodies, model bodies, prompts, raw request paths,
+filesystem/private paths, and credentials must not appear in application logs or this
+response. Logs may retain the matched framework route template as bounded metadata.
+Existing narrow domain errors retain fixed user messages but must not forward
+arbitrary provider exception text.
 
 ### D32 concurrency design
 
