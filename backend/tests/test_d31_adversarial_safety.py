@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from io import StringIO
+import json
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from loguru import logger
 
 from app.db import get_session_factory
 from app.language_operations.contracts import LanguageInput, LanguageResponse
@@ -23,6 +27,22 @@ _RETRY_PROPOSAL = {
     "operation_version": 1,
     "arguments": {"job_id": 7},
 }
+_UNEXPECTED_ERROR = "SECRET /Users/private/source.txt"
+_REQUEST_SECRET = "REQUEST_BODY_SECRET"
+_INVALID_REQUEST_DETAIL = {
+    "reason_code": "invalid_request",
+    "message": "入力の形式・値が正しくありません。要求ID、本文、対象を確認してください。",
+}
+
+
+def unexpected_error_client() -> TestClient:
+    app = create_app()
+
+    @app.post("/test/unexpected-error")
+    async def unexpected_error() -> None:
+        raise RuntimeError(_UNEXPECTED_ERROR)
+
+    return TestClient(app, raise_server_exceptions=False)
 
 
 def seed_failed_job(project_id: int) -> None:
@@ -91,6 +111,61 @@ def test_normalized_intent(raw: str, expected: str) -> None:
 ])
 def test_negative_control_reason(text: str, operation_id: str, expected: str | None) -> None:
     assert negative_control_reason(text, operation_id) == expected
+
+
+def test_unexpected_exception_response_is_fixed_and_redacted(temp_storage: Path) -> None:
+    with unexpected_error_client() as client:
+        response = client.post("/test/unexpected-error", content=_REQUEST_SECRET)
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["reason_code"] == "internal_error"
+    assert detail["message"] == "処理に失敗しました。再読み込み後も続く場合は記録番号を確認してください。"
+    assert re.fullmatch(r"[0-9a-f]{16}", detail["correlation_id"])
+    assert all(value not in response.content for value in (b"SECRET", b"private", _UNEXPECTED_ERROR.encode()))
+
+
+def test_unexpected_exception_log_contains_only_bounded_metadata(temp_storage: Path) -> None:
+    output = StringIO()
+    with unexpected_error_client() as client:
+        sink_id = logger.add(output, format="{message}")
+        try:
+            response = client.post("/test/unexpected-error", content=_REQUEST_SECRET)
+        finally:
+            logger.remove(sink_id)
+
+    correlation_id = response.json()["detail"]["correlation_id"]
+    captured = output.getvalue()
+    assert "RuntimeError" in captured
+    assert correlation_id in captured
+    assert "/test/unexpected-error" in captured
+    assert all(value not in captured for value in (_UNEXPECTED_ERROR, _REQUEST_SECRET, "/Users/private/source.txt"))
+
+
+@pytest.mark.parametrize("payload", [
+    {"request_id": "d31-invalid-unicode", "text": "bad \ud800", "target": {}},
+    {"request_id": "d31-control", "text": "bad\u0000text", "target": {}},
+    {"request_id": "d31-unknown", "text": "字幕", "target": {},
+     "SECRET_UNKNOWN_FIELD": "/Users/private/source.txt"},
+    {"request_id": "d31-oversized", "text": "SECRET /Users/private/" + ("x" * 2001), "target": {}},
+    {"request_id": "bad/SECRET/Users/private/source.txt", "text": "字幕", "target": {}},
+])
+def test_language_validation_returns_only_fixed_non_echo_detail(
+    temp_storage: Path, payload: dict[str, Any],
+) -> None:
+    body = json.dumps(payload)
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/language/requests",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": _INVALID_REQUEST_DETAIL}
+    assert all(value not in response.text for value in (
+        "SECRET", "private", "source.txt", "bad", "UNKNOWN_FIELD",
+    ))
 
 
 async def test_all_tools_vetoes_negative_retry_proposal_without_state_change(temp_storage: Path) -> None:

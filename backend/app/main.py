@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+import uuid
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -117,22 +118,26 @@ def create_app() -> FastAPI:
                             headers={"Retry-After": "1"})
 
     @app.exception_handler(Exception)
-    async def _unhandled(_request, exc: Exception):  # pragma: no cover
-        """Convert an unexpected exception into a bounded JSON 500 response.
-
-        Args:
-            _request: FastAPI request object retained for handler signature.
-            exc: Unhandled exception raised by route/dependency code.
-
-        Returns:
-            ``JSONResponse`` containing the exception class and first 200
-            characters of its string representation.
-
-        """
-        log.error("unhandled exception: {error}", error=str(exc))
+    async def _unhandled(_request, exc: Exception) -> JSONResponse:
+        """Convert an unexpected exception into a fixed, correlatable response."""
+        correlation_id = uuid.uuid4().hex[:16]
+        route = _request.scope.get("route")
+        path = getattr(route, "path", "unknown")
+        log.error(
+            "unhandled exception correlation_id={correlation_id} path={path} error_class={error_class}",
+            correlation_id=correlation_id,
+            path=path,
+            error_class=exc.__class__.__name__,
+        )
         return JSONResponse(
             status_code=500,
-            content={"detail": f"{exc.__class__.__name__}: {str(exc)[:200]}"},
+            content={
+                "detail": {
+                    "reason_code": "internal_error",
+                    "message": "処理に失敗しました。再読み込み後も続く場合は記録番号を確認してください。",
+                    "correlation_id": correlation_id,
+                },
+            },
         )
 
     return app

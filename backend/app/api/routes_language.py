@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from typing import Any
+import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -21,6 +22,25 @@ from app.operations.contracts import CandidateReadinessSnapshot
 from app.operations.bootstrap import operation_service
 from app.semantic_interpretation.runtime import configured_semantic
 
+_INVALID_REQUEST_DETAIL = {
+    "reason_code": "invalid_request",
+    "message": "入力の形式・値が正しくありません。要求ID、本文、対象を確認してください。",
+}
+
+
+def _contains_invalid_text(value: object) -> bool:
+    if isinstance(value, str):
+        return any(unicodedata.category(character) in {"Cc", "Cs"} for character in value)
+    if isinstance(value, dict):
+        return any(
+            _contains_invalid_text(key) or _contains_invalid_text(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_invalid_text(item) for item in value)
+    return False
+
+
 class _LanguageRoute(APIRoute):
     """Do not echo untrusted utterances in HTTP validation errors."""
 
@@ -29,12 +49,15 @@ class _LanguageRoute(APIRoute):
 
         async def safe_handler(request: Request) -> Response:
             try:
+                try:
+                    payload = await request.json()
+                except ValueError:
+                    payload = None
+                if _contains_invalid_text(payload):
+                    raise HTTPException(status_code=422, detail=_INVALID_REQUEST_DETAIL)
                 return await handler(request)
             except RequestValidationError:
-                # Escaped invalid Unicode also makes the default error renderer
-                # fail when it echoes the rejected input as UTF-8.
-                raise HTTPException(status_code=422, detail={"reason_code": "invalid_request",
-                    "message": "入力の形式・値が正しくありません。要求ID、本文、対象を確認してください。"}) from None
+                raise HTTPException(status_code=422, detail=_INVALID_REQUEST_DETAIL) from None
 
         return safe_handler
 
