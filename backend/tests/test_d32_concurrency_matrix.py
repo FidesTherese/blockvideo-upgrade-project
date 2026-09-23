@@ -1,29 +1,42 @@
 """D32 concurrency snapshots and spawned-process operation races."""
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime
+from enum import Enum
 import hashlib
 import json
 import os
-from datetime import date, datetime
-from enum import Enum
 from pathlib import Path
 import subprocess
 import sys
+from threading import Barrier, Lock
 import time
 from typing import Any
 
 import pytest
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.db import get_session_factory
+from app.interpretation.transport import ModelMessage
+from app.language_operations import repository as language_repository
+from app.language_operations.contracts import LanguageError, LanguageInput, LanguageResponse
+from app.language_operations.service import LanguageOperationService
 from app.models.artifact import GenerationArtifact
 from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob
+from app.models.language_turn import LanguageTurn
 from app.models.operation_request import OperationReceipt
 from app.models.project import Project
 from app.models.settings_revision import SettingsRevision
 from app.services.settings_history import configuration
+from tests.test_language_dialogue import ask, reply
+from tests.test_language_operations import create
+from tests.test_language_operations import harness as harness  # noqa: F401
 from tests.test_operation_processes import adjustment, make_project, run_process
 
 
@@ -111,6 +124,78 @@ def _run_process_race(
             if process.poll() is None:
                 process.kill()
                 process.communicate()
+
+
+class _DialogueRaceAdapter:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self._lock = Lock()
+
+    async def complete(
+        self, messages: tuple[ModelMessage, ...], schema: dict[str, Any]
+    ) -> str:
+        del schema
+        text = json.loads(messages[1].content)["request"]
+        with self._lock:
+            self.calls.append(text)
+        value = {"56px": 56, "58px": 58}[text]
+        return json.dumps(
+            {
+                "result": {
+                    "kind": "operation",
+                    "operation_id": "project.subtitle-font-size.set",
+                    "operation_version": 1,
+                    "arguments": {"value": value},
+                }
+            }
+        )
+
+
+def _run_dialogue_race(
+    service: LanguageOperationService,
+    requests: list[LanguageInput],
+) -> list[LanguageResponse | LanguageError]:
+    def send(request: LanguageInput) -> LanguageResponse | LanguageError:
+        with get_session_factory()() as db:
+            try:
+                return asyncio.run(service.submit(db, request))
+            except LanguageError as error:
+                return error
+
+    with ThreadPoolExecutor(max_workers=len(requests)) as pool:
+        futures = [pool.submit(send, request) for request in requests]
+        return [future.result(timeout=30) for future in futures]
+
+
+def _synchronized_claim(
+    barrier: Barrier,
+) -> tuple[
+    Callable[[Session, LanguageInput], tuple[LanguageResponse, str | None, Any]],
+    Callable[[Session, LanguageInput], tuple[LanguageResponse, str | None, Any]],
+]:
+    original = language_repository.claim
+
+    def claim(
+        db: Session, request: LanguageInput
+    ) -> tuple[LanguageResponse, str | None, Any]:
+        barrier.wait(timeout=20)
+        return original(db, request)
+
+    return original, claim
+
+
+def _successor(parent_request_id: str) -> tuple[str, LanguageTurn]:
+    with get_session_factory()() as db:
+        parent = db.get(LanguageTurn, parent_request_id)
+        assert parent is not None
+        children = db.scalars(
+            select(LanguageTurn).where(
+                LanguageTurn.parent_request_id == parent_request_id
+            )
+        ).all()
+        assert len(children) == 1
+        assert parent.successor_request_id == children[0].request_id
+        return parent.successor_request_id, children[0]
 
 
 def _canonical_adjustment(project_id: int, delta: int) -> str:
@@ -322,3 +407,182 @@ def test_repeated_three_process_matrix(temp_storage, tmp_path: Path, mode: str) 
         assert state["project"]["current_artifact_id"] not in {
             row["id"] for row in state["artifacts"]
         }
+
+
+def test_dialogue_three_way_race_has_one_durable_successor(
+    harness, monkeypatch
+) -> None:
+    client, parent_adapter, service = harness
+    for iteration in range(5):
+        project_id = create(client)
+        parent = ask(
+            client,
+            parent_adapter,
+            project_id,
+            request_id=f"d32-dialogue-parent-{iteration}",
+        )
+        race_adapter = _DialogueRaceAdapter()
+        service.adapter = race_adapter
+        payloads = [
+            reply(
+                parent,
+                text,
+                request_id=f"d32-dialogue-{relation}-{iteration}",
+                relation=relation,
+            )
+            for relation, text in (
+                ("answer", "56px"),
+                ("correction", "58px"),
+                ("dismiss", "取り下げる"),
+            )
+        ]
+        requests = [LanguageInput.model_validate(payload) for payload in payloads]
+        barrier = Barrier(len(requests))
+        original_claim, synchronized_claim = _synchronized_claim(barrier)
+        monkeypatch.setattr(language_repository, "claim", synchronized_claim)
+
+        results = _run_dialogue_race(service, requests)
+        monkeypatch.setattr(language_repository, "claim", original_claim)
+
+        assert all(isinstance(result, LanguageResponse) for result in results)
+        responses = [result for result in results if isinstance(result, LanguageResponse)]
+        winners = [
+            response
+            for response in responses
+            if response.status in {"completed", "dismissed"}
+        ]
+        blocked = [response for response in responses if response.status == "blocked"]
+        assert len(winners) == 1
+        assert len(blocked) == 2
+        assert all(
+            response.failure is not None
+            and response.failure.reason_code == "dialogue_superseded"
+            for response in blocked
+        )
+
+        winner = winners[0]
+        winner_index = responses.index(winner)
+        winner_payload = payloads[winner_index]
+        successor_request_id, successor = _successor(parent["request_id"])
+        assert successor_request_id == winner.request_id
+        assert successor.relation == winner.relation
+        with get_session_factory()() as parent_db:
+            assert (
+                service.get(parent_db, parent["request_id"]).superseded_by
+                == winner.request_id
+            )
+
+        state = snapshot(project_id)
+        assert state["jobs"] == []
+        assert state["external_calls"] == []
+        assert state["artifacts"] == []
+        if winner.status == "dismissed":
+            assert winner.relation == "dismiss"
+            assert state["project"]["revision"] == 1
+            assert state["project"]["settings"]["subtitle_font_size"] == 48
+            assert [row["revision"] for row in state["settings_history"]] == [1]
+            assert state["receipts"] == []
+            assert race_adapter.calls == []
+        else:
+            assert winner.relation in {"answer", "correction"}
+            assert winner.result is not None
+            committed_value = winner.result.resolved_arguments["value"]
+            assert committed_value in {56, 58}
+            assert state["project"]["revision"] == 2
+            assert state["project"]["settings"]["subtitle_font_size"] == committed_value
+            assert [row["revision"] for row in state["settings_history"]] == [1, 2]
+            assert len(state["receipts"]) == 1
+            assert state["receipts"][0]["result_json"] == winner.result.model_dump(
+                mode="json"
+            )
+            assert race_adapter.calls == [winner_payload["text"]]
+
+        calls_before_replay = list(race_adapter.calls)
+        with get_session_factory()() as replay_db:
+            replay = asyncio.run(
+                service.submit(replay_db, LanguageInput.model_validate(winner_payload))
+            )
+        assert replay.model_dump(mode="json") == winner.model_dump(mode="json")
+        assert race_adapter.calls == calls_before_replay
+        assert _successor(parent["request_id"])[0] == winner.request_id
+        with get_session_factory()() as parent_db:
+            assert service.get(parent_db, parent["request_id"]).superseded_by == winner.request_id
+
+        service.adapter = parent_adapter
+
+
+def test_dialogue_same_successor_id_changed_body_race_replays_only_winner(
+    harness, monkeypatch
+) -> None:
+    client, parent_adapter, service = harness
+    for iteration in range(5):
+        project_id = create(client)
+        parent = ask(
+            client,
+            parent_adapter,
+            project_id,
+            request_id=f"d32-dialogue-conflict-parent-{iteration}",
+        )
+        race_adapter = _DialogueRaceAdapter()
+        service.adapter = race_adapter
+        request_id = f"d32-dialogue-shared-{iteration}"
+        payloads = [
+            reply(parent, text, request_id=request_id)
+            for text in ("56px", "58px")
+        ]
+        requests = [LanguageInput.model_validate(payload) for payload in payloads]
+        barrier = Barrier(len(requests))
+        original_claim, synchronized_claim = _synchronized_claim(barrier)
+        monkeypatch.setattr(language_repository, "claim", synchronized_claim)
+
+        results = _run_dialogue_race(service, requests)
+        monkeypatch.setattr(language_repository, "claim", original_claim)
+
+        winners = [result for result in results if isinstance(result, LanguageResponse)]
+        conflicts = [result for result in results if isinstance(result, LanguageError)]
+        assert len(winners) == 1
+        assert len(conflicts) == 1
+        assert conflicts[0].code == "request_id_conflict"
+        winner = winners[0]
+        assert winner.status == "completed"
+        assert winner.result is not None
+        committed_value = winner.result.resolved_arguments["value"]
+        winner_payload = next(
+            payload for payload in payloads if payload["text"] == f"{committed_value}px"
+        )
+        losing_payload = next(payload for payload in payloads if payload is not winner_payload)
+
+        successor_request_id, successor = _successor(parent["request_id"])
+        assert successor_request_id == request_id
+        assert successor.text == winner_payload["text"]
+        state = snapshot(project_id)
+        assert state["project"]["revision"] == 2
+        assert state["project"]["settings"]["subtitle_font_size"] == committed_value
+        assert [row["revision"] for row in state["settings_history"]] == [1, 2]
+        assert len(state["receipts"]) == 1
+        assert state["receipts"][0]["result_json"] == winner.result.model_dump(
+            mode="json"
+        )
+        assert state["jobs"] == []
+        assert state["external_calls"] == []
+        assert state["artifacts"] == []
+        assert race_adapter.calls == [winner_payload["text"]]
+
+        with get_session_factory()() as replay_db:
+            replay = asyncio.run(
+                service.submit(replay_db, LanguageInput.model_validate(winner_payload))
+            )
+        assert replay.model_dump(mode="json") == winner.model_dump(mode="json")
+        assert race_adapter.calls == [winner_payload["text"]]
+        with get_session_factory()() as conflict_db:
+            with pytest.raises(LanguageError, match="別の内容") as conflict:
+                asyncio.run(
+                    service.submit(
+                        conflict_db, LanguageInput.model_validate(losing_payload)
+                    )
+                )
+        assert conflict.value.code == "request_id_conflict"
+        assert snapshot(project_id) == state
+        assert _successor(parent["request_id"])[0] == request_id
+
+        service.adapter = parent_adapter

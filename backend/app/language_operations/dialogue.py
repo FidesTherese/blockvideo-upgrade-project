@@ -41,6 +41,13 @@ def context(db: Session, request: LanguageInput) -> tuple[DialogueContextTurn, .
     return tuple(reversed(turns))
 
 
+def require_not_superseded(db: Session, request_id: str) -> LanguageTurn | None:
+    turn = db.get(LanguageTurn, request_id)
+    if turn is not None and turn.successor_request_id:
+        raise LanguageError("dialogue_superseded", "この質問には既に回答または訂正があります。最新の依頼を確認してください。")
+    return turn
+
+
 def attach(db: Session, request: LanguageInput, state: MinimalState | None,
            parent: LanguageResponse | None) -> None:
     """Called only inside the claim writer transaction, before inference."""
@@ -48,11 +55,9 @@ def attach(db: Session, request: LanguageInput, state: MinimalState | None,
     if continuation:
         if parent is None:
             raise LanguageError("parent_not_found", "回答先の要求が見つかりません。")
-        turn = db.get(LanguageTurn, parent.request_id)
+        turn = require_not_superseded(db, parent.request_id)
         if turn is None:
             raise LanguageError("dialogue_unavailable", "以前の依頼には対話の記録がありません。依頼全体を新しく入力してください。")
-        if turn.successor_request_id:
-            raise LanguageError("dialogue_superseded", "この質問には既に回答または訂正があります。最新の依頼を確認してください。")
         if parent.project_id is not None and parent.project_id != request.target.resolved_id:
             raise LanguageError("dialogue_target_mismatch", "この回答は別のプロジェクトへの依頼に属しています。元の対象に戻ってください。")
         allowed = {"answer": {"needs_input"}, "correction": {"needs_input", "ready", "completed"},

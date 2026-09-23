@@ -114,6 +114,10 @@ def claim(
                                     relation=request.continuation.relation if request.continuation else None)
         state: MinimalState | None = None
         try:
+            if request.continuation is not None:
+                dialogue.require_not_superseded(
+                    db, request.continuation.parent_request_id
+                )
             state = resolve_context(db, request)
             parent_record = db.get(LanguageRequestRecord, request.continuation.parent_request_id) if request.continuation else None
             parent = response_for(db, parent_record) if parent_record else None
