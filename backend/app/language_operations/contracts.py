@@ -38,7 +38,7 @@ class LanguageDiagnostics(StrictValue):
     interpretation_ms: int | None = Field(default=None, ge=0)
     execution_ms: int | None = Field(default=None, ge=0)
     generation_execution_ms: int | None = Field(default=None, ge=0)
-    guard_code: Literal["reference", "subtitle_value", "settings_value", "pending_settings", "reading", "empty_settings"] | None = None
+    guard_code: Literal["reference", "subtitle_value", "settings_value", "pending_settings", "reading", "empty_settings", "negative_intent"] | None = None
 
 
 class LanguageResponse(StrictValue):

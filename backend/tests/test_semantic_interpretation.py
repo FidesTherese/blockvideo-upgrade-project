@@ -61,8 +61,7 @@ class Replies:
         return value if isinstance(value, str) else json.dumps({"result": value}, ensure_ascii=False)
 
 
-@pytest.fixture
-def setup(tmp_path: Path):
+def build_setup(tmp_path: Path) -> tuple[Any, Any, Any, Any, Any]:
     sources = load_sources()
     profile = EmbeddingProfile(model="synthetic", weights_sha256="a" * 64, dimensions=2,
         document_prefix="document: ", query_prefix="query: ")
@@ -73,6 +72,11 @@ def setup(tmp_path: Path):
         operations=tuple(OperationRef(operation_id=r.operation_id, operation_version=r.operation_version) for r in REFS))
     runner = SemanticInterpreter(lambda s: load_index(tmp_path, s, profile), lambda: sources, encoder, scope=scope)
     return runner, encoder, scope, sources, profile
+
+
+@pytest.fixture
+def setup(tmp_path: Path):
+    return build_setup(tmp_path)
 
 
 async def run(runner: SemanticInterpreter, adapter: Replies, text: str = "字幕を56pxにして"):

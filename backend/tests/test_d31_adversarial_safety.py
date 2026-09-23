@@ -1,8 +1,62 @@
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
+from typing import Any
 
+import pytest
+from fastapi.testclient import TestClient
+
+from app.db import get_session_factory
+from app.language_operations.contracts import LanguageInput, LanguageResponse
 from app.language_operations.intent_guard import negative_control_reason, normalized_intent
+from app.language_operations.service import LanguageOperationService
+from app.main import create_app
+from app.models.job import GenerationJob, JobStatus
+from app.operations.bootstrap import operation_service
+from evaluation.comparison_fixture import observe as observe_state
+from tests.test_language_operations import ReplyAdapter, create
+from tests.test_semantic_interpretation import Replies, build_setup
+
+_RETRY_PROPOSAL = {
+    "kind": "operation",
+    "operation_id": "project.generation.retry",
+    "operation_version": 1,
+    "arguments": {"job_id": 7},
+}
+
+
+def seed_failed_job(project_id: int) -> None:
+    with get_session_factory()() as db:
+        db.add(GenerationJob(
+            id=7,
+            project_id=project_id,
+            status=JobStatus.failed,
+            input_revision=1,
+        ))
+        db.commit()
+
+
+async def submit_negative_retry(
+    service: LanguageOperationService, project_id: int,
+) -> tuple[LanguageResponse, dict[str, Any], dict[str, Any]]:
+    with get_session_factory()() as db:
+        before = observe_state(db, project_id)
+        response = await service.submit(db, LanguageInput(
+            request_id="d31-negative-retry",
+            text="ジョブ7は再試行しないで",
+            target={"project_id": project_id},
+            base_revision=1,
+        ))
+        after = observe_state(db, project_id)
+    return response, before, after
+
+
+def assert_negative_retry_veto(response: Any, before: dict[str, Any], after: dict[str, Any]) -> None:
+    assert response.status == "dismissed"
+    assert response.prepared_request is None
+    assert response.confirmation_token is None
+    assert response.diagnostics.guard_code == "negative_intent"
+    assert after == before
 
 
 @pytest.mark.parametrize(("raw", "expected"), [
@@ -35,3 +89,40 @@ def test_normalized_intent(raw: str, expected: str) -> None:
 ])
 def test_negative_control_reason(text: str, operation_id: str, expected: str | None) -> None:
     assert negative_control_reason(text, operation_id) == expected
+
+
+async def test_all_tools_vetoes_negative_retry_proposal_without_state_change(temp_storage: Path) -> None:
+    client = TestClient(create_app())
+    try:
+        project_id = create(client)
+    finally:
+        client.close()
+    seed_failed_job(project_id)
+    adapter = ReplyAdapter()
+    adapter.operation("project.generation.retry", {"job_id": 7})
+
+    response, before, after = await submit_negative_retry(
+        LanguageOperationService(operation_service, adapter), project_id,
+    )
+
+    assert_negative_retry_veto(response, before, after)
+
+
+async def test_stateful_semantic_candidate_cannot_bypass_negative_retry_veto(
+    temp_storage: Path, tmp_path: Path,
+) -> None:
+    runner, *_ = build_setup(tmp_path)
+    client = TestClient(create_app())
+    try:
+        project_id = create(client)
+    finally:
+        client.close()
+    seed_failed_job(project_id)
+
+    response, before, after = await submit_negative_retry(
+        LanguageOperationService(operation_service, Replies([_RETRY_PROPOSAL]), semantic=runner),
+        project_id,
+    )
+
+    assert response.mode == "semantic"
+    assert_negative_retry_veto(response, before, after)

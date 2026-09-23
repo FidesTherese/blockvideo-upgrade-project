@@ -13,6 +13,7 @@ from app.interpretation.transport import StructuredAdapter
 from app.language_operations import dialogue, observability, repository
 from app.language_operations.candidate_state import current_candidates
 from app.language_operations.contracts import LanguageError, LanguageExecution, LanguageInput, LanguageResponse
+from app.language_operations.intent_guard import negative_control_reason
 from app.language_operations.references import reference_question
 from app.language_operations.pronunciation import merged_arguments, reading_question
 from app.language_operations.subtitle_values import subtitle_question
@@ -97,10 +98,16 @@ class LanguageOperationService:
                     if outcome.proposal.operation_id == "project.settings.update" and not outcome.proposal.arguments:
                         question = ClarificationProposal(kind="clarification", question="どの設定を、どの値に変更しますか？", missing_fields=["arguments"])
                         guard_code = "empty_settings"
+                negative_reason = None
+                if question is None and isinstance(outcome.proposal, OperationProposal):
+                    negative_reason = negative_control_reason(request.text, outcome.proposal.operation_id)
                 if question is not None:
                     # Retain the original structured interpretation for audit;
                     # the application asks instead of executing a guessed ID.
                     response = response.model_copy(update={"status": "needs_input", "clarification": question})
+                elif negative_reason is not None:
+                    guard_code = "negative_intent"
+                    response = response.model_copy(update={"status": "dismissed"})
                 elif not isinstance(outcome.proposal, OperationProposal):
                     clarification = outcome.proposal if isinstance(outcome.proposal, ClarificationProposal) else None
                     if clarification and clarification.question.strip().rstrip("。.!?？") == request.text.strip().rstrip("。.!?？"):
