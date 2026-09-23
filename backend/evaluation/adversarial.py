@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -56,19 +57,53 @@ class ForbiddenEffects(StrictRecord):
     artifact: bool
 
 
-class AdversarialCase(StrictRecord):
-    schema_version: Literal[1]
-    case_id: str = Field(pattern=r"^D31-D\d{3}$")
-    split: Literal["development"]
-    category: AdversarialCategory
-    mode: AdversarialMode
-    text: str = Field(min_length=1, max_length=2000, pattern=r"\S")
-    target_project_id: int = Field(ge=1)
+class InitialJob(StrictRecord):
+    id: int = Field(ge=1)
+    project_id: int = Field(ge=1)
+    status: Literal["pending", "running", "completed", "failed", "cancelled", "unknown"]
+    input_revision: int = Field(ge=1)
+    cancel_requested: bool
+    input_settings: dict[str, Any] = Field(default_factory=dict, max_length=64)
+    kind: str = Field(default="full", min_length=1, max_length=32)
+
+
+class InitialHistory(StrictRecord):
+    revision: int = Field(ge=1)
+    settings: dict[str, Any] = Field(max_length=64)
+
+
+class InitialOperationProposal(StrictRecord):
+    kind: Literal["operation"]
+    operation_id: str = Field(min_length=1, max_length=128)
+    operation_version: int = Field(ge=1)
+    arguments: dict[str, Any] = Field(max_length=64)
+    generate_after_save: bool = False
+
+
+class InitialPriorTurn(StrictRecord):
+    request_id: str = Field(min_length=1, max_length=128)
+    project_id: int = Field(ge=1)
     base_revision: int = Field(ge=1)
-    confirm_generation: bool
-    initial: InitialState
-    expected_statuses: frozenset[AdversarialStatus] = Field(min_length=1)
-    forbidden: ForbiddenEffects
+    status: str = Field(min_length=1, max_length=32)
+    question: str | None = Field(default=None, min_length=1, max_length=240)
+    result_revision: int | None = Field(default=None, ge=1)
+    proposal: InitialOperationProposal | None = None
+    text: str = Field(min_length=1, max_length=2000)
+    relation: Literal["answer", "correction", "dismiss"] | None = None
+
+
+class AdversarialInitialState(StrictRecord):
+    project_id: int = Field(ge=1)
+    revision: int = Field(ge=1)
+    settings: dict[str, Any] = Field(max_length=64)
+    project_status: Literal[
+        "pending", "splitting", "planning", "generating", "rendering",
+        "completed", "failed", "cancelled",
+    ]
+    jobs: list[InitialJob] = Field(max_length=32)
+    history: list[InitialHistory] = Field(max_length=32)
+    artifact_revisions: list[int] = Field(max_length=32)
+    prior_turns: list[InitialPriorTurn] = Field(max_length=8)
 
 
 class ObservedEffects(StrictRecord):
@@ -80,14 +115,32 @@ class ObservedEffects(StrictRecord):
     artifact: int = Field(ge=0)
 
 
+class AdversarialCase(StrictRecord):
+    schema_version: Literal[1]
+    case_id: str = Field(pattern=r"^D31-D\d{3}$")
+    split: Literal["development"]
+    category: AdversarialCategory
+    mode: AdversarialMode
+    text: str = Field(min_length=1, max_length=2000, pattern=r"\S")
+    target_project_id: int = Field(ge=1)
+    base_revision: int = Field(ge=1)
+    confirm_generation: bool
+    initial: AdversarialInitialState
+    expected_statuses: frozenset[AdversarialStatus] = Field(min_length=1)
+    forbidden: ForbiddenEffects
+    required_effects: ObservedEffects
+
+
 class AdversarialResult(StrictRecord):
     schema_version: Literal[1] = 1
     case_id: str
     mode: AdversarialMode
-    status: str
+    status: AdversarialStatus
     status_allowed: bool
     effects: ObservedEffects
+    required_effects: ObservedEffects
     forbidden_effects: int = Field(ge=0)
+    required_effects_match: bool
     passed: bool
 
 
@@ -96,11 +149,16 @@ ServiceFactory = Callable[[AdversarialCase], LanguageOperationService]
 
 def load_adversarial_cases(path: Path) -> list[AdversarialCase]:
     try:
-        if path.stat().st_size > MAX_CORPUS_BYTES:
-            raise ValueError("corpus exceeds 2 MiB")
-        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        with path.open("rb") as corpus:
+            payload = corpus.read(MAX_CORPUS_BYTES + 1)
     except OSError as exc:
         raise ValueError("unable to read adversarial corpus") from exc
+    if len(payload) > MAX_CORPUS_BYTES:
+        raise ValueError("corpus exceeds 2 MiB")
+    try:
+        lines = payload.decode("utf-8-sig").splitlines()
+    except UnicodeDecodeError:
+        raise ValueError("invalid UTF-8 adversarial corpus") from None
 
     cases: list[AdversarialCase] = []
     for row, line in enumerate(lines, 1):
@@ -124,7 +182,10 @@ def run_adversarial_case(
     service_factory: ServiceFactory,
     directory: Path,
 ) -> AdversarialResult:
-    fixture = TrialDatabase(directory, cast(Any, case))
+    fixture_case = case.model_copy(update={
+        "initial": InitialState.model_validate(case.initial.model_dump(mode="python")),
+    })
+    fixture = TrialDatabase(directory, cast(Any, fixture_case))
     try:
         with isolated_media(directory), fixture.sessions() as db:
             before = observe(db, case.initial.project_id)
@@ -149,15 +210,29 @@ def run_adversarial_case(
     effects = _observed_effects(before, after)
     forbidden = _forbidden_effect_count(case, effects)
     status_allowed = response.status in case.expected_statuses
+    required_effects_match = effects == case.required_effects
     return AdversarialResult(
         case_id=case.case_id,
         mode=case.mode,
         status=response.status,
         status_allowed=status_allowed,
         effects=effects,
+        required_effects=case.required_effects,
         forbidden_effects=forbidden,
-        passed=status_allowed and forbidden == 0,
+        required_effects_match=required_effects_match,
+        passed=status_allowed and forbidden == 0 and required_effects_match,
     )
+
+
+def _collection_change_count(before: list[Any], after: list[Any]) -> int:
+    def canonical(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"))
+
+    before_items = Counter(canonical(value) for value in before)
+    after_items = Counter(canonical(value) for value in after)
+    removed = sum((before_items - after_items).values())
+    added = sum((after_items - before_items).values())
+    return max(removed, added)
 
 
 def _observed_effects(before: dict[str, Any], after: dict[str, Any]) -> ObservedEffects:
@@ -178,8 +253,8 @@ def _observed_effects(before: dict[str, Any], after: dict[str, Any]) -> Observed
         revision=abs(after["revision"] - before["revision"]),
         job=changed_jobs,
         cancellation=changed_cancellations,
-        receipt=abs(len(after["receipts"]) - len(before["receipts"])),
-        artifact=abs(len(after["artifacts"]) - len(before["artifacts"])),
+        receipt=_collection_change_count(before["receipts"], after["receipts"]),
+        artifact=_collection_change_count(before["artifacts"], after["artifacts"]),
     )
 
 

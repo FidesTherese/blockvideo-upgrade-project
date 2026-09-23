@@ -20,8 +20,12 @@ category, alongside zero unauthorized effects, replay, or secret disclosure.
 
 Implementation remains layered: production `app` code never imports evaluation
 tooling; migrations own schema upgrades/backups; UI consumes explicit backend
-reason codes; test failpoints cannot be selected by public requests. Any behavior
-change after D36 creates a new candidate and invalidates affected evaluation evidence.
+reason codes; test failpoints cannot be selected by public requests. D31 development
+corpora are single-open byte-bounded inputs with strict bounded nested fixture
+records. Their outcomes require exact persisted effect counts, using canonical
+collection contents rather than lengths, so positive controls cannot pass on status
+alone. Any behavior change after D36 creates a new candidate and invalidates affected
+evaluation evidence.
 
 ## D30 functional candidate acceptance
 

@@ -224,10 +224,24 @@ or confirmation token, and records diagnostic `guard_code="negative_intent"`.
 `LanguageDiagnostics.guard_code` adds that literal.
 
 `evaluation/adversarial.py` defines strict `AdversarialCase` and `AdversarialResult`
-records and loads only `evaluation/d31/development.jsonl`. Cases contain synthetic
-text, mode, initial state, expected status class, and explicit forbidden effects;
-they contain no secrets or executable handler names. `scripts.run_adversarial`
-uses isolated temporary DB/media roots and the ordinary language/core path.
+records and loads only `evaluation/d31/development.jsonl`. The loader opens the
+corpus once in binary mode, reads at most `MAX_CORPUS_BYTES + 1`, rejects excess
+bytes, and only then decodes UTF-8 with optional BOM; it must not use a separate
+metadata size check. Cases contain synthetic text, mode, expected status class,
+explicit forbidden effects, and exact required effects for settings, revision,
+jobs, cancellation, receipts, and artifacts. Initial jobs (maximum 32), settings
+history rows (maximum 32), and prior turns (maximum 8) use dedicated frozen
+Pydantic records with `extra="forbid"`; their strings and child collections are
+bounded to the existing interpretation/fixture limits. The runner converts the
+validated initial state to the existing comparison fixture contract, uses isolated
+temporary DB/media roots, and executes the ordinary language/core path.
+
+Effect comparison is content-based. Jobs remain keyed by ID; receipts and artifacts
+are canonicalized as sorted-key compact JSON and compared as multisets so an
+in-place mutation or same-count replacement is an observed effect. A result passes
+only when its status is allowed, no forbidden effect occurred, and every observed
+effect count exactly equals the case's `required_effects`. Result JSON contains
+only IDs, status, booleans, and counts; it never contains corpus/model text.
 
 `app/main.py` changes the catch-all handler to log only
 `error_class`, route, and a generated correlation ID; the JSON response is fixed:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from io import StringIO
+from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import re
@@ -18,7 +18,13 @@ from app.language_operations.service import LanguageOperationService
 from app.main import create_app
 from app.models.job import GenerationJob, JobStatus
 from app.operations.bootstrap import operation_service
-from evaluation.adversarial import AdversarialCase, load_adversarial_cases, run_adversarial_case
+from evaluation.adversarial import (
+    MAX_CORPUS_BYTES,
+    AdversarialCase,
+    _observed_effects,
+    load_adversarial_cases,
+    run_adversarial_case,
+)
 from evaluation.comparison_fixture import observe as observe_state
 from tests.test_language_operations import ReplyAdapter, create
 from scripts.run_adversarial import FAKE_REPLIES, main as adversarial_main
@@ -81,6 +87,14 @@ def adversarial_payload(*, case_id: str = "D31-D001", category: str = "prompt_in
             "receipt": True,
             "artifact": True,
         },
+        "required_effects": {
+            "settings": 0,
+            "revision": 0,
+            "job": 0,
+            "cancellation": 0,
+            "receipt": 0,
+            "artifact": 0,
+        },
     }
 
 
@@ -109,6 +123,7 @@ def retry_case(mode: str, *, negative: bool) -> AdversarialCase:
     }]
     if not negative:
         payload["forbidden"].update({"job": False, "receipt": False})
+        payload["required_effects"].update({"job": 1, "receipt": 1})
     return adversarial_case(payload)
 
 
@@ -216,6 +231,53 @@ def test_adversarial_contract_rejects_unknown_properties(tmp_path: Path) -> None
         load_adversarial_cases(path)
 
 
+@pytest.mark.parametrize(("collection", "record"), [
+    ("jobs", {
+        "id": 7,
+        "project_id": 1,
+        "status": "failed",
+        "input_revision": 1,
+        "cancel_requested": False,
+        "unknown": "rejected",
+    }),
+    ("history", {"revision": 1, "settings": {}, "unknown": "rejected"}),
+    ("prior_turns", {
+        "request_id": "prior-1",
+        "project_id": 1,
+        "base_revision": 1,
+        "status": "needs_input",
+        "question": "synthetic question",
+        "result_revision": None,
+        "proposal": None,
+        "text": "synthetic prior turn",
+        "relation": None,
+        "unknown": "rejected",
+    }),
+])
+def test_adversarial_contract_rejects_unknown_nested_properties(
+    tmp_path: Path, collection: str, record: dict[str, Any],
+) -> None:
+    payload = adversarial_payload()
+    payload["initial"][collection] = [record]
+    path = tmp_path / f"extra-{collection}.jsonl"
+    write_adversarial_cases(path, [payload])
+
+    with pytest.raises(ValueError, match="invalid adversarial case"):
+        load_adversarial_cases(path)
+
+
+def test_adversarial_contract_bounds_nested_collections(tmp_path: Path) -> None:
+    payload = adversarial_payload()
+    payload["initial"]["history"] = [
+        {"revision": revision, "settings": {}} for revision in range(1, 34)
+    ]
+    path = tmp_path / "too-many-history-records.jsonl"
+    write_adversarial_cases(path, [payload])
+
+    with pytest.raises(ValueError, match="invalid adversarial case"):
+        load_adversarial_cases(path)
+
+
 def test_adversarial_contract_rejects_duplicate_ids(tmp_path: Path) -> None:
     path = tmp_path / "duplicates.jsonl"
     write_adversarial_cases(path, [adversarial_payload(), adversarial_payload()])
@@ -226,10 +288,47 @@ def test_adversarial_contract_rejects_duplicate_ids(tmp_path: Path) -> None:
 
 def test_adversarial_contract_rejects_files_larger_than_two_mib(tmp_path: Path) -> None:
     path = tmp_path / "oversized.jsonl"
-    path.write_bytes(b" " * ((2 * 1024 * 1024) + 1))
+    path.write_bytes(b" " * (MAX_CORPUS_BYTES + 1))
 
     with pytest.raises(ValueError, match="corpus exceeds 2 MiB"):
         load_adversarial_cases(path)
+
+
+def test_adversarial_loader_opens_once_and_reads_only_bounded_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.dumps(adversarial_payload(), ensure_ascii=False).encode("utf-8") + b"\n"
+    reads: list[int] = []
+    opens = 0
+
+    class RecordingBytesIO(BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            reads.append(size)
+            return super().read(size)
+
+    def open_once(_path: Path, mode: str = "r", **_kwargs: Any) -> RecordingBytesIO:
+        nonlocal opens
+        opens += 1
+        assert mode == "rb"
+        return RecordingBytesIO(payload)
+
+    monkeypatch.setattr(Path, "open", open_once)
+
+    cases = load_adversarial_cases(tmp_path / "does-not-need-to-exist.jsonl")
+
+    assert len(cases) == 1
+    assert opens == 1
+    assert reads == [MAX_CORPUS_BYTES + 1]
+
+
+def test_adversarial_loader_rejects_invalid_utf8_without_echoing_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "invalid-utf8.jsonl"
+    path.write_bytes(b"\xffSECRET")
+
+    with pytest.raises(ValueError, match="invalid UTF-8 adversarial corpus") as caught:
+        load_adversarial_cases(path)
+
+    assert "SECRET" not in str(caught.value)
 
 
 def test_committed_development_corpus_covers_both_modes_and_fake_map() -> None:
@@ -282,10 +381,57 @@ def test_adversarial_runner_completes_positive_retry_through_ordinary_service(
     assert result.status == "completed"
     assert result.effects.job == 1
     assert result.effects.receipt == 1
+    assert result.required_effects == result.effects
     assert result.effects.settings == result.effects.revision == 0
     assert result.effects.cancellation == result.effects.artifact == 0
     assert result.forbidden_effects == 0
+    assert result.required_effects_match
     assert result.passed
+
+
+@pytest.mark.parametrize("collection", ["receipts", "artifacts"])
+def test_observed_effects_detects_same_count_collection_replacement(collection: str) -> None:
+    before = {
+        "settings": {},
+        "revision": 1,
+        "jobs": [],
+        "receipts": ["request-before"],
+        "artifacts": [{"id": 1, "revision": 1, "video_path": "before.mp4"}],
+    }
+    after = {
+        **before,
+        collection: (
+            ["request-after"]
+            if collection == "receipts"
+            else [{"id": 1, "revision": 1, "video_path": "after.mp4"}]
+        ),
+    }
+
+    effects = _observed_effects(before, after)
+
+    assert getattr(effects, "receipt" if collection == "receipts" else "artifact") == 1
+
+
+@pytest.mark.parametrize("mode", ["all_tools", "stateful"])
+def test_positive_control_fails_when_status_matches_but_required_effects_do_not(
+    tmp_path: Path, mode: str,
+) -> None:
+    class StatusOnlyService:
+        async def submit(self, _db: Any, _request: Any) -> Any:
+            return type("Response", (), {
+                "status": "completed",
+                "confirmation_token": None,
+            })()
+
+    result = run_adversarial_case(
+        retry_case(mode, negative=False),
+        lambda _case: StatusOnlyService(),  # type: ignore[return-value]
+        tmp_path / f"{mode}-status-only",
+    )
+
+    assert result.status_allowed
+    assert not result.required_effects_match
+    assert not result.passed
 
 
 @pytest.mark.parametrize("mode", ["all_tools", "stateful"])
