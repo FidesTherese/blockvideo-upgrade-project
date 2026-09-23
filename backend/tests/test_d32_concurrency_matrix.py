@@ -29,6 +29,7 @@ from app.language_operations.service import LanguageOperationService
 from app.models.artifact import GenerationArtifact
 from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob
+from app.models.language_request import LanguageRequestRecord
 from app.models.language_turn import LanguageTurn
 from app.models.operation_request import OperationReceipt
 from app.models.project import Project
@@ -274,6 +275,26 @@ def snapshot(project_id: int) -> dict[str, object]:
                     .order_by(OperationReceipt.request_id)
                 )
             ],
+            "language_requests": [
+                _record(row)
+                for row in db.scalars(
+                    select(LanguageRequestRecord)
+                    .where(LanguageRequestRecord.project_id == project_id)
+                    .order_by(LanguageRequestRecord.request_id)
+                )
+            ],
+            "language_turns": [
+                _record(row)
+                for row in db.scalars(
+                    select(LanguageTurn)
+                    .join(
+                        LanguageRequestRecord,
+                        LanguageRequestRecord.request_id == LanguageTurn.request_id,
+                    )
+                    .where(LanguageRequestRecord.project_id == project_id)
+                    .order_by(LanguageTurn.request_id)
+                )
+            ],
             "external_calls": [
                 _record(row)
                 for row in db.scalars(
@@ -463,6 +484,10 @@ def test_dialogue_three_way_race_has_one_durable_successor(
         winner = winners[0]
         winner_index = responses.index(winner)
         winner_payload = payloads[winner_index]
+        response_by_id = {response.request_id: response for response in responses}
+        losing_payloads = [
+            payload for payload in payloads if payload["request_id"] != winner.request_id
+        ]
         successor_request_id, successor = _successor(parent["request_id"])
         assert successor_request_id == winner.request_id
         assert successor.relation == winner.relation
@@ -473,6 +498,37 @@ def test_dialogue_three_way_race_has_one_durable_successor(
             )
 
         state = snapshot(project_id)
+        request_rows = {
+            row["request_id"]: row for row in state["language_requests"]
+        }
+        assert set(request_rows) == {
+            parent["request_id"],
+            *(payload["request_id"] for payload in payloads),
+        }
+        assert request_rows[parent["request_id"]]["status"] == parent["status"]
+        assert request_rows[parent["request_id"]]["response_json"] == parent
+        for response in responses:
+            record = request_rows[response.request_id]
+            assert record["project_id"] == project_id
+            assert record["status"] == response.status
+            assert record["response_json"] == response.model_dump(mode="json")
+
+        turn_rows = {row["request_id"]: row for row in state["language_turns"]}
+        assert set(turn_rows) == {parent["request_id"], winner.request_id}
+        assert turn_rows[parent["request_id"]] == {
+            "request_id": parent["request_id"],
+            "parent_request_id": None,
+            "relation": None,
+            "text": "字幕を大きくして",
+            "successor_request_id": winner.request_id,
+        }
+        assert turn_rows[winner.request_id] == {
+            "request_id": winner.request_id,
+            "parent_request_id": parent["request_id"],
+            "relation": winner_payload["continuation"]["relation"],
+            "text": winner_payload["text"],
+            "successor_request_id": None,
+        }
         assert state["jobs"] == []
         assert state["external_calls"] == []
         assert state["artifacts"] == []
@@ -503,7 +559,23 @@ def test_dialogue_three_way_race_has_one_durable_successor(
                 service.submit(replay_db, LanguageInput.model_validate(winner_payload))
             )
         assert replay.model_dump(mode="json") == winner.model_dump(mode="json")
+        for losing_payload in losing_payloads:
+            expected = response_by_id[losing_payload["request_id"]]
+            assert expected.status == "blocked"
+            assert expected.failure is not None
+            assert expected.failure.reason_code == "dialogue_superseded"
+            with get_session_factory()() as replay_db:
+                replay = asyncio.run(
+                    service.submit(
+                        replay_db, LanguageInput.model_validate(losing_payload)
+                    )
+                )
+            assert replay.model_dump(mode="json") == request_rows[
+                losing_payload["request_id"]
+            ]["response_json"]
+            assert replay.model_dump(mode="json") == expected.model_dump(mode="json")
         assert race_adapter.calls == calls_before_replay
+        assert snapshot(project_id) == state
         assert _successor(parent["request_id"])[0] == winner.request_id
         with get_session_factory()() as parent_db:
             assert service.get(parent_db, parent["request_id"]).superseded_by == winner.request_id
@@ -556,6 +628,34 @@ def test_dialogue_same_successor_id_changed_body_race_replays_only_winner(
         assert successor_request_id == request_id
         assert successor.text == winner_payload["text"]
         state = snapshot(project_id)
+        request_rows = {
+            row["request_id"]: row for row in state["language_requests"]
+        }
+        assert set(request_rows) == {parent["request_id"], request_id}
+        assert request_rows[parent["request_id"]]["status"] == parent["status"]
+        assert request_rows[parent["request_id"]]["response_json"] == parent
+        assert request_rows[request_id]["project_id"] == project_id
+        assert request_rows[request_id]["status"] == winner.status
+        assert request_rows[request_id]["response_json"] == winner.model_dump(
+            mode="json"
+        )
+        turn_rows = {row["request_id"]: row for row in state["language_turns"]}
+        assert turn_rows == {
+            parent["request_id"]: {
+                "request_id": parent["request_id"],
+                "parent_request_id": None,
+                "relation": None,
+                "text": "字幕を大きくして",
+                "successor_request_id": request_id,
+            },
+            request_id: {
+                "request_id": request_id,
+                "parent_request_id": parent["request_id"],
+                "relation": "answer",
+                "text": winner_payload["text"],
+                "successor_request_id": None,
+            },
+        }
         assert state["project"]["revision"] == 2
         assert state["project"]["settings"]["subtitle_font_size"] == committed_value
         assert [row["revision"] for row in state["settings_history"]] == [1, 2]
