@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor
+import os
 from datetime import date, datetime
 from enum import Enum
-from threading import Barrier
+from pathlib import Path
+import subprocess
+import sys
+import time
 from typing import Any
 
 import pytest
@@ -22,6 +25,110 @@ from app.models.project import Project
 from app.models.settings_revision import SettingsRevision
 from app.services.settings_history import configuration
 from tests.test_operation_processes import adjustment, make_project, run_process
+
+
+_PROCESS_RACE_WORKER = r"""
+import json
+from pathlib import Path
+import sys
+import time
+
+from app.db import get_session_factory
+from app.operations.bootstrap import build_operation_service
+from app.operations.contracts import OperationRequest
+from app.operations.errors import OperationError
+
+request = OperationRequest.model_validate(json.loads(sys.argv[1]))
+ready_path = Path(sys.argv[2])
+release_path = Path(sys.argv[3])
+service = build_operation_service()
+with get_session_factory()() as db:
+    ready_path.write_text("ready", encoding="ascii")
+    deadline = time.monotonic() + 30
+    while not release_path.exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit("parent did not release process race")
+        time.sleep(0.01)
+    try:
+        result = service.execute(db, request)
+        print(json.dumps(result.model_dump(mode="json")))
+    except OperationError as error:
+        print(json.dumps({"reason_code": error.reason_code}))
+"""
+
+
+def _run_process_race(
+    requests: list[dict[str, Any]], rendezvous_dir: Path
+) -> list[subprocess.CompletedProcess[str]]:
+    rendezvous_dir.mkdir()
+    release_path = rendezvous_dir / "release"
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        for index, request in enumerate(requests):
+            ready_path = rendezvous_dir / f"ready-{index}"
+            processes.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        _PROCESS_RACE_WORKER,
+                        json.dumps(request),
+                        str(ready_path),
+                        str(release_path),
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=Path(__file__).resolve().parents[1],
+                    creationflags=(
+                        subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                    ),
+                )
+            )
+
+        ready_paths = [rendezvous_dir / f"ready-{index}" for index in range(len(requests))]
+        deadline = time.monotonic() + 30
+        while not all(path.exists() for path in ready_paths):
+            exited = [process.returncode for process in processes if process.poll() is not None]
+            if exited:
+                raise AssertionError(f"race worker exited before rendezvous: {exited}")
+            if time.monotonic() >= deadline:
+                raise AssertionError("race workers did not reach rendezvous")
+            time.sleep(0.01)
+
+        release_path.write_text("release", encoding="ascii")
+        completed: list[subprocess.CompletedProcess[str]] = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=40)
+            completed.append(
+                subprocess.CompletedProcess(
+                    process.args, process.returncode, stdout=stdout, stderr=stderr
+                )
+            )
+        return completed
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+
+def _canonical_adjustment(project_id: int, delta: int) -> str:
+    return json.dumps(
+        {
+            "arguments": {"delta": delta},
+            "base_revision": 1,
+            "generation_requested": False,
+            "observed_state_revision": None,
+            "operation_id": "project.subtitle-font-size.adjust",
+            "operation_version": 1,
+            "project_id": project_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 def _canonical(value: Any) -> Any:
@@ -131,13 +238,13 @@ def test_snapshot_reopens_complete_canonical_state(temp_storage) -> None:
     "mode",
     ("same-id-same-body", "same-id-different-body", "different-id-same-revision"),
 )
-def test_repeated_three_process_matrix(temp_storage, mode: str) -> None:
-    for _iteration in range(5):
+def test_repeated_three_process_matrix(temp_storage, tmp_path: Path, mode: str) -> None:
+    for iteration in range(5):
         project_id = make_project()
+        before = snapshot(project_id)
         shared_id = f"d32-{mode}-{project_id}"
-        barrier = Barrier(3)
-
-        def send(index: int) -> tuple[str, dict[str, Any]]:
+        requests = []
+        for index in range(3):
             request_id = (
                 f"{shared_id}-{index}"
                 if mode == "different-id-same-revision"
@@ -145,39 +252,73 @@ def test_repeated_three_process_matrix(temp_storage, mode: str) -> None:
             )
             delta = 2 + index if mode == "same-id-different-body" else 2
             request = adjustment(project_id, request_id=request_id, delta=delta)
-            barrier.wait(timeout=10)
-            process = run_process(request.model_dump(mode="json"))
+            requests.append(request.model_dump(mode="json"))
+
+        processes = _run_process_race(
+            requests, tmp_path / f"{mode}-{iteration}"
+        )
+        for process in processes:
             assert process.returncode == 0, process.stderr
-            return process.stdout, json.loads(process.stdout)
-
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            outcomes = list(pool.map(send, range(3)))
-
-        serialized = [item[0] for item in outcomes]
-        results = [item[1] for item in outcomes]
-        committed = [item for item in results if item.get("revision") == 2]
+        serialized = [process.stdout for process in processes]
+        results = [json.loads(process.stdout) for process in processes]
+        successful = [item for item in results if item.get("revision") == 2]
         if mode == "same-id-same-body":
             assert serialized[0] == serialized[1] == serialized[2]
-            assert len(committed) == 3
+            assert len(successful) == 3
         else:
             reason_code = (
                 "request_id_conflict"
                 if mode == "same-id-different-body"
                 else "stale_state"
             )
-            assert len(committed) == 1
+            assert len(successful) == 1
             assert sum(item.get("reason_code") == reason_code for item in results) == 2
 
         state = snapshot(project_id)
-        receipt = state["receipts"][0]
-        assert state["project"]["revision"] == 2
-        assert state["project"]["settings"]["subtitle_font_size"] == receipt[
-            "resolved_arguments"
-        ]["value"]
-        assert [row["revision"] for row in state["settings_history"]] == [1, 2]
-        assert sum(row["revision"] == 2 for row in state["settings_history"]) == 1
+        assert before["receipts"] == []
+        assert before["jobs"] == state["jobs"] == []
+        assert before["external_calls"] == state["external_calls"] == []
+        assert before["artifacts"] == state["artifacts"] == []
         assert len(state["receipts"]) == 1
+        receipt = state["receipts"][0]
+        winner = successful[0]
+
+        assert state["project"]["id"] == before["project"]["id"]
+        assert state["project"]["revision"] == before["project"]["revision"] + 1
+        assert state["project"]["status"] == before["project"]["status"]
+        assert before["project"]["current_artifact_id"] is None
+        assert state["project"]["current_artifact_id"] is None
+        expected_settings = dict(before["project"]["settings"])
+        expected_settings["subtitle_font_size"] = receipt["resolved_arguments"]["value"]
+        assert state["project"]["settings"] == expected_settings
+
+        assert before["settings_history"] == []
+        assert [row["revision"] for row in state["settings_history"]] == [1, 2]
+        baseline, result = state["settings_history"]
+        assert baseline["project_id"] == result["project_id"] == project_id
+        assert baseline["revision"] == before["project"]["revision"] == 1
+        assert baseline["settings_json"] == before["project"]["settings"]
+        assert baseline["changed_fields"] == []
+        assert result["revision"] == state["project"]["revision"] == 2
+        assert result["settings_json"] == state["project"]["settings"]
+        assert result["changed_fields"] == ["subtitle_font_size"]
+        assert result["restored_from_revision"] is None
+
+        assert receipt["project_id"] == project_id
         assert receipt["job_id"] is None
-        assert state["jobs"] == []
-        assert state["external_calls"] == []
-        assert state["artifacts"] == []
+        assert receipt["result_json"] == winner
+        winning_delta = (
+            receipt["resolved_arguments"]["value"]
+            - before["project"]["settings"]["subtitle_font_size"]
+        )
+        assert receipt["canonical_request"] == _canonical_adjustment(
+            project_id, winning_delta
+        )
+        for replay in successful:
+            assert replay == receipt["result_json"]
+
+        assert all(row["project_id"] == project_id for row in state["settings_history"])
+        assert all(row["project_id"] == project_id for row in state["receipts"])
+        assert state["project"]["current_artifact_id"] not in {
+            row["id"] for row in state["artifacts"]
+        }
