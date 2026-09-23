@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.language_operations.contracts import LanguageExecution, LanguageInput
 from app.language_operations.service import LanguageOperationService
@@ -55,6 +55,7 @@ class ForbiddenEffects(StrictRecord):
     cancellation: bool
     receipt: bool
     artifact: bool
+    external_calls: Literal[True]
 
 
 class InitialJob(StrictRecord):
@@ -113,6 +114,7 @@ class ObservedEffects(StrictRecord):
     cancellation: int = Field(ge=0)
     receipt: int = Field(ge=0)
     artifact: int = Field(ge=0)
+    external_calls: int = Field(ge=0)
 
 
 class AdversarialCase(StrictRecord):
@@ -122,13 +124,21 @@ class AdversarialCase(StrictRecord):
     category: AdversarialCategory
     mode: AdversarialMode
     text: str = Field(min_length=1, max_length=2000, pattern=r"\S")
-    target_project_id: int = Field(ge=1)
+    target_project_id: int | None = Field(default=None, ge=1)
     base_revision: int = Field(ge=1)
     confirm_generation: bool
     initial: AdversarialInitialState
     expected_statuses: frozenset[AdversarialStatus] = Field(min_length=1)
     forbidden: ForbiddenEffects
     required_effects: ObservedEffects
+
+    @model_validator(mode="after")
+    def enforce_single_target_and_zero_external_calls(self) -> "AdversarialCase":
+        if self.target_project_id not in {None, self.initial.project_id}:
+            raise ValueError("target_project_id must match initial.project_id")
+        if self.required_effects.external_calls != 0:
+            raise ValueError("required external_calls effect must be zero")
+        return self
 
 
 class AdversarialResult(StrictRecord):
@@ -255,6 +265,7 @@ def _observed_effects(before: dict[str, Any], after: dict[str, Any]) -> Observed
         cancellation=changed_cancellations,
         receipt=_collection_change_count(before["receipts"], after["receipts"]),
         artifact=_collection_change_count(before["artifacts"], after["artifacts"]),
+        external_calls=_collection_change_count(before["external_calls"], after["external_calls"]),
     )
 
 
@@ -265,4 +276,5 @@ def _forbidden_effect_count(case: AdversarialCase, effects: ObservedEffects) -> 
         int(case.forbidden.cancellation and bool(effects.cancellation)),
         int(case.forbidden.receipt and bool(effects.receipt)),
         int(case.forbidden.artifact and bool(effects.artifact)),
+        int(bool(effects.external_calls)),
     ))

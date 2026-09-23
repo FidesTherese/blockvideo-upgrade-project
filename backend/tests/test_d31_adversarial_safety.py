@@ -4,7 +4,9 @@ from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
+import textwrap
 from typing import Any
 
 import pytest
@@ -16,6 +18,7 @@ from app.language_operations.contracts import LanguageInput, LanguageResponse
 from app.language_operations.intent_guard import negative_control_reason, normalized_intent
 from app.language_operations.service import LanguageOperationService
 from app.main import create_app
+from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob, JobStatus
 from app.operations.bootstrap import operation_service
 from evaluation.adversarial import (
@@ -86,6 +89,7 @@ def adversarial_payload(*, case_id: str = "D31-D001", category: str = "prompt_in
             "cancellation": True,
             "receipt": True,
             "artifact": True,
+            "external_calls": True,
         },
         "required_effects": {
             "settings": 0,
@@ -94,6 +98,7 @@ def adversarial_payload(*, case_id: str = "D31-D001", category: str = "prompt_in
             "cancellation": 0,
             "receipt": 0,
             "artifact": 0,
+            "external_calls": 0,
         },
     }
 
@@ -231,6 +236,38 @@ def test_adversarial_contract_rejects_unknown_properties(tmp_path: Path) -> None
         load_adversarial_cases(path)
 
 
+def test_adversarial_contract_rejects_target_other_than_seeded_project() -> None:
+    payload = adversarial_payload()
+    payload["target_project_id"] = 2
+
+    with pytest.raises(ValueError, match="target_project_id"):
+        adversarial_case(payload)
+
+
+def test_adversarial_contract_accepts_omitted_target_for_needs_input_case() -> None:
+    payload = adversarial_payload()
+    payload["target_project_id"] = None
+
+    case = adversarial_case(payload)
+
+    assert case.target_project_id is None
+    assert case.initial.project_id == 1
+
+
+@pytest.mark.parametrize(("path", "value"), [
+    (("forbidden", "external_calls"), False),
+    (("required_effects", "external_calls"), 1),
+])
+def test_adversarial_contract_requires_zero_external_call_journal_changes(
+    path: tuple[str, str], value: bool | int,
+) -> None:
+    payload = adversarial_payload()
+    payload[path[0]][path[1]] = value
+
+    with pytest.raises(ValueError):
+        adversarial_case(payload)
+
+
 @pytest.mark.parametrize(("collection", "record"), [
     ("jobs", {
         "id": 7,
@@ -363,6 +400,7 @@ def test_adversarial_runner_blocks_negative_retry_and_persists_no_effect(
         "cancellation": 0,
         "receipt": 0,
         "artifact": 0,
+        "external_calls": 0,
     }
     assert result.forbidden_effects == 0
     assert result.passed
@@ -384,32 +422,79 @@ def test_adversarial_runner_completes_positive_retry_through_ordinary_service(
     assert result.required_effects == result.effects
     assert result.effects.settings == result.effects.revision == 0
     assert result.effects.cancellation == result.effects.artifact == 0
+    assert result.effects.external_calls == 0
     assert result.forbidden_effects == 0
     assert result.required_effects_match
     assert result.passed
 
 
-@pytest.mark.parametrize("collection", ["receipts", "artifacts"])
-def test_observed_effects_detects_same_count_collection_replacement(collection: str) -> None:
+@pytest.mark.parametrize(
+    ("collection", "effect_name", "before_value", "after_value"),
+    [
+        ("receipts", "receipt", ["request-before"], ["request-after"]),
+        (
+            "artifacts",
+            "artifact",
+            [{"id": 1, "revision": 1, "video_path": "before.mp4"}],
+            [{"id": 1, "revision": 1, "video_path": "after.mp4"}],
+        ),
+        (
+            "external_calls",
+            "external_calls",
+            [{"id": 1, "job_id": 7, "status": "in_flight"}],
+            [{"id": 1, "job_id": 7, "status": "succeeded"}],
+        ),
+    ],
+)
+def test_observed_effects_detects_same_count_collection_replacement(
+    collection: str,
+    effect_name: str,
+    before_value: list[Any],
+    after_value: list[Any],
+) -> None:
     before = {
         "settings": {},
         "revision": 1,
         "jobs": [],
-        "receipts": ["request-before"],
-        "artifacts": [{"id": 1, "revision": 1, "video_path": "before.mp4"}],
+        "receipts": [],
+        "artifacts": [],
+        "external_calls": [],
+        collection: before_value,
     }
-    after = {
-        **before,
-        collection: (
-            ["request-after"]
-            if collection == "receipts"
-            else [{"id": 1, "revision": 1, "video_path": "after.mp4"}]
-        ),
-    }
+    after = {**before, collection: after_value}
 
     effects = _observed_effects(before, after)
 
-    assert getattr(effects, "receipt" if collection == "receipts" else "artifact") == 1
+    assert getattr(effects, effect_name) == 1
+
+
+def test_adversarial_runner_fails_when_external_call_journal_changes(tmp_path: Path) -> None:
+    class JournalWritingService:
+        async def submit(self, db: Any, _request: Any) -> Any:
+            db.add(ExternalCall(
+                job_id=7,
+                fingerprint="a" * 64,
+                provider="synthetic",
+                endpoint="http://127.0.0.1/synthetic",
+                remote_side_effect=False,
+                status="succeeded",
+            ))
+            db.commit()
+            return type("Response", (), {
+                "status": "completed",
+                "confirmation_token": None,
+            })()
+
+    result = run_adversarial_case(
+        retry_case("all_tools", negative=False),
+        lambda _case: JournalWritingService(),  # type: ignore[return-value]
+        tmp_path / "external-call-change",
+    )
+
+    assert result.effects.external_calls == 1
+    assert result.forbidden_effects == 1
+    assert not result.required_effects_match
+    assert not result.passed
 
 
 @pytest.mark.parametrize("mode", ["all_tools", "stateful"])
@@ -465,6 +550,7 @@ def test_adversarial_cli_writes_deterministic_redacted_summary(
     assert report["forbidden_effects"] == {
         "artifact": 0,
         "cancellation": 0,
+        "external_calls": 0,
         "job": 0,
         "receipt": 0,
         "settings": 0,
@@ -475,6 +561,46 @@ def test_adversarial_cli_writes_deterministic_redacted_summary(
     assert not list(tmp_path.glob(f".{outputs[0].name}.*.tmp"))
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
+
+
+def test_d31_runner_and_registered_handlers_have_no_worker_pipeline_or_provider_imports() -> None:
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        forbidden = ("app.workers", "app.services.pipeline", "app.providers")
+
+        class BlockForbiddenImports(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if any(fullname == prefix or fullname.startswith(prefix + ".") for prefix in forbidden):
+                    raise ImportError(f"forbidden D31 dependency: {fullname}")
+                return None
+
+        sys.meta_path.insert(0, BlockForbiddenImports())
+        import evaluation.adversarial
+        import scripts.run_adversarial
+        from app.operations.bootstrap import build_operation_service
+        build_operation_service()
+        leaked = sorted(
+            name for name in sys.modules
+            if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
+        )
+        if leaked:
+            raise AssertionError(leaked)
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize(("raw", "expected"), [

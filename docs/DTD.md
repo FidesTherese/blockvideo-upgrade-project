@@ -10,7 +10,7 @@
 - **Specification:** `specification.md`, `docs/plan-c/work-unit-31.md` through
   `docs/plan-c/work-unit-40.md`
 - **DTD:** `docs/DTD.md`
-- **Updated:** 2026-09-23
+- **Updated:** 2026-09-24
 - **Scope:** sequential hardening, blinded evaluation, and release-readiness decision
 - **Open decisions:** none for implementation. Held-out case content and independent
   evaluator identity remain intentionally outside the implementation process.
@@ -63,7 +63,8 @@ flowchart LR
     Lang --> Guard[intent_guard]
     Lang --> Core[OperationService]
     Core --> DB[(SQLite schema v1)]
-    Core --> Worker[Generation worker]
+    Core --> Live[Process-local job liveness]
+    Worker --> Live
     Worker --> Journal[External-call journal]
     Worker --> Artifacts[Immutable artifacts]
 
@@ -135,6 +136,7 @@ clients retain their present ownership and deadlines.
 ```text
 backend/app/
 ├── core/
+│   ├── provider_errors.py             # provider-neutral sanitized error contract
 │   └── startup_status.py              # process-local bounded startup state
 ├── migrations/
 │   ├── __init__.py
@@ -144,6 +146,8 @@ backend/app/
 │   └── schema.py                      # v0 -> v1 additive schema operation
 ├── language_operations/
 │   └── intent_guard.py                # deterministic negative-control veto
+├── services/
+│   └── job_liveness.py                # worker-free process-local liveness view
 ├── api/
 │   └── routes_startup.py              # GET /api/startup
 └── release_candidate/
@@ -227,21 +231,37 @@ or confirmation token, and records diagnostic `guard_code="negative_intent"`.
 records and loads only `evaluation/d31/development.jsonl`. The loader opens the
 corpus once in binary mode, reads at most `MAX_CORPUS_BYTES + 1`, rejects excess
 bytes, and only then decodes UTF-8 with optional BOM; it must not use a separate
-metadata size check. Cases contain synthetic text, mode, expected status class,
-explicit forbidden effects, and exact required effects for settings, revision,
-jobs, cancellation, receipts, and artifacts. Initial jobs (maximum 32), settings
+metadata size check. The harness is single-target: `target_project_id` may be
+`None`, otherwise it must exactly equal `initial.project_id`. Cases contain synthetic
+text, mode, expected status class, explicit forbidden effects, and exact required
+effects for settings, revision, jobs, cancellation, receipts, artifacts, and the
+external-call journal. Every D31 case fixes the required external-call-journal
+change count at zero and marks any journal change forbidden. Initial jobs (maximum
+32), settings
 history rows (maximum 32), and prior turns (maximum 8) use dedicated frozen
 Pydantic records with `extra="forbid"`; their strings and child collections are
 bounded to the existing interpretation/fixture limits. The runner converts the
 validated initial state to the existing comparison fixture contract, uses isolated
 temporary DB/media roots, and executes the ordinary language/core path.
 
-Effect comparison is content-based. Jobs remain keyed by ID; receipts and artifacts
-are canonicalized as sorted-key compact JSON and compared as multisets so an
-in-place mutation or same-count replacement is an observed effect. A result passes
+Effect comparison is content-based. Jobs remain keyed by ID; receipts, artifacts,
+and external-call journal records are canonicalized and compared as multisets so an
+in-place mutation or same-count replacement is an observed effect. Journal response
+bytes are represented only by SHA-256 in the in-memory observation. A result passes
 only when its status is allowed, no forbidden effect occurred, and every observed
 effect count exactly equals the case's `required_effects`. Result JSON contains
 only IDs, status, booleans, and counts; it never contains corpus/model text.
+
+The executable D31 dependency-boundary test imports `evaluation.adversarial`,
+`scripts.run_adversarial`, and the registered operation service in a clean Python
+process whose import finder rejects `app.workers`, `app.services.pipeline`, and
+`app.providers`. Operation readiness therefore reads process-local liveness through
+`app.services.job_liveness`; workers publish and clear markers without reversing the
+dependency. The sanitized `ProviderError` contract lives in
+`app.core.provider_errors`, so schema/settings validation does not import provider
+modules. This boundary prevents the tested runner/handler import graph from loading
+or starting worker/media-provider execution. It does not prove that arbitrary future
+dynamic or unjournaled network code is absent.
 
 `app/main.py` changes the catch-all handler to log only
 `error_class`, route, and a generated correlation ID; the JSON response is fixed:
@@ -646,15 +666,20 @@ by an HTTP request. Backup names are generated, resolved under the DB parent, op
 without shell invocation, and atomically replaced. Freeze paths are repository-
 relative and cannot escape the root. JSON loading uses bounded file-size checks:
 2 MiB for manifests/results and the existing case loader's limits for corpora.
-Evaluation output never includes source request text or labels. D38's detached
-expected hash detects transfer modification but does not authenticate reviewer
+Evaluation output never includes source request text or labels. D31 additionally
+requires zero content-level changes in the reopened `external_calls` journal and an
+import-blocked runner/operation graph with no worker, pipeline, or provider modules;
+these are precise journal/dependency guarantees, not a general network sandbox.
+D38's detached expected hash detects transfer modification but does not authenticate reviewer
 identity; the user-controlled review gate supplies that trust decision.
 
 ### Test design
 
-- **D31:** table-driven host-guard unit tests; API validation/log redaction; ordinary
-  core mutation tests proving no forbidden effect; paired All Tools/stateful fake
-  adapter cases; bounded real-model probe reported separately.
+- **D31:** table-driven host-guard unit tests; strict single-target validation; API
+  validation/log redaction; reopened content comparison including mandatory zero
+  external-call-journal changes; clean-process import blocking for worker, pipeline,
+  and provider dependencies; paired All Tools/stateful positive controls; bounded
+  real-model probe reported separately.
 - **D32:** thread/session and spawned-process barriers; assert one winner and complete
   persisted invariants after reopening the DB.
 - **D33:** crash matrix at each durable boundary; restart twice to prove state

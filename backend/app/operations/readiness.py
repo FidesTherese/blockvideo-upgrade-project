@@ -10,7 +10,7 @@ from app.operations.contracts import (
     Readiness,
     ReadinessResult,
 )
-from app.workers.job_runner import job_registry
+from app.services.job_liveness import is_running
 from app.services.job_records import has_active_project_job
 
 
@@ -27,7 +27,7 @@ def resolve_project(db: Session, target: OperationTarget) -> Project | None:
 
 def has_live_job(db: Session, project_id: int) -> bool:
     """Return whether durable intent or a live process task blocks mutation."""
-    return has_active_project_job(db, project_id, job_registry.is_running)
+    return has_active_project_job(db, project_id, is_running)
 
 
 def evaluate_readiness(

@@ -5,21 +5,24 @@
 Read `work-unit-31.md`, `work-report-31.md`, the D31 section of `docs/DTD.md`,
 and `docs/modules/operation-core.md` first. D31 adds the shared host-side
 negative-intent veto, strict development adversarial runner, exact persisted-effect
-comparison, and fixed unexpected-error response/log boundary. Model proposals remain
-untrusted and dispatch remains limited to registered callables after target, revision,
-confirmation, reference, dialogue-currency, and current-state checks.
+comparison, strict single-target validation, mandatory zero external-call-journal
+changes, an executable worker/pipeline/provider import boundary, and fixed unexpected-
+error response/log handling. Model proposals remain untrusted and dispatch remains
+limited to registered callables after target, revision, confirmation, reference,
+dialogue-currency, and current-state checks.
 
-Focused backend: 208 passed with one existing Starlette/httpx warning. Full backend:
-1108 passed, 7 ONNX asset/runtime tests skipped, one existing warning. Fresh frontend
-reruns: 123 passed across 16 files, 0 skipped/failed/warnings; TypeScript/Vite built
+Final-fix D31 focused: 61 passed with one existing Starlette/httpx warning; the
+combined D31/catalog/service/API/durability/storage/dispatcher/isolation command
+passed 152. Full backend: 1115 passed, 7 ONNX asset/runtime tests skipped, one
+existing warning. Fresh frontend reruns: 123 passed across 16 files, 0 skipped/failed/warnings; TypeScript/Vite built
 188 modules with 0 build warnings; ESLint had 0 errors/warnings. Ruff and whitespace
 checks passed. The 26-case deterministic corpus passed 13/13 in All Tools and 13/13
-in stateful mode with zero forbidden setting, job, cancellation, receipt, or artifact
-effects; positive controls produced their exact required effects. Those five counters
-do not measure provider calls or arbitrary dispatch. Existing structural/test evidence
-shows vetoed requests cannot reach core execution, unknown/unregistered proposals
-cannot reach a handler, and the direct runner never starts the worker/media-provider
-pipeline; see the work report's Acceptance review.
+in stateful mode with zero forbidden setting, job, cancellation, receipt, artifact, or
+external-call-journal effects; positive controls produced only one expected job and
+one receipt each. A clean-process import blocker proves the tested runner/registered
+operation graph cannot import workers, the media pipeline, or provider modules. These
+are precise journal and dependency boundaries, not proof against arbitrary future
+unjournaled network code; see the work report's Acceptance review.
 
 Keep deterministic safety separate from model proposal quality. A bounded real local-
 model run was not performed because read-only configuration had no `LANGUAGE_MODEL`

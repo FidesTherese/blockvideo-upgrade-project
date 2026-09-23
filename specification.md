@@ -22,10 +22,15 @@ Implementation remains layered: production `app` code never imports evaluation
 tooling; migrations own schema upgrades/backups; UI consumes explicit backend
 reason codes; test failpoints cannot be selected by public requests. D31 development
 corpora are single-open byte-bounded inputs with strict bounded nested fixture
-records. Their outcomes require exact persisted effect counts, using canonical
-collection contents rather than lengths, so positive controls cannot pass on status
-alone. Any behavior change after D36 creates a new candidate and invalidates affected
-evaluation evidence.
+records. The D31 harness is single-target: an omitted target is allowed, but an
+explicit target must equal the seeded initial project. Outcomes require exact
+persisted effect counts, including zero external-call-journal changes, using
+canonical collection contents rather than lengths, so positive controls cannot pass
+on status alone. An executable dependency boundary keeps the runner and its
+registered operation path from importing workers, the media pipeline, or provider
+modules. This proves the journal and import boundaries exercised by D31, not the
+absence of arbitrary future unjournaled network code. Any behavior change after D36
+creates a new candidate and invalidates affected evaluation evidence.
 
 ## D30 functional candidate acceptance
 

@@ -22,6 +22,7 @@ flowchart LR
   Core --> Txn[SQLite writer transaction]
   Core --> Ready[Readiness]
   Core --> Registry[Registry]
+  Core --> Live[Worker-free job liveness]
   Registry --> Handler[Handlers]
   Handler --> Settings[Project settings]
   Ready --> ORM[(Project/job state)]
@@ -29,6 +30,7 @@ flowchart LR
   Receipt --> ORM
   Dispatcher[Pending job dispatcher] --> ORM
   Dispatcher --> Worker[Existing pipeline worker]
+  Worker --> Live
 ```
 
 Imports point from transport to orchestration to contracts/domain state. The domain and settings services never import the operation package.
@@ -45,7 +47,7 @@ Imports point from transport to orchestration to contracts/domain state. The dom
 
 ## Dependencies and Dependents
 
-Direct external dependencies are existing Pydantic, SQLAlchemy, and FastAPI packages. The core reads `Project` and live `GenerationJob` state. Handlers call `apply_project_settings`; API routes depend on the process-wide service built by `bootstrap.py`.
+Direct external dependencies are existing Pydantic, SQLAlchemy, and FastAPI packages. The core reads `Project` and live `GenerationJob` state. Process-local task liveness is exposed by `services.job_liveness`, which has no worker, pipeline, or provider dependency; the worker only publishes and clears markers. Handlers call `apply_project_settings`; API routes depend on the process-wide service built by `bootstrap.py`.
 
 ## Control Flow
 
@@ -78,12 +80,14 @@ without a prepared request, confirmation token, receipt, or core effect.
   correlation ID. Logs retain the exception class, correlation ID, and matched route
   template, not exception text, request/model bodies, prompts, raw request paths,
   filesystem/private paths, or credentials.
-- Deterministic adversarial verification compares exact persisted content for
-  settings/revision, jobs/cancellation, receipts and artifacts in both All Tools and
-  stateful modes. Those counters do not measure provider calls or dispatch. Separate
-  structural boundaries keep guarded/unknown proposals from core dispatch and keep
-  the direct runner out of the worker/media-provider pipeline. This safety evidence
-  is separate from real-model proposal quality.
+- Deterministic adversarial verification accepts only an omitted target or the
+  seeded project, then compares exact persisted content for settings/revision,
+  jobs/cancellation, receipts, artifacts, and the external-call journal in both All
+  Tools and stateful modes. Every case requires zero journal changes. A clean-process
+  import blocker proves the runner/registered handler graph does not import workers,
+  the media pipeline, or provider modules. These journal and dependency boundaries
+  do not prove arbitrary future unjournaled network code is absent. This safety
+  evidence is separate from real-model proposal quality.
 - See `docs/plan-c/work-unit-12-15.md` for migration, retention and restart behavior,
   and `docs/plan-c/work-report-31.md` for D31 evidence and limits.
 

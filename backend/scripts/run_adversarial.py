@@ -82,11 +82,15 @@ def synthetic_semantic(directory: Path) -> SemanticInterpreter:
 
 
 def canonical_report(mode: str, cases: list[AdversarialCase], results: list[AdversarialResult]) -> dict[str, Any]:
-    totals = {name: 0 for name in ("settings", "job", "cancellation", "receipt", "artifact")}
+    totals = {
+        name: 0
+        for name in ("settings", "job", "cancellation", "receipt", "artifact", "external_calls")
+    }
     for case, result in zip(cases, results, strict=True):
         totals["settings"] += int(case.forbidden.settings and bool(result.effects.settings or result.effects.revision))
         for name in ("job", "cancellation", "receipt", "artifact"):
             totals[name] += int(getattr(case.forbidden, name) and bool(getattr(result.effects, name)))
+        totals["external_calls"] += int(bool(result.effects.external_calls))
     return {
         "schema_version": 1,
         "mode": mode,

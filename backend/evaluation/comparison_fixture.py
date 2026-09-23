@@ -1,6 +1,7 @@
 """Disposable file databases for synthetic development trials, never production DB."""
 from __future__ import annotations
 
+import hashlib
 import time
 from pathlib import Path
 from typing import Any
@@ -12,8 +13,8 @@ from app.db import Base
 from app.interpretation.contracts import ClarificationProposal, InterpretationOutcome
 from app.language_operations.contracts import LanguageResponse
 from app.models import block as _block  # noqa: F401
-from app.models import external_call as _external_call  # noqa: F401
 from app.models.artifact import GenerationArtifact
+from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob, JobStatus
 from app.models.language_request import LanguageRequestRecord
 from app.models.language_turn import LanguageTurn
@@ -123,7 +124,26 @@ def observe(db: Session, project_id: int) -> dict[str, Any]:
             select(SettingsRevision).where(SettingsRevision.project_id == project_id).order_by(SettingsRevision.revision))],
         "artifacts": [{"id": a.id, "revision": a.revision, "video_path": a.video_path} for a in db.scalars(
             select(GenerationArtifact).where(GenerationArtifact.project_id == project_id).order_by(GenerationArtifact.id))],
-        "receipts": sorted(db.scalars(select(OperationReceipt.request_id)).all())}
+        "receipts": sorted(db.scalars(select(OperationReceipt.request_id)).all()),
+        "external_calls": [{
+            "id": call.id,
+            "job_id": call.job_id,
+            "fingerprint": call.fingerprint,
+            "provider": call.provider,
+            "endpoint": call.endpoint,
+            "remote_side_effect": call.remote_side_effect,
+            "status": call.status,
+            "attempts": call.attempts,
+            "response_status": call.response_status,
+            "response_body_sha256": (
+                hashlib.sha256(call.response_body).hexdigest() if call.response_body is not None else None
+            ),
+            "response_content_type": call.response_content_type,
+            "provider_response_id": call.provider_response_id,
+            "error_code": call.error_code,
+            "started_at": call.started_at.isoformat(),
+            "finished_at": call.finished_at.isoformat() if call.finished_at is not None else None,
+        } for call in db.scalars(select(ExternalCall).order_by(ExternalCall.id))]}
 
 
 def prompt_state(state: dict[str, Any], case: Case) -> dict[str, Any]:

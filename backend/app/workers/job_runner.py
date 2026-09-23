@@ -28,6 +28,7 @@ from app.services.generation_snapshots import GenerationCancelled
 from app.services.job_control import cancel_job
 
 from app.services.transactions import atomic_write
+from app.services.job_liveness import clear_running, is_running, mark_running
 from app.services.job_records import ProjectBusyError, create_pending_job, has_active_project_job
 
 
@@ -131,9 +132,11 @@ class JobRegistry:
             finally:
                 self._tasks.pop(job_id, None)
                 self._cancel_flags.pop(job_id, None)
+                clear_running(job_id)
 
         task = asyncio.create_task(_runner())
         self._tasks[job_id] = task
+        mark_running(job_id)
         return task
 
     def request_cancel(self, job_id: int) -> bool:
@@ -172,7 +175,7 @@ class JobRegistry:
             ``True`` only while ``submit`` has a task in ``_tasks``.
 
         """
-        return job_id in self._tasks
+        return is_running(job_id)
 
     def _is_cancel_requested(self, job_id: int, db) -> bool:
         """Read the durable cancellation flag for a job.

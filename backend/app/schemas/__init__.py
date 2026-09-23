@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.providers.llm import ProviderError
+from app.core.provider_errors import ProviderError
 from app.services.pronunciation import normalize_overrides
 
 
