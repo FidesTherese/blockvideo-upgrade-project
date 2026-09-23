@@ -2,7 +2,13 @@
 
 ## Purpose
 
-Provide one typed, state-aware execution boundary for normal UI/API and later natural-language entry points. Units 01–10 add subtitle-size writes and status reads; D11 adds durable replay, revisions, relative adjustment and generation intent without retrieval or an LLM. D12–D15 adds dependency planning, input-bound video history, external-call recovery and independent control handlers.
+Provide one typed, state-aware execution boundary for normal UI/API and
+natural-language entry points. Units 01–10 add subtitle-size writes and status
+reads; D11 adds durable replay, revisions, relative adjustment and generation
+intent without retrieval or an LLM. D12–D15 adds dependency planning, input-bound
+video history, external-call recovery and independent control handlers. D31 adds
+a shared negative-intent veto before request construction and a fixed unexpected-
+error boundary.
 
 ## Project Position
 
@@ -49,7 +55,11 @@ readiness. An ID conflict fails. A new request passes catalog/argument, target,
 readiness and revision checks, resolves any delta to an absolute value, and invokes
 the registered handler. Settings, revision, receipt and optional pending job commit
 together. A dispatcher delivers committed pending jobs to the existing worker.
-Provider work runs outside the transaction. Handler keys remain explicit callables.
+Provider work runs outside the transaction. Handler keys remain explicit
+callables. For natural-language requests, schema-valid model output remains an
+untrusted proposal. The shared D31 guard vetoes documented global or operation-
+family negative intent before `OperationRequest` construction; a veto is dismissed
+without a prepared request, confirmation token, receipt, or core effect.
 
 ## Key Decisions and Limits
 
@@ -64,7 +74,14 @@ Provider work runs outside the transaction. Handler keys remain explicit callabl
 - Status inspection remains available while generation runs; pending/running durable
   jobs and live legacy jobs block setting writes and project deletion.
 - Legacy absolute calls without request identity retain compatibility but no replay guarantee.
-- See `docs/plan-c/work-unit-12-15.md` for migration, retention and restart behavior.
+- Unexpected API exceptions return a fixed `internal_error` payload with a
+  correlation ID. Logs retain bounded metadata, not exception text, request/model
+  bodies, prompts, paths, or credentials.
+- Deterministic adversarial verification compares exact persisted content for
+  settings/revision, jobs/cancellation, receipts and artifacts in both All Tools and
+  stateful modes. This safety evidence is separate from real-model proposal quality.
+- See `docs/plan-c/work-unit-12-15.md` for migration, retention and restart behavior,
+  and `docs/plan-c/work-report-31.md` for D31 evidence and limits.
 
 ## Relevant Verification
 
@@ -75,5 +92,6 @@ Provider work runs outside the transaction. Handler keys remain explicit callabl
 - `backend/tests/test_operation_processes.py`
 - `backend/tests/test_operation_dispatcher.py`
 - `backend/tests/test_operation_storage.py`
+- `backend/tests/test_d31_adversarial_safety.py`
 - `cd backend && python -m uv run pytest`
 - `cd backend && python -m uv run ruff check .`

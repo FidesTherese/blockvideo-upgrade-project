@@ -1,6 +1,28 @@
-# Plan C Handoff — D30 implementation verified; G5 acceptance pending
+# Plan C Handoff — D31 verified; D32 has not started
 
-## D30 current result (2026-09-21 JST)
+## D31 current result (2026-09-24 JST)
+
+Read `work-unit-31.md`, `work-report-31.md`, the D31 section of `docs/DTD.md`,
+and `docs/modules/operation-core.md` first. D31 adds the shared host-side
+negative-intent veto, strict development adversarial runner, exact persisted-effect
+comparison, and fixed unexpected-error response/log boundary. Model proposals remain
+untrusted and dispatch remains limited to registered callables after target, revision,
+confirmation, reference, dialogue-currency, and current-state checks.
+
+Focused backend: 208 passed with one existing Starlette/httpx warning. Full backend:
+1108 passed, 7 ONNX asset/runtime tests skipped, one existing warning. Frontend:
+123 passed across 16 files; Ruff, TypeScript/Vite build, ESLint, and whitespace checks
+passed. The 26-case deterministic corpus passed 13/13 in All Tools and 13/13 in
+stateful mode with zero forbidden setting, job, cancellation, receipt, or artifact
+effects; positive controls produced their exact required effects.
+
+Keep deterministic safety separate from model proposal quality. A bounded real local-
+model run was not performed because read-only configuration had no `LANGUAGE_MODEL`
+and no stateful retrieval index. No cloud or fake substitute was used. Human operation
+and independent acceptance were not performed. D32 has not started. No release,
+tag, publication, or deployment occurred.
+
+## Historical D30 result (2026-09-21 JST)
 
 Read work-unit-30.md, work-report-30.md and functional-demo.md first.
 The user selected an isolated startup menu for All Tools/stateful retrieval and
