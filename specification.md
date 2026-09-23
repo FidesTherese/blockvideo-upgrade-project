@@ -1,4 +1,27 @@
-# BlockVideo Plan C Specification — Work Units 01–30
+# BlockVideo Plan C Specification — Work Units 01–40
+
+## D31–D40 hardening, blinded evaluation, and release-readiness design
+
+The user selected sequential gated delivery and approved
+`docs/plan-c/work-unit-31.md` through `work-unit-40.md` as the reviewer-oriented
+contracts. D31–D35 harden adversarial input, concurrency, crash recovery, explicit
+SQLite migration, and recovery UI. Validation uses deterministic tests first, then
+bounded local-model, browser, and real-FFmpeg journeys where relevant; user data is
+never used for destructive tests.
+
+D36 freezes code and non-secret behavior inputs. D37 supplies a generic blinded
+runner whose held-out corpus remains separately mounted and unread by the
+implementation process. D38 accepts only a content-bound aggregate from a separate
+evaluator. D39 verifies the exact frozen release candidate. D40 issues a readiness
+decision without publication or deployment. All Tools remains the default unless
+stateful retrieval has no worse safety outcome and at least equal approved held-out
+task completion. Mandatory quality thresholds are 90% overall and 80% per evaluated
+category, alongside zero unauthorized effects, replay, or secret disclosure.
+
+Implementation remains layered: production `app` code never imports evaluation
+tooling; migrations own schema upgrades/backups; UI consumes explicit backend
+reason codes; test failpoints cannot be selected by public requests. Any behavior
+change after D36 creates a new candidate and invalidates affected evaluation evidence.
 
 ## D30 functional candidate acceptance
 
