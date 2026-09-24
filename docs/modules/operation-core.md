@@ -8,7 +8,9 @@ reads; D11 adds durable replay, revisions, relative adjustment and generation
 intent without retrieval or an LLM. D12–D15 adds dependency planning, input-bound
 video history, external-call recovery and independent control handlers. D31 adds
 a shared negative-intent veto before request construction and a fixed unexpected-
-error boundary.
+error boundary. D32 makes dialogue supersession precedence, deletion lifecycle
+checks, and injectable startup dispatch explicit without changing the database-
+authoritative single-server model.
 
 ## Project Position
 
@@ -58,10 +60,23 @@ readiness and revision checks, resolves any delta to an absolute value, and invo
 the registered handler. Settings, revision, receipt and optional pending job commit
 together. A dispatcher delivers committed pending jobs to the existing worker.
 Provider work runs outside the transaction. Handler keys remain explicit
-callables. For natural-language requests, schema-valid model output remains an
-untrusted proposal. The shared D31 guard vetoes documented global or operation-
-family negative intent before `OperationRequest` construction; a veto is dismissed
-without a prepared request, confirmation token, receipt, or core effect.
+callables. For natural-language continuations, the claim transaction checks the
+parent's durable successor before resolving project revision; once one successor
+commits, later contenders persist `dialogue_superseded` rather than a revision-
+dependent loser reason. For other natural-language requests, schema-valid model
+output remains an untrusted proposal. The shared D31 guard vetoes documented global
+or operation-family negative intent before `OperationRequest` construction; a veto
+is dismissed without a prepared request, confirmation token, receipt, or core
+effect.
+
+Project deletion uses its own stricter guard: active work, an `unknown` job, or a
+remote-side-effect call still `in_flight`/`unknown` returns conflict. After explicit
+resolution, settings history, artifacts, resolved external-call rows, project and
+cascaded job rows are removed in one writer transaction; immutable receipts survive
+for exact replay. Process-local secrets are dropped only after commit, followed by
+best-effort filesystem cleanup. Startup dispatch may receive an internal
+`JobRegistry` for testing, but registry liveness is only an optimization: each
+worker's persisted pending-to-running claim decides whether work executes.
 
 ## Key Decisions and Limits
 
@@ -74,7 +89,15 @@ without a prepared request, confirmation token, receipt, or core effect.
   execution still supports one application server. Recovery is journal/checkpoint based;
   unknown external results are never blindly repeated.
 - Status inspection remains available while generation runs; pending/running durable
-  jobs and live legacy jobs block setting writes and project deletion.
+  jobs and live legacy jobs block setting writes and project deletion. Deletion alone
+  also blocks unknown jobs and unresolved remote calls; this does not broaden normal
+  settings-edit readiness.
+- Resolved external-call rows are deleted transactionally with their owning project;
+  immutable operation receipts survive deletion. Secret and filesystem cleanup occur
+  only after database commit, with filesystem removal remaining best effort.
+- The dispatcher accepts a keyword-only injected registry, defaulting to the process
+  singleton. A registry may submit a stale candidate, but the database job claim is
+  authoritative and permits one execution.
 - Legacy absolute calls without request identity retain compatibility but no replay guarantee.
 - Unexpected API exceptions return a fixed `internal_error` payload with a
   correlation ID. Logs retain the exception class, correlation ID, and matched route
@@ -101,5 +124,6 @@ without a prepared request, confirmation token, receipt, or core effect.
 - `backend/tests/test_operation_dispatcher.py`
 - `backend/tests/test_operation_storage.py`
 - `backend/tests/test_d31_adversarial_safety.py`
+- `backend/tests/test_d32_concurrency_matrix.py`
 - `cd backend && python -m uv run pytest`
 - `cd backend && python -m uv run ruff check .`

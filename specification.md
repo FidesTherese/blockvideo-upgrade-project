@@ -29,8 +29,20 @@ canonical collection contents rather than lengths, so positive controls cannot p
 on status alone. An executable dependency boundary keeps the runner and its
 registered operation path from importing workers, the media pipeline, or provider
 modules. This proves the journal and import boundaries exercised by D31, not the
-absence of arbitrary future unjournaled network code. Any behavior change after D36
-creates a new candidate and invalidates affected evaluation evidence.
+absence of arbitrary future unjournaled network code.
+
+D32 keeps SQLite `BEGIN IMMEDIATE`, receipts, revisions, persisted job claims, and
+artifact publication as the correctness boundaries. A committed dialogue successor
+wins before revision-based continuation validation. Deletion alone rejects active or
+unknown jobs and unresolved remote calls; after explicit resolution it removes
+mutable project rows, including resolved external-call rows, transactionally while
+immutable receipts retain replay, then drops process-local secrets and performs
+best-effort file cleanup after commit. Startup dispatch supports an internal injected
+registry, but the database job claim remains authoritative. This is single-server
+race correctness, not a multi-server or capacity claim.
+
+Any behavior change after D36 creates a new candidate and invalidates affected
+evaluation evidence.
 
 ## D30 functional candidate acceptance
 

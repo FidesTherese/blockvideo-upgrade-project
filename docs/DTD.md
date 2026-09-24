@@ -286,12 +286,33 @@ pointing at one temporary SQLite file.
 The matrix covers receipt identity, concurrent settings, dialogue supersession,
 generation confirmation/revision change, cancel/publication, retry/recovery,
 delete/active-or-unknown work, and startup pending-job claims. Assertions inspect
-receipts, settings history, jobs, external calls, artifacts, and project revision.
-One transaction may win. All other effects must resolve as exact replay,
-`stale_state`, `project_busy`, request-content conflict, or bounded `database_busy`.
-A `WriteBusyError` response keeps `Retry-After: 1` and tells clients to retry the
-same request ID. Process-local locks may reduce duplicate work but never establish
-correctness.
+receipts, settings history, language records, jobs, external calls, artifacts,
+current-artifact pointers, and project revision after reopening the database. One
+transaction may win. All other effects resolve as exact replay, `stale_state`,
+`project_busy`, `dialogue_superseded`, request-content conflict, or bounded
+`database_busy`. A `WriteBusyError` response keeps `Retry-After: 1` and tells clients
+to retry the same request ID. Process-local locks may reduce duplicate work but
+never establish correctness.
+
+A continuation claim calls `dialogue.require_not_superseded()` inside its writer
+transaction before project revision resolution. This makes the already committed
+parent successor the stable loser reason across answer, correction, and dismissal
+races. `dialogue.attach()` reuses the same check before writing the successor link.
+
+Project deletion alone composes the existing active-work guard with persisted
+`unknown` jobs and remote-side-effect calls in `in_flight`/`unknown`. Once those are
+explicitly resolved, `delete_project_external_calls()` removes target-job journal
+rows in the same writer transaction as settings-history, artifact, project, and
+cascaded job deletion. Immutable operation receipts survive for exact replay. The
+route commits before dropping process-local secrets and before best-effort project-
+directory removal; commit failure therefore preserves database state, secrets, and
+files.
+
+`dispatch_pending_operation_jobs(*, registry: JobRegistry | None = None) -> int`
+uses the process singleton only when `registry is None`. Injection is internal and
+adds no HTTP or environment selector. Scans may both submit a stale pending ID; the
+worker's database pending-to-running claim remains authoritative and permits one
+callback execution. D32 makes no multi-server or capacity claim.
 
 ### D33 recovery design
 

@@ -1,34 +1,36 @@
-# Plan C Handoff — D31 verified; D32 has not started
+# Plan C Handoff — D32 verified; D33 has not started
 
-## D31 current result (2026-09-24 JST)
+## D32 current result (2026-09-24 JST)
 
-Read `work-unit-31.md`, `work-report-31.md`, the D31 section of `docs/DTD.md`,
-and `docs/modules/operation-core.md` first. D31 adds the shared host-side
-negative-intent veto, strict development adversarial runner, exact persisted-effect
-comparison, strict single-target validation, mandatory zero external-call-journal
-changes, an executable worker/pipeline/provider import boundary, and fixed unexpected-
-error response/log handling. Model proposals remain untrusted and dispatch remains
-limited to registered callables after target, revision, confirmation, reference,
-dialogue-currency, and current-state checks.
+Read `work-unit-32.md`, `work-report-32.md`, the D32 section of `docs/DTD.md`, and
+`docs/modules/operation-core.md` first. D32 verifies spawned-process receipt/revision
+races, dialogue successors, revision-bound confirmation, cancellation/publication,
+retry/recovery, deletion lifecycle, competing startup scans, and fixed writer-busy
+guidance against isolated SQLite databases.
 
-Final-fix D31 focused: 61 passed with one existing Starlette/httpx warning; the
-combined D31/catalog/service/API/durability/storage/dispatcher/isolation command
-passed 152. Full backend: 1115 passed, 7 ONNX asset/runtime tests skipped, one
-existing warning. Fresh frontend reruns: 123 passed across 16 files, 0 skipped/failed/warnings; TypeScript/Vite built
-188 modules with 0 build warnings; ESLint had 0 errors/warnings. Ruff and whitespace
-checks passed. The 26-case deterministic corpus passed 13/13 in All Tools and 13/13
-in stateful mode with zero forbidden setting, job, cancellation, receipt, artifact, or
-external-call-journal effects; positive controls produced only one expected job and
-one receipt each. A clean-process import blocker proves the tested runner/registered
-operation graph cannot import workers, the media pipeline, or provider modules. These
-are precise journal and dependency boundaries, not proof against arbitrary future
-unjournaled network code; see the work report's Acceptance review.
+Production changes are narrow. A committed dialogue successor is checked inside the
+claim writer transaction before project-revision resolution. Project deletion alone
+also blocks unknown jobs and unresolved remote calls, deletes resolved external-call
+rows in the database transaction, and drops process-local secrets only after commit.
+The pending-job dispatcher accepts an internal injected registry for deterministic
+verification; the database pending-to-running worker claim remains authoritative.
+No dependency, schema, distributed lock, queue, public failpoint, provider, or media
+contract changed.
 
-Keep deterministic safety separate from model proposal quality. A bounded real local-
-model run was not performed because read-only configuration had no `LANGUAGE_MODEL`
-and no stateful retrieval index. No cloud or fake substitute was used. Human operation
-and independent acceptance were not performed. D32 has not started. No release,
-tag, publication, or deployment occurred.
+Final focused gate: 133 passed in 49.16s. Three fresh complete D32 repetitions each
+passed 17/17 in 19.99s, 20.18s, and 20.25s. Full backend: 1132 passed, 7 existing
+ONNX runtime/asset tests skipped, and one existing Starlette/httpx warning in
+136.87s. Ruff passed. Frontend: 16 files / 123 tests passed in 9.99s; TypeScript/Vite
+built 188 modules in 1.88s; ESLint passed. Exact race outcomes, original REDs,
+canonical reopened-state evidence, and command details are in `work-report-32.md`.
+
+This is single-server SQLite correctness evidence only. It is not a multi-server,
+load, throughput, latency, or capacity claim. Tests used fake/synthetic providers;
+no real provider or user data was exercised. Filesystem cleanup remains best effort
+after committed deletion, and the existing artifact contract may leave an
+unreferenced file after a failed publication commit. D33 crash-boundary recovery,
+human operation, and independent acceptance were not performed. **D33 has not
+started.** No release, tag, publication, or deployment occurred.
 
 ## Historical D30 result (2026-09-21 JST)
 
