@@ -1,36 +1,42 @@
-# Plan C Handoff — D32 verified; D33 has not started
+# Plan C Handoff — D33 automated gate verified; D34 has not started
 
-## D32 current result (2026-09-24 JST)
+## D33 current result (2026-09-24 JST)
 
-Read `work-unit-32.md`, `work-report-32.md`, the D32 section of `docs/DTD.md`, and
-`docs/modules/operation-core.md` first. D32 verifies spawned-process receipt/revision
-races, dialogue successors, revision-bound confirmation, cancellation/publication,
-retry/recovery, deletion lifecycle, competing startup scans, and fixed writer-busy
-guidance against isolated SQLite databases.
+Read `work-unit-33.md`, `work-report-33.md`, the D33 section of `docs/DTD.md`, and
+`docs/modules/operation-core.md` first. D33 verifies exactly 37 canonical request,
+provider, checkpoint, cancellation, shutdown, publication, replay, and database-
+failure scenarios against isolated SQLite/media roots. Fixed fsynced subprocess
+markers prove provider claim/send/response boundaries, checkpoint persistence,
+registry cancellation before lifespan exit, and rename boundaries. Recoverable
+running states transition once and explicit second restarts transition zero times;
+provider replay performs no transport call and total synthetic sends remain 0/1/1.
 
-Production changes are narrow. A committed dialogue successor is checked inside the
-claim writer transaction before project-revision resolution. Project deletion alone
-also blocks unknown jobs and unresolved remote calls, deletes resolved external-call
-rows in the database transaction, and drops process-local secrets only after commit.
-The pending-job dispatcher accepts an internal injected registry for deterministic
-verification; the database pending-to-running worker claim remains authoritative.
-No dependency, schema, distributed lock, queue, public failpoint, provider, or media
-contract changed.
+Production corrections are limited to recovery. Completed artifact replay returns
+before candidate validation; publication renames only inside the writer transaction
+after exact revision/input/reference checks; only an exact unreferenced same-job
+video orphan may be replaced; subtitle identity is rechecked; successful metadata
+lives only in transactional `GenerationArtifact.manifest_json`. Pipeline checkpoint
+acceptance synchronizes job input identity. `JobRegistry` closes admission before
+drain, cancels/awaits accepted tasks, rejects post-close submission without local
+state, and reopens before each lifespan dispatcher. No schema, dependency, public
+test selector, real provider, distributed lock, or queue was added.
 
-Final focused gate: 133 passed in 49.16s. Three fresh complete D32 repetitions each
-passed 17/17 in 19.99s, 20.18s, and 20.25s. Full backend: 1132 passed, 7 existing
-ONNX runtime/asset tests skipped, and one existing Starlette/httpx warning in
-136.87s. Ruff passed. Frontend: 16 files / 123 tests passed in 9.99s; TypeScript/Vite
-built 188 modules in 1.88s; ESLint passed. Exact race outcomes, original REDs,
-canonical reopened-state evidence, and command details are in `work-report-32.md`.
+Focused recovery gate: 145 passed, including all 37 D33 scenarios, with one existing
+Starlette/httpx warning in 36.92s. The first full backend run had 1170 passed, 7
+skipped and one known timing-sensitive D22 diagnostics-equality failure; its isolated
+rerun passed, which is not a full-suite result. One fresh sequential full rerun then
+passed 1171 with 7 existing ONNX skips and the same warning in 155.15s. Ruff passed.
+Frontend: 16 files / 123 tests passed in 9.68s; TypeScript/Vite built 188 modules in
+1.97s; ESLint passed. Exact marker, restart, remote-attempt, artifact, RED/GREEN, and
+artifact-check evidence is in `work-report-33.md`.
 
-This is single-server SQLite correctness evidence only. It is not a multi-server,
-load, throughput, latency, or capacity claim. Tests used fake/synthetic providers;
-no real provider or user data was exercised. Filesystem cleanup remains best effort
-after committed deletion, and the existing artifact contract may leave an
-unreferenced file after a failed publication commit. D33 crash-boundary recovery,
-human operation, and independent acceptance were not performed. **D33 has not
-started.** No release, tag, publication, or deployment occurred.
+This is single-server SQLite crash/recovery correctness evidence only, not a multi-
+server, load, throughput, latency, or capacity claim. Tests used fake/synthetic
+providers and no real user data. An atomic rename cannot be rolled back, so failure
+may leave only the documented exact unreferenced same-job video orphan; database
+references and prior history remain unchanged. Human operation and independent
+acceptance were not performed. **D34 has not started.** No release, tag, publication,
+or deployment occurred.
 
 ## Historical D30 result (2026-09-21 JST)
 
