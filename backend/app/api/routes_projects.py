@@ -390,8 +390,8 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
         HTTPException: Status 404 when the project does not exist.
 
     Side Effects:
-        Drops process-local secrets, cascades ORM child deletion, commits the
-        transaction, and best-effort removes the project's storage directory.
+        Commits the project and child-row deletion, drops process-local secrets,
+        and then best-effort removes the project's storage directory.
 
     """
     begin_write(db)
@@ -400,12 +400,12 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
         raise HTTPException(status_code=404, detail="project not found")
     ensure_project_deletable(project_id, db)
     reserve_project_id(db, project_id)
-    secret_store.drop(project_id)
     db.execute(delete(SettingsRevision).where(SettingsRevision.project_id == project_id))
     db.execute(delete(GenerationArtifact).where(GenerationArtifact.project_id == project_id))
     delete_project_external_calls(project_id, db)
     db.delete(project)
     db.commit()
+    secret_store.drop(project_id)
     # Best-effort filesystem cleanup; ignore failures.
     import shutil
 

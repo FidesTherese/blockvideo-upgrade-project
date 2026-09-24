@@ -11,6 +11,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 from threading import Barrier, Event, Lock
@@ -21,9 +23,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.db import get_db, get_session_factory
+from app.core.security import SecretBundle, secret_store
+from app.db import get_db, get_engine, get_session_factory
 from app.main import create_app
 from app.interpretation.transport import ModelMessage
 from app.language_operations import repository as language_repository
@@ -1202,6 +1205,84 @@ def test_remote_in_flight_retry_vs_reconciliation_stays_unknown(
     monkeypatch.setattr(dispatcher, "atomic_write", original_recovery_write)
     assert dispatcher.mark_interrupted_operation_jobs() == 0
     assert snapshot(project_id) == state
+
+
+def test_delete_commit_failure_preserves_database_secrets_and_filesystem(
+    temp_storage: Path, monkeypatch
+) -> None:
+    create_client = TestClient(create_app())
+    created = create_client.post(
+        "/api/projects",
+        json={
+            "title": "D32 deletion rollback",
+            "source_script": "削除ロールバック用の合成台本。",
+            "use_fake_providers": True,
+        },
+    )
+    assert created.status_code == 201
+    project_id = created.json()["id"]
+    bundle = SecretBundle(
+        llm_api_key="d32-llm-key",
+        llm_base_url="https://llm.invalid/v1",
+        llm_model="d32-llm",
+        image_api_key="d32-image-key",
+        image_base_url="https://image.invalid/v1",
+        image_model="d32-image",
+    )
+    secret_store.set(project_id, bundle)
+    marker = project_dir(project_id) / "rollback-marker.txt"
+    marker.write_text("must survive", encoding="utf-8")
+    before = snapshot(project_id)
+    removed_paths: list[Path] = []
+    original_rmtree = shutil.rmtree
+
+    def observe_rmtree(path: str | Path, *args: Any, **kwargs: Any) -> None:
+        removed_paths.append(Path(path))
+        original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", observe_rmtree)
+
+    class FlushThenFailSession(Session):
+        def commit(self) -> None:
+            self.flush()
+            raise RuntimeError("synthetic commit failure after flush")
+
+    failing_factory = sessionmaker(
+        bind=get_engine(),
+        class_=FlushThenFailSession,
+        autoflush=False,
+        future=True,
+    )
+
+    def failing_session() -> Iterator[Session]:
+        with failing_factory() as db:
+            try:
+                yield db
+            finally:
+                db.rollback()
+
+    app = create_app()
+    app.dependency_overrides[get_db] = failing_session
+    failed_client = TestClient(app, raise_server_exceptions=False)
+    response = failed_client.delete(f"/api/projects/{project_id}")
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["reason_code"] == "internal_error"
+    assert detail["message"] == (
+        "処理に失敗しました。再読み込み後も続く場合は記録番号を確認してください。"
+    )
+    assert re.fullmatch(r"[0-9a-f]{16}", detail["correlation_id"])
+    assert snapshot(project_id) == before
+    assert secret_store.get(project_id) is bundle
+    assert marker.read_text(encoding="utf-8") == "must survive"
+    assert removed_paths == []
+
+    app.dependency_overrides.clear()
+    deleted = TestClient(app).delete(f"/api/projects/{project_id}")
+    assert deleted.status_code == 204
+    assert secret_store.get(project_id) is None
+    assert not project_dir(project_id).exists()
 
 
 @pytest.mark.asyncio
