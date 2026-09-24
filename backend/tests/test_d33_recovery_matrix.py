@@ -20,12 +20,13 @@ from app.models.artifact import GenerationArtifact
 from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob, JobStatus
 from app.models.language_request import LanguageRequestRecord
+from app.models.language_turn import LanguageTurn
 from app.models.operation_request import OperationReceipt
 from app.models.project import Project, ProjectStatus
 from app.models.settings_revision import SettingsRevision
 from app.operations.bootstrap import operation_service
 from app.operations.contracts import OperationRequest
-from app.services.settings_history import record_settings
+from app.services.settings_history import configuration, record_settings
 from app.workers.operation_dispatcher import mark_interrupted_operation_jobs
 
 
@@ -62,6 +63,7 @@ def recovery_snapshot(project_id: int) -> dict[str, object]:
             "project": {
                 "id": project.id,
                 "revision": project.revision,
+                "settings": _canonical(configuration(project)),
                 "status": project.status.value,
                 "current_artifact_id": project.current_artifact_id,
             },
@@ -79,6 +81,18 @@ def recovery_snapshot(project_id: int) -> dict[str, object]:
                     select(LanguageRequestRecord)
                     .where(LanguageRequestRecord.project_id == project_id)
                     .order_by(LanguageRequestRecord.request_id)
+                )
+            ],
+            "language_turns": [
+                _record(row)
+                for row in db.scalars(
+                    select(LanguageTurn)
+                    .join(
+                        LanguageRequestRecord,
+                        LanguageRequestRecord.request_id == LanguageTurn.request_id,
+                    )
+                    .where(LanguageRequestRecord.project_id == project_id)
+                    .order_by(LanguageTurn.request_id)
                 )
             ],
             "jobs": [
@@ -125,11 +139,13 @@ class _ReplyAdapter:
     def __init__(self, operation_id: str, arguments: dict[str, Any]) -> None:
         self.operation_id = operation_id
         self.arguments = arguments
+        self.calls = 0
 
     async def complete(
         self, messages: tuple[ModelMessage, ...], schema: dict[str, Any]
     ) -> str:
         del messages, schema
+        self.calls += 1
         return json.dumps(
             {
                 "result": {
@@ -254,23 +270,107 @@ def _prepare_generation(
     return service, request, response
 
 
-def _assert_request_effect_is_complete(
-    snapshot: dict[str, object], request_id: str
-) -> None:
-    receipts = [
+def _effect_state(snapshot: dict[str, object]) -> dict[str, object]:
+    return {
+        key: snapshot[key]
+        for key in (
+            "project",
+            "settings_revisions",
+            "jobs",
+            "receipts",
+            "external_calls",
+            "artifacts",
+        )
+    }
+
+
+def _receipt(snapshot: dict[str, object], request_id: str) -> dict[str, Any]:
+    matching = [
         row for row in snapshot["receipts"] if row["request_id"] == request_id
     ]
-    if not receipts:
-        return
-    assert len(receipts) == 1
-    receipt = receipts[0]
-    if receipt["job_id"] is not None:
-        assert any(row["id"] == receipt["job_id"] for row in snapshot["jobs"])
-    if receipt["result_revision"] > receipt["base_revision"]:
-        assert any(
-            row["revision"] == receipt["result_revision"]
-            for row in snapshot["settings_revisions"]
-        )
+    assert len(matching) == 1
+    return matching[0]
+
+
+def _assert_exact_receipt_result(
+    snapshot: dict[str, object], request_id: str, result: Any
+) -> dict[str, Any]:
+    receipt = _receipt(snapshot, request_id)
+    assert receipt["result_json"] == result.model_dump(mode="json")
+    return receipt
+
+
+def _assert_atomic_settings_effect(
+    before: dict[str, object],
+    after: dict[str, object],
+    request_id: str,
+    result: Any,
+) -> None:
+    assert after["project"] == {
+        **before["project"],
+        "revision": before["project"]["revision"] + 1,
+        "settings": {**before["project"]["settings"], "subtitle_font_size": 56},
+    }
+    assert after["jobs"] == before["jobs"]
+    assert after["external_calls"] == before["external_calls"]
+    assert after["artifacts"] == before["artifacts"]
+    assert after["language_requests"] == before["language_requests"]
+    assert after["language_turns"] == before["language_turns"]
+    assert len(after["settings_revisions"]) == len(before["settings_revisions"]) + 1
+    assert all(row in after["settings_revisions"] for row in before["settings_revisions"])
+    new_history = [
+        row for row in after["settings_revisions"]
+        if row not in before["settings_revisions"]
+    ]
+    assert len(new_history) == 1
+    assert new_history[0]["revision"] == result.revision
+    assert new_history[0]["settings_json"] == after["project"]["settings"]
+    assert new_history[0]["changed_fields"] == ["subtitle_font_size"]
+    assert len(after["receipts"]) == len(before["receipts"]) + 1
+    assert all(row in after["receipts"] for row in before["receipts"])
+    new_receipts = [
+        row for row in after["receipts"] if row not in before["receipts"]
+    ]
+    assert len(new_receipts) == 1
+    receipt = _assert_exact_receipt_result(after, request_id, result)
+    assert receipt["result_revision"] == result.revision
+    assert receipt["job_id"] is None
+
+
+def _assert_atomic_generation_effect(
+    before: dict[str, object],
+    after: dict[str, object],
+    request_id: str,
+    result: Any,
+) -> None:
+    assert after["project"]["revision"] == before["project"]["revision"]
+    assert after["project"]["settings"] == before["project"]["settings"]
+    assert after["project"]["status"] == "generating"
+    assert (
+        after["project"]["current_artifact_id"]
+        == before["project"]["current_artifact_id"]
+    )
+    assert after["settings_revisions"] == before["settings_revisions"]
+    assert [row["request_id"] for row in after["language_requests"]] == [
+        row["request_id"] for row in before["language_requests"]
+    ]
+    assert after["language_turns"] == before["language_turns"]
+    assert after["external_calls"] == before["external_calls"]
+    assert after["artifacts"] == before["artifacts"]
+    assert len(after["receipts"]) == len(before["receipts"]) + 1
+    assert len(after["jobs"]) == len(before["jobs"]) + 1
+    assert all(row in after["receipts"] for row in before["receipts"])
+    assert all(row in after["jobs"] for row in before["jobs"])
+    new_receipts = [
+        row for row in after["receipts"] if row not in before["receipts"]
+    ]
+    new_jobs = [row for row in after["jobs"] if row not in before["jobs"]]
+    assert len(new_receipts) == len(new_jobs) == 1
+    receipt = _assert_exact_receipt_result(after, request_id, result)
+    job = new_jobs[0]
+    assert receipt["job_id"] == job["id"] == result.job_id
+    assert job["project_id"] == receipt["project_id"]
+    assert [row["job_id"] for row in new_receipts] == [row["id"] for row in new_jobs]
 
 
 def test_canonical_snapshot_reopens_complete_stable_state(temp_storage) -> None:
@@ -280,15 +380,48 @@ def test_canonical_snapshot_reopens_complete_stable_state(temp_storage) -> None:
     second = recovery_snapshot(project_id)
 
     assert first == second
-    assert first["project"] == {
-        "id": project_id,
-        "revision": 1,
-        "status": "completed",
-        "current_artifact_id": artifact_id,
+    assert first["project"]["id"] == project_id
+    assert first["project"]["revision"] == 1
+    assert first["project"]["status"] == "completed"
+    assert first["project"]["current_artifact_id"] == artifact_id
+    assert first["project"]["settings"] == {
+        "visual_focus_enabled": True,
+        "subtitle_mode": "sentence",
+        "narration_pacing_mode": "adaptive",
+        "pronunciation_overrides": [],
+        "title": "D33 synthetic",
+        "voicevox_url": "http://127.0.0.1:50021",
+        "voicevox_speaker_id": 1,
+        "voicevox_speed_scale": 1.0,
+        "voicevox_pitch_scale": 0.0,
+        "voicevox_intonation_scale": 1.0,
+        "voicevox_volume_scale": 1.0,
+        "subtitle_enabled": True,
+        "subtitle_font_size": 48,
+        "subtitle_position": "bottom",
+        "subtitle_text_color": "#FFFFFF",
+        "subtitle_outline_color": "#000000",
+        "subtitle_background": True,
+        "subtitle_max_chars_per_line": 36,
+        "pre_margin_seconds": 0.15,
+        "post_margin_seconds": 1.5,
+        "min_display_seconds": 2.0,
+        "narration_sentence_pause_seconds": 1.5,
+        "max_slides_per_block": 1,
     }
     assert [row["revision"] for row in first["settings_revisions"]] == [1]
     assert [row["request_id"] for row in first["language_requests"]] == [
         "d33-prior-language"
+    ]
+    assert first["language_requests"][0]["status"] == "interpreting"
+    assert first["language_turns"] == [
+        {
+            "request_id": "d33-prior-language",
+            "parent_request_id": None,
+            "relation": None,
+            "text": "状態を確認して",
+            "successor_request_id": None,
+        }
     ]
     assert [row["request_id"] for row in first["receipts"]] == [
         "d33-prior-receipt"
@@ -303,23 +436,20 @@ def test_canonical_snapshot_reopens_complete_stable_state(temp_storage) -> None:
 
 
 @pytest.mark.parametrize("boundary", ["before", "after"])
-def test_request_claim_crash_replays_saved_claim_or_executes_once(
+def test_request_claim_crash_expires_owner_or_executes_once(
     temp_storage, monkeypatch: pytest.MonkeyPatch, boundary: str
 ) -> None:
     project_id, artifact_id = _seed_canonical_state()
-    service = LanguageOperationService(
-        operation_service,
-        _ReplyAdapter("project.subtitle-font-size.set", {"value": 56}),
-    )
+    adapter = _ReplyAdapter("project.subtitle-font-size.set", {"value": 56})
+    service = LanguageOperationService(operation_service, adapter)
     request = _language_request(project_id, f"d33-claim-{boundary}", "字幕を56pxにして")
     original_claim = repository.claim
-    observed: dict[str, Any] = {}
+    before = recovery_snapshot(project_id)
 
     def crashing_claim(db, incoming):
         if boundary == "before":
             raise OSError("synthetic D33 boundary")
-        result = original_claim(db, incoming)
-        observed["response"] = result[0]
+        original_claim(db, incoming)
         raise OSError("synthetic D33 boundary")
 
     monkeypatch.setattr(repository, "claim", crashing_claim)
@@ -330,35 +460,103 @@ def test_request_claim_crash_replays_saved_claim_or_executes_once(
     monkeypatch.setattr(repository, "claim", original_claim)
 
     crashed = recovery_snapshot(project_id)
-    assert crashed["project"]["revision"] == 1
     assert crashed["project"]["current_artifact_id"] == artifact_id
     assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == crashed
 
+    if boundary == "after":
+        assert _effect_state(crashed) == _effect_state(before)
+        claimed = next(
+            row for row in crashed["language_requests"]
+            if row["request_id"] == request.request_id
+        )
+        assert claimed["status"] == "interpreting"
+        with get_session_factory()() as db:
+            record = db.get(LanguageRequestRecord, request.request_id)
+            assert record is not None
+            record.lease_until = 0.0
+            db.commit()
+        with get_session_factory()() as db:
+            reconciled_response = service.get(db, request.request_id)
+        assert reconciled_response.status == "error"
+        assert reconciled_response.failure is not None
+        assert reconciled_response.failure.reason_code == "interpretation_interrupted"
+        assert reconciled_response.result is None
+        assert not reconciled_response.executed
+        reconciled = recovery_snapshot(project_id)
+        stored = next(
+            row for row in reconciled["language_requests"]
+            if row["request_id"] == request.request_id
+        )
+        assert stored["response_json"] == reconciled_response.model_dump(mode="json")
+        with get_session_factory()() as db:
+            second = asyncio.run(service.submit(db, request))
+        assert second == reconciled_response
+        assert recovery_snapshot(project_id) == reconciled
+        assert _effect_state(reconciled) == _effect_state(before)
+        assert adapter.calls == 0
+        return
+
+    assert crashed == before
+    with get_session_factory()() as db:
+        first = asyncio.run(service.submit(db, request))
+    assert first.status == "completed"
+    assert first.result is not None
+    assert first.result.resolved_arguments == {"value": 56}
+    final = recovery_snapshot(project_id)
+    _assert_exact_receipt_result(final, first.core_request_id, first.result)
+    assert final["project"]["revision"] == 2
+    assert [row["revision"] for row in final["settings_revisions"]] == [1, 2]
     with get_session_factory()() as db:
         replay = asyncio.run(service.submit(db, request))
-    if boundary == "after":
-        assert replay == observed["response"]
-        assert replay.status == "interpreting"
-    else:
-        assert replay.status == "completed"
-        assert replay.result is not None
-        assert replay.result.resolved_arguments == {"value": 56}
+    assert replay == first
+    assert recovery_snapshot(project_id) == final
+    assert adapter.calls == 1
 
-    final = recovery_snapshot(project_id)
-    _assert_request_effect_is_complete(final, replay.core_request_id)
-    assert final["project"]["current_artifact_id"] == artifact_id
-    if replay.status == "completed":
-        assert final["project"]["revision"] == 2
-        assert [row["revision"] for row in final["settings_revisions"]] == [1, 2]
-        assert sum(
-            row["request_id"] == replay.core_request_id for row in final["receipts"]
-        ) == 1
+
+@pytest.mark.parametrize("boundary", ["before", "after"])
+def test_settings_core_commit_is_atomic_with_history_and_receipt(
+    temp_storage, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    project_id, _ = _seed_canonical_state()
+    request = OperationRequest(
+        request_id=f"d33-settings-commit-{boundary}",
+        operation_id="project.subtitle-font-size.set",
+        target={"project_id": project_id},
+        arguments={"value": 56},
+        base_revision=1,
+    )
+    before = recovery_snapshot(project_id)
+
+    with get_session_factory()() as db:
+        original_commit = db.commit
+
+        def crashing_commit() -> None:
+            if boundary == "after":
+                original_commit()
+            raise OSError("synthetic D33 boundary")
+
+        monkeypatch.setattr(db, "commit", crashing_commit)
+        with pytest.raises(OSError, match="synthetic D33 boundary"):
+            operation_service.execute(db, request)
+
+    crashed = recovery_snapshot(project_id)
+    if boundary == "before":
+        assert crashed == before
     else:
-        assert final["project"]["revision"] == 1
-        assert not any(
-            row["request_id"] == replay.core_request_id for row in final["receipts"]
-        )
+        with get_session_factory()() as db:
+            persisted = operation_service.get_result(db, request.request_id)
+        _assert_atomic_settings_effect(before, crashed, request.request_id, persisted)
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == crashed
+
+    with get_session_factory()() as db:
+        replay = operation_service.execute(db, request)
+    final = recovery_snapshot(project_id)
+    _assert_atomic_settings_effect(before, final, request.request_id, replay)
+    with get_session_factory()() as db:
+        assert operation_service.execute(db, request) == replay
+    assert recovery_snapshot(project_id) == final
 
 
 @pytest.mark.parametrize("boundary", ["before", "after"])
@@ -375,6 +573,7 @@ def test_core_receipt_crash_rolls_back_then_generation_confirmation_executes_onc
         confirmation_token=prepared.confirmation_token,
         confirm_generation=True,
     )
+    before = recovery_snapshot(project_id)
     original_save_receipt = core_service_module.save_receipt
 
     def crashing_save_receipt(*args, **kwargs):
@@ -391,24 +590,23 @@ def test_core_receipt_crash_rolls_back_then_generation_confirmation_executes_onc
     monkeypatch.setattr(core_service_module, "save_receipt", original_save_receipt)
 
     crashed = recovery_snapshot(project_id)
-    core_request_id = prepared.core_request_id
-    assert not any(
-        row["request_id"] == core_request_id for row in crashed["receipts"]
-    )
+    assert crashed == before
     assert crashed["project"]["current_artifact_id"] == artifact_id
     assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == crashed
 
     with get_session_factory()() as db:
-        replay = service.execute(db, request.request_id, confirmation)
-    assert replay.status == "completed"
-    assert replay.result is not None
-    assert replay.result.job_id is not None
+        completed = service.execute(db, request.request_id, confirmation)
+    assert completed.status == "completed"
+    assert completed.result is not None
     final = recovery_snapshot(project_id)
-    _assert_request_effect_is_complete(final, core_request_id)
-    assert sum(row["request_id"] == core_request_id for row in final["receipts"]) == 1
-    assert sum(row["id"] == replay.result.job_id for row in final["jobs"]) == 1
-    assert final["project"]["current_artifact_id"] == artifact_id
+    _assert_atomic_generation_effect(
+        before, final, prepared.core_request_id, completed.result
+    )
+    with get_session_factory()() as db:
+        replay = service.execute(db, request.request_id, confirmation)
+    assert replay == completed
+    assert recovery_snapshot(project_id) == final
 
 
 @pytest.mark.parametrize("boundary", ["before", "after"])
@@ -423,6 +621,7 @@ def test_core_commit_crash_has_no_effect_or_complete_generation_receipt(
         confirmation_token=prepared.confirmation_token,
         confirm_generation=True,
     )
+    before = recovery_snapshot(project_id)
 
     with get_session_factory()() as db:
         original_commit = db.commit
@@ -445,22 +644,27 @@ def test_core_commit_crash_has_no_effect_or_complete_generation_receipt(
 
     crashed = recovery_snapshot(project_id)
     core_request_id = prepared.core_request_id
-    _assert_request_effect_is_complete(crashed, core_request_id)
-    matching_receipts = [
-        row for row in crashed["receipts"] if row["request_id"] == core_request_id
-    ]
-    assert len(matching_receipts) == (1 if boundary == "after" else 0)
+    if boundary == "before":
+        assert crashed == before
+    else:
+        with get_session_factory()() as db:
+            persisted = operation_service.get_result(db, core_request_id)
+        _assert_atomic_generation_effect(
+            before, crashed, core_request_id, persisted
+        )
     assert crashed["project"]["current_artifact_id"] == artifact_id
     assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == crashed
 
     with get_session_factory()() as db:
-        replay = service.execute(db, request.request_id, confirmation)
-    assert replay.status == "completed"
-    assert replay.result is not None
-    assert replay.result.job_id is not None
+        completed = service.execute(db, request.request_id, confirmation)
+    assert completed.status == "completed"
+    assert completed.result is not None
     final = recovery_snapshot(project_id)
-    _assert_request_effect_is_complete(final, core_request_id)
-    assert sum(row["request_id"] == core_request_id for row in final["receipts"]) == 1
-    assert sum(row["id"] == replay.result.job_id for row in final["jobs"]) == 1
-    assert final["project"]["current_artifact_id"] == artifact_id
+    _assert_atomic_generation_effect(
+        before, final, core_request_id, completed.result
+    )
+    with get_session_factory()() as db:
+        replay = service.execute(db, request.request_id, confirmation)
+    assert replay == completed
+    assert recovery_snapshot(project_id) == final
