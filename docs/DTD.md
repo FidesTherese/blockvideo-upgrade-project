@@ -453,12 +453,16 @@ may be created or replaced with the still-verified candidate. When a subtitle is
 supplied, its initial path/size/SHA-256 identity is checked again inside the writer
 transaction before video rename and again immediately before `GenerationArtifact`
 construction. Missing or unequal subtitle identity raises `StaleGenerationInput`.
-After rename, the final video size/SHA-256 is checked before manifest/artifact/current-
-pointer/completion writes. A crash or subtitle rejection after rename but before
-commit can leave only that exact unreferenced same-job video orphan recoverable by the
-same rule; it creates no manifest or artifact row and leaves job/project/reference
-state unchanged. Referenced/current files and prior successful history are never
-deleted or replaced.
+After rename, the final video size/SHA-256 is checked before constructing the
+`GenerationArtifact` and its complete `manifest_json`, current-pointer, and completion
+writes. `GenerationArtifact.manifest_json` is the sole authoritative artifact
+manifest; artifact publication never writes a per-job `manifest.json` file. The
+retrieval index's separately owned `manifest.json` contract is unchanged. A crash,
+subtitle rejection, ORM flush failure, or database commit failure after rename can
+leave only that exact unreferenced same-job video orphan recoverable by the same rule;
+it creates no artifact row or manifest file and leaves job/project/reference state
+unchanged. Referenced/current files and prior successful history are never deleted or
+replaced.
 
 No generic production failpoint registry is added. Environment variables and HTTP
 payloads cannot enable a failpoint. Unknown remote calls remain terminal for
@@ -1407,9 +1411,13 @@ independent review gates supply the recorded trust decisions.
   dispatcher; restart twice to prove state stability; remote POST counter must remain
   one; valid-checkpoint submit-once/completion through `JobRegistry`; invalid-
   checkpoint non-dispatch; subtitle mutation/deletion at the post-rename artifact
-  boundary with transactional rollback; and rename-before-commit orphan replacement
-  restricted to the exact unreferenced job history path with referenced/current
-  artifact protection and stable replay.
+  boundary with transactional rollback; ORM flush/commit failure proving no artifact
+  row or per-job manifest file and only the permitted video orphan; complete DB
+  `manifest_json` on success; no artifact `manifest.json` on success; and
+  rename-before-commit orphan replacement restricted to the exact unreferenced job
+  history path with referenced/current artifact protection and stable replay. The
+  retrieval-index manifest tests remain unchanged and continue to cover that separate
+  subsystem.
 - **D34:** empty/current/upstream/D30/partial/newer/corrupt fixtures; scratch-metadata
   affinity equality for every existing known column and rejection of each affinity
   mismatch/name collision; preservation of unknown extra tables/columns; backup hash,

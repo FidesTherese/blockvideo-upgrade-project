@@ -105,9 +105,13 @@ terminal job, or unresolved remote work blocks filesystem mutation and publicati
 Only an exact unreferenced same-job orphan may be replaced by the verified candidate.
 A supplied subtitle is identity-checked inside the same writer transaction before
 filesystem mutation and rechecked immediately before artifact construction; mutation
-or deletion rejects publication. A post-rename rejection may retain only the exact
-unreferenced same-job video orphan allowed by the crash contract, while database
-references, job/project state, and prior history remain unchanged. Completed
+or deletion rejects publication. `GenerationArtifact.manifest_json` is the sole
+authoritative artifact manifest; artifact publication never creates a per-job
+`manifest.json` file. Retrieval-index
+manifests remain a separate unchanged subsystem. A post-rename rejection or database
+flush/commit failure may retain only the exact unreferenced same-job video orphan
+allowed by the crash contract, while no artifact row or manifest file is created and
+database references, job/project state, and prior history remain unchanged. Completed
 publication replays the existing artifact.
 
 D40 accepts completed human-operation or independent-review evidence only with an

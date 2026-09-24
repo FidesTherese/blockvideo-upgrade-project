@@ -75,8 +75,11 @@ The exact same-job history destination is reference-checked even for identical b
 artifact-path, same-job artifact, project output/current, and non-job-path cases block
 filesystem mutation before history/current pointers are written. Supplied subtitle
 identity is checked before rename and again immediately before artifact construction.
-A late subtitle mutation/deletion rolls back database publication and can leave only
-the permitted unreferenced same-job video orphan.
+The complete artifact manifest exists only in transactional
+`GenerationArtifact.manifest_json`; publication never writes a per-job
+`manifest.json`, while retrieval-index manifests remain separately owned. A late
+subtitle mutation/deletion or database flush/commit failure rolls back database
+publication and can leave only the permitted unreferenced same-job video orphan.
 
 ## Key Decisions and Limits
 
@@ -106,7 +109,9 @@ the permitted unreferenced same-job video orphan.
   for the same exactly running job at its exact history path after all publication
   eligibility checks pass in the writer transaction. Reference checks run even for
   identical bytes. Referenced/current artifacts and prior successful history remain
-  immutable; committed publication replays its existing artifact row.
+  immutable; committed publication replays its existing artifact row. The row's
+  `manifest_json` is the only artifact manifest, so filesystem/DB crash skew is
+  limited to the permitted unreferenced video orphan rather than a second manifest.
 - Legacy absolute calls remain compatible without replay guarantees.
 - Unexpected errors return fixed `internal_error` responses; logs exclude exception
   text, request/model bodies, prompts, private paths, and credentials.

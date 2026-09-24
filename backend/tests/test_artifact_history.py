@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -239,7 +240,9 @@ async def test_cancellation_after_probe_still_prevents_publish(temp_storage, mon
 
 
 @pytest.mark.asyncio
-async def test_metadata_failure_retains_previous_success(temp_storage, accept_synthetic_probe, monkeypatch):
+async def test_database_manifest_is_complete_without_artifact_manifest_file(
+    temp_storage, accept_synthetic_probe
+):
     with get_session_factory()() as db:
         project, job = make_job(db)
         project_id, first_id, snapshot = project.id, job.id, capture_inputs(project)
@@ -249,20 +252,59 @@ async def test_metadata_failure_retains_previous_success(temp_storage, accept_sy
     with get_session_factory()() as db:
         _, job = make_job(db, db.get(Project, project_id))
         second_id = job.id
-    write_text = Path.write_text
+    second = await store.publish_artifact(
+        second_id,
+        candidate_for(project_id, second_id, b"new"),
+        None,
+        settled_inputs=snapshot,
+        materials=[],
+        cancel_check=lambda: False,
+    )
 
-    def fail_manifest(path, *args, **kwargs):
-        if path.name == "manifest.json":
-            raise OSError("injected metadata failure")
-        return write_text(path, *args, **kwargs)
-    monkeypatch.setattr(Path, "write_text", fail_manifest)
-    with pytest.raises(OSError, match="injected"):
-        await store.publish_artifact(second_id, candidate_for(project_id, second_id, b"new"), None,
-                                     settled_inputs=snapshot, materials=[], cancel_check=lambda: False)
     assert store.artifact_file_path(first).read_bytes() == original
+    assert store.artifact_file_path(second).read_bytes() == b"new"
+    first_manifest = (
+        project_dir(project_id) / "history" / f"job-{first_id:08d}" / "manifest.json"
+    )
+    second_directory = project_dir(project_id) / "history" / f"job-{second_id:08d}"
+    assert not first_manifest.exists()
+    assert not (second_directory / "manifest.json").exists()
     with get_session_factory()() as db:
-        assert db.get(Project, project_id).current_artifact_id == first.id
-        assert len(list(db.scalars(select(GenerationArtifact)))) == 1
+        artifacts = list(db.scalars(select(GenerationArtifact).order_by(GenerationArtifact.id)))
+        assert len(artifacts) == 2
+        persisted = artifacts[1]
+        assert db.get(Project, project_id).current_artifact_id == persisted.id == second.id
+        assert set(persisted.manifest_json) == {
+            "schema_version",
+            "job_id",
+            "revision",
+            "requested_input_fingerprint",
+            "settled_inputs",
+            "input_fingerprint",
+            "materials",
+            "video",
+            "subtitle",
+            "block_videos",
+            "metadata",
+        }
+        assert persisted.manifest_json["schema_version"] == 1
+        assert persisted.manifest_json["job_id"] == second_id
+        assert persisted.manifest_json["revision"] == 1
+        assert persisted.manifest_json["requested_input_fingerprint"] == fingerprint_inputs(snapshot)
+        assert persisted.manifest_json["settled_inputs"] == snapshot
+        assert persisted.manifest_json["input_fingerprint"] == fingerprint_inputs(snapshot)
+        assert persisted.manifest_json["materials"] == []
+        assert persisted.manifest_json["subtitle"] is None
+        assert persisted.manifest_json["block_videos"] == []
+        assert persisted.manifest_json["metadata"] == []
+        assert persisted.manifest_json["video"] == {
+            "path": relpath_for_db(second_directory / "video.mp4"),
+            "size": 3,
+            "sha256": hashlib.sha256(b"new").hexdigest(),
+            "duration_ms": 1000,
+            "width": 320,
+            "height": 180,
+        }
 
 
 @pytest.mark.asyncio

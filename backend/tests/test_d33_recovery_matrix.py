@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.db import get_session_factory
 from app.language_operations import repository
@@ -1581,6 +1582,68 @@ def test_identical_destination_reference_never_removes_or_replaces_files(
     snapshot = recovery_snapshot(project_id)
     assert len(snapshot["artifacts"]) == 1
     assert snapshot["project"]["current_artifact_id"] == prior_artifact_id
+
+
+@pytest.mark.parametrize("boundary", ["flush", "commit"])
+def test_artifact_database_failure_leaves_only_unreferenced_video_orphan(
+    temp_storage: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    project_id, _prior_artifact_id = _seed_canonical_state()
+    job_id = _new_running_job(project_id)
+    directory = project_dir(project_id) / "history" / f"job-{job_id:08d}"
+    candidate = directory / "video.pending.mp4"
+    final = directory / "video.mp4"
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate_bytes = f"database-{boundary}-failure".encode()
+    candidate.write_bytes(candidate_bytes)
+    before = recovery_snapshot(project_id)
+
+    async def validate(path: Path) -> dict[str, object]:
+        return {
+            **artifact_store.file_identity(path),
+            "duration_ms": 1000,
+            "width": 320,
+            "height": 180,
+        }
+
+    monkeypatch.setattr(artifact_store, "validate_video", validate)
+    if boundary == "flush":
+        original_flush = Session.flush
+
+        def fail_artifact_flush(self: Session, objects: Any = None) -> None:
+            if any(isinstance(value, GenerationArtifact) for value in self.new):
+                raise OSError("synthetic artifact flush failure")
+            original_flush(self, objects)
+
+        monkeypatch.setattr(Session, "flush", fail_artifact_flush)
+    else:
+        def fail_artifact_commit(self: Session) -> None:
+            raise OSError("synthetic artifact commit failure")
+
+        monkeypatch.setattr(Session, "commit", fail_artifact_commit)
+
+    with get_session_factory()() as db:
+        settled_inputs = db.get(GenerationJob, job_id).input_snapshot
+
+    with pytest.raises(OSError, match=f"synthetic artifact {boundary} failure"):
+        asyncio.run(
+            artifact_store.publish_artifact(
+                job_id,
+                candidate,
+                None,
+                settled_inputs=settled_inputs,
+                materials=[],
+                cancel_check=lambda: False,
+            )
+        )
+
+    assert not candidate.exists()
+    assert final.read_bytes() == candidate_bytes
+    assert set(directory.iterdir()) == {final}
+    assert not (directory / "manifest.json").exists()
+    assert recovery_snapshot(project_id) == before
 
 
 @pytest.mark.parametrize("boundary", ["before", "after"])

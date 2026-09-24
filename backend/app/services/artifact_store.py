@@ -347,9 +347,6 @@ async def publish_artifact(
             subtitle_path=subtitle_identity["path"] if subtitle_identity else None,
             manifest_json=manifest,
         )
-        # Metadata is also immutable and complete before its DB reference exists.
-        manifest_path = final.parent / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         db.add(artifact)
         db.flush()
         project.current_artifact_id = artifact.id
