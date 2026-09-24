@@ -489,9 +489,13 @@ def test_request_claim_crash_expires_owner_or_executes_once(
             if row["request_id"] == request.request_id
         )
         assert stored["response_json"] == reconciled_response.model_dump(mode="json")
+        assert restart_twice() == (0, 0)
+        assert recovery_snapshot(project_id) == reconciled
         with get_session_factory()() as db:
             second = asyncio.run(service.submit(db, request))
         assert second == reconciled_response
+        assert recovery_snapshot(project_id) == reconciled
+        assert restart_twice() == (0, 0)
         assert recovery_snapshot(project_id) == reconciled
         assert _effect_state(reconciled) == _effect_state(before)
         assert adapter.calls == 0
@@ -507,9 +511,13 @@ def test_request_claim_crash_expires_owner_or_executes_once(
     _assert_exact_receipt_result(final, first.core_request_id, first.result)
     assert final["project"]["revision"] == 2
     assert [row["revision"] for row in final["settings_revisions"]] == [1, 2]
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == final
     with get_session_factory()() as db:
         replay = asyncio.run(service.submit(db, request))
     assert replay == first
+    assert recovery_snapshot(project_id) == final
+    assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == final
     assert adapter.calls == 1
 
@@ -554,8 +562,12 @@ def test_settings_core_commit_is_atomic_with_history_and_receipt(
         replay = operation_service.execute(db, request)
     final = recovery_snapshot(project_id)
     _assert_atomic_settings_effect(before, final, request.request_id, replay)
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == final
     with get_session_factory()() as db:
         assert operation_service.execute(db, request) == replay
+    assert recovery_snapshot(project_id) == final
+    assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == final
 
 
@@ -603,9 +615,13 @@ def test_core_receipt_crash_rolls_back_then_generation_confirmation_executes_onc
     _assert_atomic_generation_effect(
         before, final, prepared.core_request_id, completed.result
     )
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == final
     with get_session_factory()() as db:
         replay = service.execute(db, request.request_id, confirmation)
     assert replay == completed
+    assert recovery_snapshot(project_id) == final
+    assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == final
 
 
@@ -664,7 +680,11 @@ def test_core_commit_crash_has_no_effect_or_complete_generation_receipt(
     _assert_atomic_generation_effect(
         before, final, core_request_id, completed.result
     )
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == final
     with get_session_factory()() as db:
         replay = service.execute(db, request.request_id, confirmation)
     assert replay == completed
+    assert recovery_snapshot(project_id) == final
+    assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == final

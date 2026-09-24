@@ -32,11 +32,11 @@
 - Test helper `restart_twice() -> tuple[int, int]` invokes `mark_interrupted_operation_jobs()` twice and returns both transition counts.
 - Existing callable seams are `repository.claim`, `receipts.save_receipt`, and operation transaction commit; no runtime failpoint registry is added.
 
-- [ ] **Step 1: Write RED tests for deterministic snapshots**
+- [x] **Step 1: Write RED tests for deterministic snapshots**
 
 Seed a synthetic project with one prior successful artifact, one language request, and one operation receipt. Assert two independently reopened `recovery_snapshot()` values are equal, contain no ORM objects/raw response bytes, and retain the prior artifact identity.
 
-- [ ] **Step 2: Run the snapshot test**
+- [x] **Step 2: Run the snapshot test**
 
 ```bash
 cd backend
@@ -45,11 +45,11 @@ python -m uv run pytest tests/test_d33_recovery_matrix.py -k canonical_snapshot 
 
 Expected: FAIL until the D33 test helper and assertions exist, then PASS without a production change.
 
-- [ ] **Step 3: Add request-claim and core-commit failure tests**
+- [x] **Step 3: Add request-claim and core-commit failure tests**
 
 Monkeypatch `repository.claim` and `receipts.save_receipt` separately to raise `OSError("synthetic D33 boundary")` immediately before and after their durable writes. Cover a settings save and a generation confirmation. For each boundary assert either no committed effect or one complete effect with its immutable receipt; reject a revision without history/receipt, a receipt without its declared effect, and a job without its receipt. Replay the same request ID/body and assert exact saved replay or one clean first execution.
 
-- [ ] **Step 4: Run request/core recovery tests and regressions**
+- [x] **Step 4: Run request/core recovery tests and regressions**
 
 ```bash
 cd backend
@@ -57,7 +57,7 @@ python -m uv run pytest tests/test_d33_recovery_matrix.py -k "claim or receipt o
 python -m uv run ruff check tests/test_d33_recovery_matrix.py app/operations/receipts.py app/operations/service.py app/language_operations/repository.py
 ```
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```bash
 git add backend/tests/test_d33_recovery_matrix.py backend/app/operations/receipts.py backend/app/operations/service.py backend/app/language_operations/repository.py
