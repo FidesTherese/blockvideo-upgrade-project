@@ -33,6 +33,7 @@ from app.operations.bootstrap import operation_service
 from app.operations.contracts import OperationRequest
 from app.services import artifact_store
 from app.services.external_calls import ExternalOutcomeUnknown, job_call_context, journaled_post
+from app.services.generation_snapshots import fingerprint_inputs
 from app.services.job_records import create_pending_job
 from app.services.paths import project_dir
 from app.services.settings_history import configuration, record_settings
@@ -916,13 +917,17 @@ def test_provider_process_death_never_repeats_remote_send(
     assert result.returncode == exit_code, result.stderr
     assert _marker_lines(marker_path) == expected_markers
     crashed = recovery_snapshot(project_id)
-    call = next(row for row in crashed["external_calls"] if row["job_id"] == job_id)
-    assert call["status"] == ("in_flight" if expected_status == "unknown" else "succeeded")
+    calls = [row for row in crashed["external_calls"] if row["job_id"] == job_id]
+    assert len(calls) == 1
+    assert calls[0]["status"] == (
+        "in_flight" if expected_status == "unknown" else "succeeded"
+    )
     first, second = restart_twice()
     assert (first, second) == (1, 0)
     recovered = recovery_snapshot(project_id)
-    call = next(row for row in recovered["external_calls"] if row["job_id"] == job_id)
-    assert call["status"] == expected_status
+    calls = [row for row in recovered["external_calls"] if row["job_id"] == job_id]
+    assert len(calls) == 1
+    assert calls[0]["status"] == expected_status
     assert recovered["project"]["current_artifact_id"] == prior_artifact_id
     stable = recovery_snapshot(project_id)
     assert stable == recovered
@@ -989,8 +994,11 @@ def test_checkpoint_and_cancellation_process_death_is_stable(
     crashed = recovery_snapshot(project_id)
     job = next(row for row in crashed["jobs"] if row["id"] == job_id)
     assert job["status"] == "running"
+    assert job["input_fingerprint"] == fingerprint_inputs(job["input_snapshot"])
     if scenario == "checkpoint_resume":
-        assert job["plan_json"]["resume_fingerprint"]
+        assert job["plan_json"]["resume_fingerprint"] == fingerprint_inputs(
+            job["plan_json"]["resume_inputs"]
+        )
     if scenario == "checkpoint_cancelled":
         assert job["cancel_requested"] is True
     assert restart_twice() == (1, 0)
@@ -999,7 +1007,15 @@ def test_checkpoint_and_cancellation_process_death_is_stable(
     assert job["status"] == expected_status
     assert recovered["project"]["current_artifact_id"] == prior_artifact_id
     if scenario == "checkpoint_cancelled":
-        assert dispatch_pending_operation_jobs() == 0
+        class RejectingRegistry:
+            def is_running(self, target: int) -> bool:
+                pytest.fail(f"cancelled job {target} reached dispatch")
+
+            def submit(self, target: int, factory: Any) -> None:
+                del factory
+                pytest.fail(f"cancelled job {target} reached provider construction")
+
+        assert dispatch_pending_operation_jobs(registry=RejectingRegistry()) == 0
     assert recovery_snapshot(project_id) == recovered
     assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == recovered
@@ -1015,6 +1031,7 @@ def test_checkpoint_and_cancellation_process_death_is_stable(
 )
 def test_artifact_publication_process_death_preserves_history_and_identity(
     temp_storage: Path,
+    monkeypatch: pytest.MonkeyPatch,
     scenario: str,
     exit_code: int,
 ) -> None:
@@ -1052,33 +1069,30 @@ def test_artifact_publication_process_death_preserves_history_and_identity(
     assert recovery_snapshot(project_id) == recovered
 
     if scenario == "artifact_published":
-        async def validate(path: Path) -> dict[str, object]:
-            return {
-                **artifact_store.file_identity(path),
-                "duration_ms": 1000,
-                "width": 320,
-                "height": 180,
-            }
+        async def reject_validation(path: Path) -> dict[str, object]:
+            pytest.fail(f"committed replay revalidated missing candidate {path}")
 
-        original_validate = artifact_store.validate_video
-        artifact_store.validate_video = validate
-        try:
-            artifact = asyncio.run(
-                artifact_store.publish_artifact(
-                    job_id,
-                    candidate,
-                    None,
-                    settled_inputs=next(
-                        row for row in recovered["jobs"] if row["id"] == job_id
-                    )["input_snapshot"],
-                    materials=[],
-                    cancel_check=lambda: False,
-                )
+        monkeypatch.setattr(artifact_store, "validate_video", reject_validation)
+        artifact = asyncio.run(
+            artifact_store.publish_artifact(
+                job_id,
+                candidate,
+                None,
+                settled_inputs=next(
+                    row for row in recovered["jobs"] if row["id"] == job_id
+                )["input_snapshot"],
+                materials=[],
+                cancel_check=lambda: pytest.fail(
+                    "committed replay reconsidered cancellation"
+                ),
             )
-        finally:
-            artifact_store.validate_video = original_validate
+        )
         assert artifact.id == new_artifacts[0]["id"]
-        assert recovery_snapshot(project_id) == recovered
+        replayed = recovery_snapshot(project_id)
+        assert replayed == recovered
+        assert len(
+            [row for row in replayed["artifacts"] if row["job_id"] == job_id]
+        ) == 1
 
 
 @pytest.mark.parametrize("boundary", ["before", "after"])
