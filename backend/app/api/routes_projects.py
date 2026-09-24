@@ -18,7 +18,12 @@ from fastapi.responses import FileResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.api.utils import ensure_project_idle, ensure_render_assets_ready, validate_artifact_path
+from app.api.utils import (
+    ensure_project_deletable,
+    ensure_project_idle,
+    ensure_render_assets_ready,
+    validate_artifact_path,
+)
 from app.core.logging import log
 from app.core.security import SecretBundle, secret_store
 from app.db import get_db
@@ -392,7 +397,7 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
-    ensure_project_idle(project_id, db)
+    ensure_project_deletable(project_id, db)
     reserve_project_id(db, project_id)
     secret_store.drop(project_id)
     db.execute(delete(SettingsRevision).where(SettingsRevision.project_id == project_id))

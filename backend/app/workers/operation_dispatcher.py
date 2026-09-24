@@ -14,11 +14,12 @@ from app.services.pipeline import run_generation_job
 from app.services.external_calls import has_unresolved_calls, mark_interrupted_calls
 from app.services.generation_snapshots import FROZEN_SNAPSHOT_KEYS, capture_inputs, fingerprint_inputs
 from app.services.transactions import atomic_write
-from app.workers.job_runner import job_registry
+from app.workers.job_runner import JobRegistry, job_registry
 
 
-def dispatch_pending_operation_jobs() -> int:
+def dispatch_pending_operation_jobs(*, registry: JobRegistry | None = None) -> int:
     """Submit persisted pending jobs; workers perform the atomic running claim."""
+    target_registry = registry or job_registry
     with get_session_factory()() as db:
         pending = list(db.execute(
             select(GenerationJob.id, GenerationJob.project_id)
@@ -27,9 +28,9 @@ def dispatch_pending_operation_jobs() -> int:
         ))
     submitted = 0
     for job_id, project_id in pending:
-        if job_registry.is_running(job_id):
+        if target_registry.is_running(job_id):
             continue
-        job_registry.submit(
+        target_registry.submit(
             job_id,
             lambda cancel, jid=job_id: run_generation_job(jid, cancel),
         )

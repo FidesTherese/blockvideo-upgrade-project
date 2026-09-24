@@ -18,11 +18,13 @@ import time
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.db import get_session_factory
+from app.db import get_db, get_session_factory
+from app.main import create_app
 from app.interpretation.transport import ModelMessage
 from app.language_operations import repository as language_repository
 from app.language_operations.contracts import (
@@ -34,7 +36,7 @@ from app.language_operations.contracts import (
 from app.language_operations.service import LanguageOperationService
 from app.models.artifact import GenerationArtifact
 from app.models.external_call import ExternalCall
-from app.models.job import GenerationJob
+from app.models.job import GenerationJob, JobStatus
 from app.models.language_request import LanguageRequestRecord
 from app.models.language_turn import LanguageTurn
 from app.models.operation_request import OperationReceipt
@@ -47,6 +49,7 @@ from app.services import artifact_store
 from app.services.generation_snapshots import GenerationCancelled, capture_inputs
 from app.services.paths import project_dir
 from app.services.settings_history import configuration
+from app.workers import operation_dispatcher as dispatcher
 from app.workers.job_runner import JobRegistry
 from tests.test_language_dialogue import ask, reply
 from tests.test_language_operations import create
@@ -1007,3 +1010,436 @@ async def test_cancel_vs_publication_preserves_prior_artifact_and_terminalizes_o
             cancel_check=lambda: False,
         )
     assert snapshot(project_id) == state
+
+
+def test_nonrecoverable_retry_vs_reconciliation_has_at_most_one_child(
+    temp_storage: Path, monkeypatch
+) -> None:
+    from app.operations import service as operation_service_module
+
+    project_id = make_project()
+    source_request = OperationRequest(
+        operation_id="project.generation.start",
+        target={"project_id": project_id},
+        arguments={"kind": "full"},
+        request_id="d32-interrupted-source",
+        base_revision=1,
+    )
+    with get_session_factory()() as db:
+        source_result = operation_service.execute(db, source_request)
+        source = db.get(GenerationJob, source_result.job_id)
+        assert source is not None
+        source.status = JobStatus.running
+        source.input_snapshot = None
+        db.commit()
+        source_job_id = source.id
+    retry_request = OperationRequest(
+        operation_id="project.generation.retry",
+        target={"project_id": project_id},
+        arguments={"job_id": source_job_id},
+        request_id="d32-interrupted-retry",
+        base_revision=1,
+    )
+    barrier = Barrier(2)
+    original_operation_write = operation_service_module.atomic_write
+    original_recovery_write = dispatcher.atomic_write
+
+    @contextmanager
+    def synchronized_operation_write(db: Session) -> Iterator[None]:
+        barrier.wait(timeout=20)
+        with original_operation_write(db):
+            yield
+
+    @contextmanager
+    def synchronized_recovery_write(db: Session) -> Iterator[None]:
+        barrier.wait(timeout=20)
+        with original_recovery_write(db):
+            yield
+
+    monkeypatch.setattr(
+        operation_service_module, "atomic_write", synchronized_operation_write
+    )
+    monkeypatch.setattr(dispatcher, "atomic_write", synchronized_recovery_write)
+
+    def retry() -> OperationResult | OperationError:
+        with get_session_factory()() as db:
+            try:
+                return operation_service.execute(db, retry_request)
+            except OperationError as error:
+                return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        recovery_future = pool.submit(dispatcher.mark_interrupted_operation_jobs)
+        retry_future = pool.submit(retry)
+        assert recovery_future.result(timeout=30) == 1
+        retry_result = retry_future.result(timeout=30)
+
+    state = snapshot(project_id)
+    jobs = {row["id"]: row for row in state["jobs"]}
+    receipts = {row["request_id"]: row for row in state["receipts"]}
+    assert jobs[source_job_id]["status"] == "failed"
+    assert jobs[source_job_id]["input_snapshot"] is None
+    assert jobs[source_job_id]["parent_job_id"] is None
+    assert receipts[source_request.request_id]["job_id"] == source_job_id
+    assert state["external_calls"] == []
+    assert state["artifacts"] == []
+    if isinstance(retry_result, OperationError):
+        assert retry_result.reason_code == "project_busy"
+        assert set(jobs) == {source_job_id}
+        assert set(receipts) == {source_request.request_id}
+    else:
+        assert retry_result.job_id is not None
+        assert set(jobs) == {source_job_id, retry_result.job_id}
+        child = jobs[retry_result.job_id]
+        assert child["status"] == "pending"
+        assert child["parent_job_id"] == source_job_id
+        assert child["input_snapshot"] is not None
+        assert set(receipts) == {
+            source_request.request_id,
+            retry_request.request_id,
+        }
+        assert receipts[retry_request.request_id]["job_id"] == retry_result.job_id
+        monkeypatch.setattr(
+            operation_service_module, "atomic_write", original_operation_write
+        )
+        with get_session_factory()() as db:
+            assert operation_service.execute(db, retry_request) == retry_result
+    monkeypatch.setattr(dispatcher, "atomic_write", original_recovery_write)
+    assert dispatcher.mark_interrupted_operation_jobs() == 0
+    assert snapshot(project_id) == state
+
+
+@pytest.mark.asyncio
+async def test_delete_racing_pending_claim_is_blocked_and_receipt_survives(
+    temp_storage: Path, monkeypatch
+) -> None:
+    from app.api import routes_projects
+    from app.workers import job_runner
+
+    project_id = make_project()
+    source_request = OperationRequest(
+        operation_id="project.generation.start",
+        target={"project_id": project_id},
+        arguments={"kind": "full"},
+        request_id="d32-delete-active-source",
+        base_revision=1,
+    )
+    with get_session_factory()() as db:
+        source_result = operation_service.execute(db, source_request)
+    barrier = Barrier(2)
+    claim_started = Event()
+    release_work = asyncio.Event()
+    original_delete_write = routes_projects.begin_write
+    original_job_write = job_runner.atomic_write
+    delete_waited = False
+    claim_waited = False
+
+    def synchronized_delete_write(db: Session) -> None:
+        nonlocal delete_waited
+        if not delete_waited:
+            delete_waited = True
+            barrier.wait(timeout=20)
+        original_delete_write(db)
+
+    @contextmanager
+    def synchronized_job_write(db: Session) -> Iterator[None]:
+        nonlocal claim_waited
+        if not claim_waited:
+            claim_waited = True
+            barrier.wait(timeout=20)
+        with original_job_write(db):
+            yield
+
+    monkeypatch.setattr(routes_projects, "begin_write", synchronized_delete_write)
+    monkeypatch.setattr(job_runner, "atomic_write", synchronized_job_write)
+    registry = JobRegistry()
+
+    async def work(_cancel_check: Callable[[], bool]) -> None:
+        claim_started.set()
+        await release_work.wait()
+
+    client = TestClient(create_app())
+    deletion = asyncio.create_task(
+        asyncio.to_thread(client.delete, f"/api/projects/{project_id}")
+    )
+    task = registry.submit(source_result.job_id, work)
+    assert await asyncio.to_thread(claim_started.wait, 20)
+    response = await asyncio.wait_for(deletion, timeout=30)
+    assert response.status_code == 409
+    active_state = snapshot(project_id)
+    assert [row["request_id"] for row in active_state["receipts"]] == [
+        source_request.request_id
+    ]
+    assert active_state["jobs"][0]["status"] == "running"
+    assert active_state["external_calls"] == []
+    assert active_state["artifacts"] == []
+    with get_session_factory()() as db:
+        job = db.get(GenerationJob, source_result.job_id)
+        assert job is not None
+        assert job.status == JobStatus.running
+        assert db.get(OperationReceipt, source_request.request_id) is not None
+    release_work.set()
+    await asyncio.wait_for(task, timeout=30)
+    assert client.delete(f"/api/projects/{project_id}").status_code == 204
+    with get_session_factory()() as db:
+        assert db.get(Project, project_id) is None
+        assert db.get(GenerationJob, source_result.job_id) is None
+        assert db.get(OperationReceipt, source_request.request_id) is not None
+        assert operation_service.execute(db, source_request) == source_result
+
+
+@pytest.mark.parametrize("blocker", ("unknown_job", "unresolved_call"))
+def test_delete_racing_unknown_or_unresolved_work_requires_resolution(
+    temp_storage: Path, monkeypatch, blocker: str
+) -> None:
+    from app.api import routes_projects
+    from app.services.transactions import atomic_write
+
+    project_id = make_project()
+    source_request = OperationRequest(
+        operation_id="project.generation.start",
+        target={"project_id": project_id},
+        arguments={"kind": "full"},
+        request_id=f"d32-delete-{blocker}",
+        base_revision=1,
+    )
+    with get_session_factory()() as db:
+        source_result = operation_service.execute(db, source_request)
+        source = db.get(GenerationJob, source_result.job_id)
+        assert source is not None
+        source.status = JobStatus.failed
+        db.commit()
+        source_job_id = source.id
+
+    blocker_staged = Event()
+    deletion_reached = Event()
+    original_delete_write = routes_projects.begin_write
+
+    def observed_delete_write(db: Session) -> None:
+        deletion_reached.set()
+        original_delete_write(db)
+
+    monkeypatch.setattr(routes_projects, "begin_write", observed_delete_write)
+
+    def commit_blocker() -> None:
+        with get_session_factory()() as db, atomic_write(db):
+            job = db.get(GenerationJob, source_job_id)
+            assert job is not None
+            if blocker == "unknown_job":
+                job.status = JobStatus.unknown
+            else:
+                db.add(
+                    ExternalCall(
+                        job_id=source_job_id,
+                        fingerprint="d32-delete-unresolved",
+                        provider="synthetic",
+                        endpoint="https://synthetic.invalid",
+                        remote_side_effect=True,
+                        status="unknown",
+                    )
+                )
+            db.flush()
+            blocker_staged.set()
+            assert deletion_reached.wait(timeout=20)
+
+    client = TestClient(create_app())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        blocker_future = pool.submit(commit_blocker)
+        assert blocker_staged.wait(timeout=20)
+        delete_future = pool.submit(client.delete, f"/api/projects/{project_id}")
+        blocker_future.result(timeout=30)
+        response = delete_future.result(timeout=30)
+    assert response.status_code == 409
+    blocked_state = snapshot(project_id)
+    assert [row["request_id"] for row in blocked_state["receipts"]] == [
+        source_request.request_id
+    ]
+    assert blocked_state["artifacts"] == []
+    if blocker == "unknown_job":
+        assert blocked_state["jobs"][0]["status"] == "unknown"
+        assert blocked_state["external_calls"] == []
+    else:
+        assert blocked_state["jobs"][0]["status"] == "failed"
+        assert len(blocked_state["external_calls"]) == 1
+        assert blocked_state["external_calls"][0]["status"] == "unknown"
+
+    with get_session_factory()() as db, atomic_write(db):
+        job = db.get(GenerationJob, source_job_id)
+        assert job is not None
+        job.status = JobStatus.failed
+        calls = list(
+            db.scalars(select(ExternalCall).where(ExternalCall.job_id == source_job_id))
+        )
+        for call in calls:
+            db.delete(call)
+
+    create_barrier = Barrier(2)
+
+    def delete_resolved() -> Any:
+        create_barrier.wait(timeout=20)
+        return TestClient(create_app()).delete(f"/api/projects/{project_id}")
+
+    def create_competing_project() -> Any:
+        create_barrier.wait(timeout=20)
+        return TestClient(create_app()).post(
+            "/api/projects",
+            json={
+                "title": "D32 concurrent survivor",
+                "source_script": "同時作成される合成台本。",
+                "use_fake_providers": True,
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        delete_future = pool.submit(delete_resolved)
+        create_future = pool.submit(create_competing_project)
+        deleted = delete_future.result(timeout=30)
+        created = create_future.result(timeout=30)
+    assert deleted.status_code == 204
+    assert created.status_code == 201
+    survivor_id = created.json()["id"]
+    assert survivor_id != project_id
+    with get_session_factory()() as db:
+        assert db.get(Project, project_id) is None
+        survivor = db.get(Project, survivor_id)
+        assert survivor is not None
+        assert survivor.title == "D32 concurrent survivor"
+        assert db.get(GenerationJob, source_job_id) is None
+        assert list(
+            db.scalars(select(ExternalCall).where(ExternalCall.job_id == source_job_id))
+        ) == []
+        receipt = db.get(OperationReceipt, source_request.request_id)
+        assert receipt is not None
+        assert receipt.result_json == source_result.model_dump(mode="json")
+        assert operation_service.execute(db, source_request) == source_result
+    assert not project_dir(project_id).exists()
+    assert project_dir(survivor_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_competing_startup_scans_claim_five_pending_jobs_once(
+    temp_storage: Path, monkeypatch
+) -> None:
+    job_ids: list[int] = []
+    cases: list[tuple[int, str, int]] = []
+    for index in range(5):
+        project_id = make_project()
+        request = adjustment(
+            project_id,
+            request_id=f"d32-startup-scan-{index}",
+            generate=True,
+        )
+        with get_session_factory()() as db:
+            result = operation_service.execute(db, request)
+        assert result.job_id is not None
+        job_ids.append(result.job_id)
+        cases.append((project_id, request.request_id, result.job_id))
+
+    counts = {job_id: 0 for job_id in job_ids}
+    count_lock = Lock()
+
+    async def work(job_id: int, _cancel_check: Callable[[], bool]) -> None:
+        with count_lock:
+            counts[job_id] += 1
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(dispatcher, "run_generation_job", work)
+    scan_barrier = Barrier(2)
+    registries = (JobRegistry(), JobRegistry())
+
+    def scan(registry: JobRegistry) -> int:
+        async def run() -> int:
+            scan_barrier.wait(timeout=20)
+            submitted = dispatcher.dispatch_pending_operation_jobs(registry=registry)
+            tasks = list(registry._tasks.values())
+            if tasks:
+                await asyncio.gather(*tasks)
+            return submitted
+
+        return asyncio.run(run())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        submitted = list(pool.map(scan, registries))
+    assert sum(submitted) >= 5
+    assert counts == {job_id: 1 for job_id in job_ids}
+    with get_session_factory()() as db:
+        jobs = list(
+            db.scalars(
+                select(GenerationJob)
+                .where(GenerationJob.id.in_(job_ids))
+                .order_by(GenerationJob.id)
+            )
+        )
+        assert [job.status for job in jobs] == [JobStatus.completed] * 5
+    for project_id, request_id, job_id in cases:
+        state = snapshot(project_id)
+        assert [row["id"] for row in state["jobs"]] == [job_id]
+        assert state["jobs"][0]["status"] == "completed"
+        assert [row["request_id"] for row in state["receipts"]] == [request_id]
+        assert state["external_calls"] == []
+        assert state["artifacts"] == []
+    assert dispatcher.dispatch_pending_operation_jobs(registry=JobRegistry()) == 0
+    assert dispatcher.dispatch_pending_operation_jobs(registry=JobRegistry()) == 0
+
+
+def test_operation_api_writer_busy_has_fixed_retry_guidance_and_same_id_success(
+    temp_storage: Path, monkeypatch
+) -> None:
+    from app.operations import service as operation_service_module
+    from app.services.transactions import atomic_write
+
+    project_id = make_project()
+    request = adjustment(project_id, request_id="d32-api-busy")
+    payload = request.model_dump(mode="json")
+    barrier = Barrier(2)
+    original_atomic_write = operation_service_module.atomic_write
+
+    @contextmanager
+    def synchronized_atomic_write(db: Session) -> Iterator[None]:
+        barrier.wait(timeout=20)
+        with original_atomic_write(db):
+            yield
+
+    monkeypatch.setattr(
+        operation_service_module, "atomic_write", synchronized_atomic_write
+    )
+    app = create_app()
+
+    def short_busy_session() -> Iterator[Session]:
+        with get_session_factory()() as db:
+            db.execute(text("PRAGMA busy_timeout = 1"))
+            yield db
+
+    app.dependency_overrides[get_db] = short_busy_session
+    client = TestClient(app)
+    with get_session_factory()() as owner, atomic_write(owner):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(client.post, "/api/operations/execute", json=payload)
+            barrier.wait(timeout=20)
+            response = future.result(timeout=30)
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == "1"
+        assert response.json() == {
+            "detail": {
+                "reason_code": "database_busy",
+                "message": "database busy; retry the same request ID",
+            }
+        }
+        assert owner.get(OperationReceipt, request.request_id) is None
+        assert owner.get(Project, project_id).revision == 1
+
+    monkeypatch.setattr(operation_service_module, "atomic_write", original_atomic_write)
+    retry = client.post("/api/operations/execute", json=payload)
+    assert retry.status_code == 200
+    result = OperationResult.model_validate(retry.json())
+    assert result.request_id == request.request_id
+    assert result.revision == 2
+    state = snapshot(project_id)
+    assert state["project"]["revision"] == 2
+    assert state["project"]["settings"]["subtitle_font_size"] == 50
+    assert [row["revision"] for row in state["settings_history"]] == [1, 2]
+    assert [row["request_id"] for row in state["receipts"]] == [request.request_id]
+    assert state["receipts"][0]["result_json"] == result.model_dump(mode="json")
+    assert state["jobs"] == []
+    assert state["external_calls"] == []
+    assert state["artifacts"] == []

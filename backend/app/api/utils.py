@@ -23,6 +23,39 @@ def ensure_project_idle(project_id: int, db) -> None:
         raise HTTPException(status_code=409, detail="このプロジェクトは生成中です。完了後に再実行してください。")
 
 
+def ensure_project_deletable(project_id: int, db) -> None:
+    """Reject deletion while local or externally uncertain work may still finish."""
+    from sqlalchemy import select
+
+    from app.models.external_call import ExternalCall
+    from app.models.job import GenerationJob, JobStatus
+
+    ensure_project_idle(project_id, db)
+    unknown_job = db.scalar(
+        select(GenerationJob.id)
+        .where(
+            GenerationJob.project_id == project_id,
+            GenerationJob.status == JobStatus.unknown,
+        )
+        .limit(1)
+    )
+    unresolved_call = db.scalar(
+        select(ExternalCall.id)
+        .join(GenerationJob, GenerationJob.id == ExternalCall.job_id)
+        .where(
+            GenerationJob.project_id == project_id,
+            ExternalCall.remote_side_effect.is_(True),
+            ExternalCall.status.in_(["in_flight", "unknown"]),
+        )
+        .limit(1)
+    )
+    if unknown_job is not None or unresolved_call is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="外部処理の結果が未確定です。確認できるまで削除できません。",
+        )
+
+
 def ensure_render_assets_ready(project) -> None:
     """Reject stale media before enqueueing a render-only job."""
     from app.services.invalidation import stale_media_message
