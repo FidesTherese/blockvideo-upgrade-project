@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import date, datetime
 from enum import Enum
 import hashlib
@@ -12,7 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock
 import time
 from typing import Any
 
@@ -24,7 +25,12 @@ from sqlalchemy.orm import Session
 from app.db import get_session_factory
 from app.interpretation.transport import ModelMessage
 from app.language_operations import repository as language_repository
-from app.language_operations.contracts import LanguageError, LanguageInput, LanguageResponse
+from app.language_operations.contracts import (
+    LanguageError,
+    LanguageExecution,
+    LanguageInput,
+    LanguageResponse,
+)
 from app.language_operations.service import LanguageOperationService
 from app.models.artifact import GenerationArtifact
 from app.models.external_call import ExternalCall
@@ -34,7 +40,14 @@ from app.models.language_turn import LanguageTurn
 from app.models.operation_request import OperationReceipt
 from app.models.project import Project
 from app.models.settings_revision import SettingsRevision
+from app.operations.bootstrap import operation_service
+from app.operations.contracts import OperationRequest, OperationResult
+from app.operations.errors import OperationError
+from app.services import artifact_store
+from app.services.generation_snapshots import GenerationCancelled, capture_inputs
+from app.services.paths import project_dir
 from app.services.settings_history import configuration
+from app.workers.job_runner import JobRegistry
 from tests.test_language_dialogue import ask, reply
 from tests.test_language_operations import create
 from tests.test_language_operations import harness as harness  # noqa: F401
@@ -686,3 +699,311 @@ def test_dialogue_same_successor_id_changed_body_race_replays_only_winner(
         assert _successor(parent["request_id"])[0] == request_id
 
         service.adapter = parent_adapter
+
+
+def test_confirmation_vs_setting_has_one_revision_bound_winner(
+    harness, monkeypatch
+) -> None:
+    client, adapter, service = harness
+    from app.operations import service as operation_service_module
+
+    original_atomic_write = operation_service_module.atomic_write
+    for iteration in range(5):
+        project_id = create(client)
+        adapter.operation("project.generation.start", {"kind": "full"})
+        language_request = LanguageInput(
+            request_id=f"d32-confirmation-{iteration}",
+            text="動画を作り直して",
+            target={"project_id": project_id},
+        )
+        with get_session_factory()() as prepare_db:
+            prepared = asyncio.run(service.prepare(prepare_db, language_request))
+        assert prepared.status == "ready"
+        assert prepared.requires_confirmation
+        assert prepared.confirmation_token is not None
+        confirmation = LanguageExecution(
+            confirmation_token=prepared.confirmation_token,
+            confirm_generation=True,
+        )
+        setting_request = adjustment(
+            project_id,
+            request_id=f"d32-setting-{iteration}",
+            delta=2,
+        )
+        barrier = Barrier(2)
+
+        @contextmanager
+        def synchronized_atomic_write(db: Session) -> Iterator[None]:
+            barrier.wait(timeout=20)
+            with original_atomic_write(db):
+                yield
+
+        monkeypatch.setattr(
+            operation_service_module, "atomic_write", synchronized_atomic_write
+        )
+
+        def confirm_generation() -> LanguageResponse:
+            with get_session_factory()() as db:
+                return service.execute(db, language_request.request_id, confirmation)
+
+        def update_setting() -> OperationResult | OperationError:
+            with get_session_factory()() as db:
+                try:
+                    return service.core.execute(db, setting_request)
+                except OperationError as error:
+                    return error
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            confirmation_future = pool.submit(confirm_generation)
+            setting_future = pool.submit(update_setting)
+            confirmation_result = confirmation_future.result(timeout=30)
+            setting_result = setting_future.result(timeout=30)
+        monkeypatch.setattr(
+            operation_service_module, "atomic_write", original_atomic_write
+        )
+
+        state = snapshot(project_id)
+        assert state["external_calls"] == []
+        assert state["artifacts"] == []
+        assert len(state["receipts"]) == 1
+        if confirmation_result.status == "completed":
+            assert confirmation_result.result is not None
+            assert confirmation_result.result.job_id is not None
+            assert isinstance(setting_result, OperationError)
+            assert setting_result.reason_code in {"project_busy", "stale_state"}
+            assert state["project"]["revision"] == 1
+            assert state["project"]["settings"]["subtitle_font_size"] == 48
+            assert [row["revision"] for row in state["settings_history"]] == [1]
+            assert len(state["jobs"]) == 1
+            assert state["jobs"][0]["id"] == confirmation_result.result.job_id
+            assert state["jobs"][0]["status"] == "pending"
+            assert state["receipts"][0]["request_id"] == prepared.core_request_id
+            assert state["receipts"][0]["result_json"] == (
+                confirmation_result.result.model_dump(mode="json")
+            )
+            with get_session_factory()() as replay_db:
+                replay = service.execute(
+                    replay_db, language_request.request_id, confirmation
+                )
+            assert replay.model_dump(mode="json") == confirmation_result.model_dump(
+                mode="json"
+            )
+            with get_session_factory()() as losing_db:
+                with pytest.raises(OperationError) as repeated_loser:
+                    service.core.execute(losing_db, setting_request)
+            assert repeated_loser.value.reason_code in {"project_busy", "stale_state"}
+        else:
+            assert confirmation_result.status == "blocked"
+            assert confirmation_result.failure is not None
+            assert confirmation_result.failure.reason_code in {
+                "stale_state",
+                "dialogue_stale",
+            }
+            assert isinstance(setting_result, OperationResult)
+            assert setting_result.revision == 2
+            assert state["project"]["revision"] == 2
+            assert state["project"]["settings"]["subtitle_font_size"] == 50
+            assert [row["revision"] for row in state["settings_history"]] == [1, 2]
+            assert state["jobs"] == []
+            assert state["receipts"][0]["request_id"] == setting_request.request_id
+            assert state["receipts"][0]["result_json"] == setting_result.model_dump(
+                mode="json"
+            )
+            with get_session_factory()() as replay_db:
+                replay = service.core.execute(replay_db, setting_request)
+            assert replay == setting_result
+            with get_session_factory()() as losing_db:
+                with pytest.raises(LanguageError) as repeated_loser:
+                    service.execute(
+                        losing_db, language_request.request_id, confirmation
+                    )
+            assert repeated_loser.value.code == "request_not_ready"
+        assert snapshot(project_id) == state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_first", (True, False))
+async def test_cancel_vs_publication_preserves_prior_artifact_and_terminalizes_once(
+    temp_storage: Path, monkeypatch, cancel_first: bool
+) -> None:
+    async def accept_synthetic_probe(path: Path) -> dict[str, Any]:
+        return {
+            **artifact_store.file_identity(path),
+            "duration_ms": 1000,
+            "width": 320,
+            "height": 180,
+        }
+
+    monkeypatch.setattr(artifact_store, "validate_video", accept_synthetic_probe)
+    project_id = make_project()
+    prior_request = OperationRequest(
+        operation_id="project.generation.start",
+        target={"project_id": project_id},
+        arguments={"kind": "full"},
+        request_id="d32-prior-publication",
+        base_revision=1,
+    )
+    with get_session_factory()() as db:
+        prior_result = operation_service.execute(db, prior_request)
+        prior_job = db.get(GenerationJob, prior_result.job_id)
+        assert prior_job is not None
+        prior_job.status = "running"
+        db.commit()
+        settled_inputs = capture_inputs(db.get(Project, project_id))
+    prior_candidate = (
+        project_dir(project_id)
+        / "history"
+        / f"job-{prior_result.job_id:08d}"
+        / "video.pending.mp4"
+    )
+    prior_candidate.parent.mkdir(parents=True, exist_ok=True)
+    prior_candidate.write_bytes(b"d32-prior-video")
+    prior_artifact = await artifact_store.publish_artifact(
+        prior_result.job_id,
+        prior_candidate,
+        None,
+        settled_inputs=settled_inputs,
+        materials=[],
+        cancel_check=lambda: False,
+    )
+
+    next_request = OperationRequest(
+        operation_id="project.generation.start",
+        target={"project_id": project_id},
+        arguments={"kind": "full"},
+        request_id="d32-racing-publication",
+        base_revision=1,
+    )
+    with get_session_factory()() as db:
+        next_result = operation_service.execute(db, next_request)
+        next_job_id = next_result.job_id
+        assert next_job_id is not None
+        next_job = db.get(GenerationJob, next_job_id)
+        assert next_job is not None
+        next_inputs = dict(next_job.input_snapshot)
+    candidate = (
+        project_dir(project_id)
+        / "history"
+        / f"job-{next_job_id:08d}"
+        / "video.pending.mp4"
+    )
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"d32-racing-video")
+
+    publication_barrier = Barrier(2)
+    cancellation_committed = Event()
+    publication_committed = Event()
+    original_publication_write = artifact_store.atomic_write
+
+    @contextmanager
+    def synchronized_publication_write(db: Session) -> Iterator[None]:
+        publication_barrier.wait(timeout=20)
+        if cancel_first:
+            assert cancellation_committed.wait(timeout=20)
+        with original_publication_write(db):
+            yield
+        publication_committed.set()
+
+    monkeypatch.setattr(
+        artifact_store, "atomic_write", synchronized_publication_write
+    )
+    registry = JobRegistry()
+    cancellation_observation: list[tuple[str, bool]] = []
+
+    async def publish(cancel_check: Callable[[], bool]) -> GenerationArtifact:
+        return await artifact_store.publish_artifact(
+            next_job_id,
+            candidate,
+            None,
+            settled_inputs=next_inputs,
+            materials=[],
+            cancel_check=cancel_check,
+        )
+
+    def cancel_at_boundary() -> bool:
+        publication_barrier.wait(timeout=20)
+        if not cancel_first:
+            assert publication_committed.wait(timeout=20)
+        result = registry.request_cancel(next_job_id)
+        with get_session_factory()() as db:
+            observed = db.get(GenerationJob, next_job_id)
+            assert observed is not None
+            cancellation_observation.append(
+                (observed.status.value, observed.cancel_requested)
+            )
+        cancellation_committed.set()
+        return result
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        cancel_future = pool.submit(cancel_at_boundary)
+        task = registry.submit(next_job_id, publish)
+        await asyncio.wait_for(task, timeout=30)
+        cancel_result = cancel_future.result(timeout=30)
+
+    assert cancel_result is cancel_first
+    assert cancellation_observation == [
+        ("running", True) if cancel_first else ("completed", False)
+    ]
+
+    monkeypatch.setattr(
+        artifact_store, "atomic_write", original_publication_write
+    )
+    state = snapshot(project_id)
+    jobs = {row["id"]: row for row in state["jobs"]}
+    artifacts = {row["id"]: row for row in state["artifacts"]}
+    receipts = {row["request_id"]: row for row in state["receipts"]}
+    assert state["external_calls"] == []
+    assert set(receipts) == {prior_request.request_id, next_request.request_id}
+    assert receipts[prior_request.request_id]["job_id"] == prior_result.job_id
+    assert receipts[next_request.request_id]["job_id"] == next_job_id
+    assert all(row["project_id"] == project_id for row in receipts.values())
+    assert all(
+        row["job_id"] is None or row["job_id"] in jobs for row in receipts.values()
+    )
+    assert prior_artifact.id in artifacts
+    assert artifacts[prior_artifact.id]["job_id"] == prior_result.job_id
+    assert all(row["project_id"] == project_id for row in artifacts.values())
+    assert all(
+        row["job_id"] is None or row["job_id"] in jobs
+        for row in artifacts.values()
+    )
+    if cancel_result:
+        assert jobs[next_job_id]["status"] == "cancelled"
+        assert jobs[next_job_id]["cancel_requested"] is True
+        assert state["project"]["status"] == "cancelled"
+        assert set(artifacts) == {prior_artifact.id}
+        assert state["project"]["current_artifact_id"] == prior_artifact.id
+    else:
+        assert jobs[next_job_id]["status"] == "completed"
+        assert jobs[next_job_id]["cancel_requested"] is False
+        assert state["project"]["status"] == "completed"
+        assert len(artifacts) == 2
+        new_artifact = next(
+            row for row in artifacts.values() if row["job_id"] == next_job_id
+        )
+        assert state["project"]["current_artifact_id"] == new_artifact["id"]
+    assert artifact_store.artifact_file_path(prior_artifact).read_bytes() == (
+        b"d32-prior-video"
+    )
+    assert registry.request_cancel(next_job_id) is False
+    final_candidate = candidate.with_name("video.mp4")
+    if cancel_result:
+        with pytest.raises(GenerationCancelled):
+            await artifact_store.publish_artifact(
+                next_job_id,
+                final_candidate,
+                None,
+                settled_inputs=next_inputs,
+                materials=[],
+                cancel_check=lambda: False,
+            )
+    else:
+        await artifact_store.publish_artifact(
+            next_job_id,
+            final_candidate,
+            None,
+            settled_inputs=next_inputs,
+            materials=[],
+            cancel_check=lambda: False,
+        )
+    assert snapshot(project_id) == state
