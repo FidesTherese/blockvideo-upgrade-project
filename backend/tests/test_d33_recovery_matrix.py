@@ -4,10 +4,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from datetime import date, datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -26,8 +31,16 @@ from app.models.project import Project, ProjectStatus
 from app.models.settings_revision import SettingsRevision
 from app.operations.bootstrap import operation_service
 from app.operations.contracts import OperationRequest
+from app.services import artifact_store
+from app.services.external_calls import ExternalOutcomeUnknown, job_call_context, journaled_post
+from app.services.job_records import create_pending_job
+from app.services.paths import project_dir
 from app.services.settings_history import configuration, record_settings
-from app.workers.operation_dispatcher import mark_interrupted_operation_jobs
+from app.services.transactions import atomic_write
+from app.workers.operation_dispatcher import (
+    dispatch_pending_operation_jobs,
+    mark_interrupted_operation_jobs,
+)
 
 
 def _canonical(value: Any) -> Any:
@@ -623,6 +636,449 @@ def test_core_receipt_crash_rolls_back_then_generation_confirmation_executes_onc
     assert recovery_snapshot(project_id) == final
     assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == final
+
+
+_PROCESS_DEATH_PROGRAM = r'''
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+import httpx
+from sqlalchemy import select
+
+from app.db import get_session_factory
+from app.models.block import Block
+from app.models.job import GenerationJob, JobStatus
+from app.models.project import Project
+from app.services import artifact_store, external_calls
+from app.services.external_calls import job_call_context, journaled_post
+from app.services.generation_snapshots import capture_inputs, fingerprint_inputs
+from app.services.job_records import create_pending_job
+from app.services.transactions import atomic_write
+from app.workers.job_runner import JobRegistry
+
+scenario = sys.argv[1]
+project_id = int(sys.argv[2])
+marker_path = Path(sys.argv[3])
+extra = Path(sys.argv[4]) if len(sys.argv) > 4 else None
+
+
+def marker(value: str) -> None:
+    with marker_path.open("a", encoding="utf-8") as stream:
+        stream.write(value + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def newest_job() -> GenerationJob:
+    with get_session_factory()() as db:
+        return db.scalar(
+            select(GenerationJob)
+            .where(GenerationJob.project_id == project_id)
+            .order_by(GenerationJob.id.desc())
+        )
+
+
+def create_running_job() -> int:
+    with get_session_factory()() as db, atomic_write(db):
+        job = create_pending_job(db, project_id)
+        job.status = JobStatus.running
+        job_id = job.id
+    return job_id
+
+
+async def provider_death() -> None:
+    job_id = newest_job().id
+    original_claim = external_calls._claim
+    original_finish = external_calls._finish
+
+    def claim(*args: object, **kwargs: object):
+        result = original_claim(*args, **kwargs)
+        marker("claimed")
+        if scenario == "provider_claimed":
+            os._exit(71)
+        return result
+
+    def send(request: httpx.Request) -> httpx.Response:
+        marker("sent")
+        if scenario == "provider_sent":
+            os._exit(72)
+        return httpx.Response(200, json={"synthetic": "saved"})
+
+    def finish(*args: object, **kwargs: object) -> None:
+        original_finish(*args, **kwargs)
+        marker("response_saved")
+        os._exit(73)
+
+    external_calls._claim = claim
+    if scenario == "provider_finished":
+        external_calls._finish = finish
+    async with httpx.AsyncClient(transport=httpx.MockTransport(send)) as client:
+        with job_call_context(job_id):
+            await journaled_post(
+                client,
+                "https://synthetic.invalid/d33-process-death",
+                provider="synthetic",
+                json={"fixed": True},
+            )
+
+
+def checkpoint_death() -> None:
+    job_id = create_running_job()
+    if scenario == "checkpoint_resume":
+        with get_session_factory()() as db, atomic_write(db):
+            project = db.get(Project, project_id)
+            db.add(Block(
+                project_id=project_id,
+                index=0,
+                source_text="合成チェックポイント。",
+                tts_text="合成チェックポイント。",
+            ))
+        with get_session_factory()() as db, atomic_write(db):
+            project = db.get(Project, project_id)
+            job = db.get(GenerationJob, job_id)
+            checkpoint = capture_inputs(project)
+            job.plan_json = {
+                **(job.plan_json or {}),
+                "resume_inputs": checkpoint,
+                "resume_fingerprint": fingerprint_inputs(checkpoint),
+            }
+    elif scenario == "checkpoint_missing":
+        with get_session_factory()() as db, atomic_write(db):
+            job = db.get(GenerationJob, job_id)
+            job.plan_json = {
+                **(job.plan_json or {}),
+                "resume_inputs": job.input_snapshot,
+            }
+    elif scenario == "checkpoint_altered":
+        with get_session_factory()() as db, atomic_write(db):
+            job = db.get(GenerationJob, job_id)
+            job.plan_json = {
+                **(job.plan_json or {}),
+                "resume_inputs": {**job.input_snapshot, "project_id": 9999},
+                "resume_fingerprint": fingerprint_inputs(job.input_snapshot),
+            }
+    elif scenario == "checkpoint_revision":
+        with get_session_factory()() as db, atomic_write(db):
+            db.get(Project, project_id).revision += 1
+    elif scenario == "checkpoint_cancelled":
+        assert JobRegistry().request_cancel(job_id)
+    marker("checkpoint_saved")
+    os._exit({
+        "checkpoint_initial": 81,
+        "checkpoint_resume": 82,
+        "checkpoint_missing": 83,
+        "checkpoint_altered": 84,
+        "checkpoint_revision": 85,
+        "checkpoint_cancelled": 86,
+    }[scenario])
+
+
+async def artifact_death() -> None:
+    job = newest_job()
+    candidate = extra
+
+    async def validate(path: Path) -> dict[str, object]:
+        return {
+            **artifact_store.file_identity(path),
+            "duration_ms": 1000,
+            "width": 320,
+            "height": 180,
+        }
+
+    artifact_store.validate_video = validate
+    original_replace = Path.replace
+
+    def replace(path: Path, target: Path) -> Path:
+        if scenario == "artifact_before_rename":
+            os._exit(91)
+        result = original_replace(path, target)
+        marker("artifact_renamed")
+        if scenario == "artifact_after_rename":
+            os._exit(92)
+        return result
+
+    Path.replace = replace
+    marker("checkpoint_saved")
+    await artifact_store.publish_artifact(
+        job.id,
+        candidate,
+        None,
+        settled_inputs=job.input_snapshot,
+        materials=[],
+        cancel_check=lambda: False,
+    )
+    os._exit(93)
+
+
+if scenario.startswith("provider_"):
+    asyncio.run(provider_death())
+elif scenario.startswith("checkpoint_"):
+    checkpoint_death()
+elif scenario.startswith("artifact_"):
+    asyncio.run(artifact_death())
+else:
+    raise AssertionError(scenario)
+'''
+
+
+def _run_process_death(
+    scenario: str,
+    project_id: int,
+    marker_path: Path,
+    extra: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        "-c",
+        _PROCESS_DEATH_PROGRAM,
+        scenario,
+        str(project_id),
+        str(marker_path),
+    ]
+    if extra is not None:
+        command.append(str(extra))
+    return subprocess.run(
+        command,
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        check=False,
+    )
+
+
+def _new_running_job(project_id: int) -> int:
+    with get_session_factory()() as db, atomic_write(db):
+        job = create_pending_job(db, project_id)
+        job.status = JobStatus.running
+        return job.id
+
+
+def _latest_job_id(project_id: int) -> int:
+    with get_session_factory()() as db:
+        job_id = db.scalar(
+            select(GenerationJob.id)
+            .where(GenerationJob.project_id == project_id)
+            .order_by(GenerationJob.id.desc())
+        )
+    assert job_id is not None
+    return job_id
+
+
+def _marker_lines(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def _materialize_prior_artifact(project_id: int, artifact_id: int) -> Path:
+    prior = project_dir(project_id) / "history" / "prior.mp4"
+    prior.parent.mkdir(parents=True, exist_ok=True)
+    prior.write_bytes(b"prior-success")
+    identity = artifact_store.file_identity(prior)
+    with get_session_factory()() as db:
+        artifact = db.get(GenerationArtifact, artifact_id)
+        artifact.video_path = identity["path"]
+        artifact.manifest_json = {"schema_version": 1, "video": identity}
+        project = db.get(Project, project_id)
+        project.output_video_path = identity["path"]
+        db.commit()
+    return prior
+
+
+@pytest.mark.parametrize(
+    ("scenario", "exit_code", "expected_markers", "expected_status"),
+    [
+        ("provider_claimed", 71, ["claimed"], "unknown"),
+        ("provider_sent", 72, ["claimed", "sent"], "unknown"),
+        (
+            "provider_finished",
+            73,
+            ["claimed", "sent", "response_saved"],
+            "succeeded",
+        ),
+    ],
+)
+def test_provider_process_death_never_repeats_remote_send(
+    temp_storage: Path,
+    scenario: str,
+    exit_code: int,
+    expected_markers: list[str],
+    expected_status: str,
+) -> None:
+    project_id, prior_artifact_id = _seed_canonical_state()
+    job_id = _new_running_job(project_id)
+    marker_path = temp_storage / f"{scenario}.markers"
+
+    result = _run_process_death(scenario, project_id, marker_path)
+
+    assert result.returncode == exit_code, result.stderr
+    assert _marker_lines(marker_path) == expected_markers
+    crashed = recovery_snapshot(project_id)
+    call = next(row for row in crashed["external_calls"] if row["job_id"] == job_id)
+    assert call["status"] == ("in_flight" if expected_status == "unknown" else "succeeded")
+    first, second = restart_twice()
+    assert (first, second) == (1, 0)
+    recovered = recovery_snapshot(project_id)
+    call = next(row for row in recovered["external_calls"] if row["job_id"] == job_id)
+    assert call["status"] == expected_status
+    assert recovered["project"]["current_artifact_id"] == prior_artifact_id
+    stable = recovery_snapshot(project_id)
+    assert stable == recovered
+
+    sends = 0
+
+    def send(request: httpx.Request) -> httpx.Response:
+        nonlocal sends
+        sends += 1
+        return httpx.Response(200, json={"unexpected": True})
+
+    async def replay() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(send)) as client:
+            with job_call_context(job_id):
+                if expected_status == "unknown":
+                    with pytest.raises(ExternalOutcomeUnknown):
+                        await journaled_post(
+                            client,
+                            "https://synthetic.invalid/d33-process-death",
+                            provider="synthetic",
+                            json={"fixed": True},
+                        )
+                else:
+                    response = await journaled_post(
+                        client,
+                        "https://synthetic.invalid/d33-process-death",
+                        provider="synthetic",
+                        json={"fixed": True},
+                    )
+                    assert response.json() == {"synthetic": "saved"}
+
+    asyncio.run(replay())
+    assert sends == 0
+    assert _marker_lines(marker_path).count("sent") == int(scenario != "provider_claimed")
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == stable
+
+
+@pytest.mark.parametrize(
+    ("scenario", "exit_code", "expected_status"),
+    [
+        ("checkpoint_initial", 81, "pending"),
+        ("checkpoint_resume", 82, "pending"),
+        ("checkpoint_missing", 83, "failed"),
+        ("checkpoint_altered", 84, "failed"),
+        ("checkpoint_revision", 85, "failed"),
+        ("checkpoint_cancelled", 86, "cancelled"),
+    ],
+)
+def test_checkpoint_and_cancellation_process_death_is_stable(
+    temp_storage: Path,
+    scenario: str,
+    exit_code: int,
+    expected_status: str,
+) -> None:
+    project_id, prior_artifact_id = _seed_canonical_state()
+    marker_path = temp_storage / f"{scenario}.markers"
+
+    result = _run_process_death(scenario, project_id, marker_path)
+
+    assert result.returncode == exit_code, result.stderr
+    assert _marker_lines(marker_path) == ["checkpoint_saved"]
+    job_id = _latest_job_id(project_id)
+    crashed = recovery_snapshot(project_id)
+    job = next(row for row in crashed["jobs"] if row["id"] == job_id)
+    assert job["status"] == "running"
+    if scenario == "checkpoint_resume":
+        assert job["plan_json"]["resume_fingerprint"]
+    if scenario == "checkpoint_cancelled":
+        assert job["cancel_requested"] is True
+    assert restart_twice() == (1, 0)
+    recovered = recovery_snapshot(project_id)
+    job = next(row for row in recovered["jobs"] if row["id"] == job_id)
+    assert job["status"] == expected_status
+    assert recovered["project"]["current_artifact_id"] == prior_artifact_id
+    if scenario == "checkpoint_cancelled":
+        assert dispatch_pending_operation_jobs() == 0
+    assert recovery_snapshot(project_id) == recovered
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == recovered
+
+
+@pytest.mark.parametrize(
+    ("scenario", "exit_code"),
+    [
+        ("artifact_before_rename", 91),
+        ("artifact_after_rename", 92),
+        ("artifact_published", 93),
+    ],
+)
+def test_artifact_publication_process_death_preserves_history_and_identity(
+    temp_storage: Path,
+    scenario: str,
+    exit_code: int,
+) -> None:
+    project_id, prior_artifact_id = _seed_canonical_state()
+    prior_path = _materialize_prior_artifact(project_id, prior_artifact_id)
+    job_id = _new_running_job(project_id)
+    candidate = project_dir(project_id) / "history" / f"job-{job_id:08d}" / "video.pending.mp4"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"new-verified-video")
+    marker_path = temp_storage / f"{scenario}.markers"
+
+    result = _run_process_death(scenario, project_id, marker_path, candidate)
+
+    assert result.returncode == exit_code, result.stderr
+    markers = _marker_lines(marker_path)
+    assert markers[0] == "checkpoint_saved"
+    assert markers.count("artifact_renamed") == int(scenario != "artifact_before_rename")
+    crashed = recovery_snapshot(project_id)
+    final = candidate.with_name("video.mp4")
+    assert candidate.exists() == (scenario == "artifact_before_rename")
+    assert final.exists() == (scenario != "artifact_before_rename")
+    new_artifacts = [row for row in crashed["artifacts"] if row["job_id"] == job_id]
+    if scenario == "artifact_published":
+        assert len(new_artifacts) == 1
+        assert crashed["project"]["current_artifact_id"] == new_artifacts[0]["id"]
+        assert restart_twice() == (0, 0)
+    else:
+        assert new_artifacts == []
+        assert crashed["project"]["current_artifact_id"] == prior_artifact_id
+        assert restart_twice() == (1, 0)
+    recovered = recovery_snapshot(project_id)
+    assert any(row["id"] == prior_artifact_id for row in recovered["artifacts"])
+    assert prior_path.read_bytes() == b"prior-success"
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == recovered
+
+    if scenario == "artifact_published":
+        async def validate(path: Path) -> dict[str, object]:
+            return {
+                **artifact_store.file_identity(path),
+                "duration_ms": 1000,
+                "width": 320,
+                "height": 180,
+            }
+
+        original_validate = artifact_store.validate_video
+        artifact_store.validate_video = validate
+        try:
+            artifact = asyncio.run(
+                artifact_store.publish_artifact(
+                    job_id,
+                    candidate,
+                    None,
+                    settled_inputs=next(
+                        row for row in recovered["jobs"] if row["id"] == job_id
+                    )["input_snapshot"],
+                    materials=[],
+                    cancel_check=lambda: False,
+                )
+            )
+        finally:
+            artifact_store.validate_video = original_validate
+        assert artifact.id == new_artifacts[0]["id"]
+        assert recovery_snapshot(project_id) == recovered
 
 
 @pytest.mark.parametrize("boundary", ["before", "after"])

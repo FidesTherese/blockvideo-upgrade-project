@@ -231,6 +231,13 @@ async def publish_artifact(
     Renamed files before a failed commit are harmless unreferenced files; no
     previous success is ever replaced or deleted.
     """
+    with get_session_factory()() as db:
+        existing = db.scalar(
+            select(GenerationArtifact).where(GenerationArtifact.job_id == job_id)
+        )
+        if existing is not None:
+            db.expunge(existing)
+            return existing
     if cancel_check():
         raise GenerationCancelled("ユーザーによりキャンセルされました")
     video = await validate_video(candidate)
