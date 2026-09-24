@@ -10,7 +10,9 @@ video history, external-call recovery and independent control handlers. D31 adds
 a shared negative-intent veto before request construction and a fixed unexpected-
 error boundary. D32 makes dialogue supersession precedence, deletion lifecycle
 checks, and injectable startup dispatch explicit without changing the database-
-authoritative single-server model.
+authoritative single-server model. D33 proves lifespan cancellation and resumed
+completion, including guarded recovery from an unreferenced rename-before-commit
+video.
 
 ## Project Position
 
@@ -76,7 +78,11 @@ cascaded job rows are removed in one writer transaction; immutable receipts surv
 for exact replay. Process-local secrets are dropped only after commit, followed by
 best-effort filesystem cleanup. Startup dispatch may receive an internal
 `JobRegistry` for testing, but registry liveness is only an optimization: each
-worker's persisted pending-to-running claim decides whether work executes.
+worker's persisted pending-to-running claim decides whether work executes. Startup
+reconciliation returns only fingerprint-valid interrupted jobs to pending. Resumed
+publication may replace different bytes only at that job's exact unreferenced history
+`video.mp4`; any artifact/project reference or non-job path blocks replacement before
+the normal publication transaction updates history/current pointers.
 
 ## Key Decisions and Limits
 
@@ -97,7 +103,12 @@ worker's persisted pending-to-running claim decides whether work executes.
   only after database commit, with filesystem removal remaining best effort.
 - The dispatcher accepts a keyword-only injected registry, defaulting to the process
   singleton. A registry may submit a stale candidate, but the database job claim is
-  authoritative and permits one execution.
+  authoritative and permits one execution. FastAPI shutdown cancels live tasks while
+  preserving their durable running checkpoint for startup reconciliation.
+- A rename-before-publication orphan is replaceable only by a newly verified candidate
+  for the same pending/running job at its exact history path. Referenced/current
+  artifacts and prior successful history remain immutable; committed publication
+  replays its existing artifact row.
 - Legacy absolute calls without request identity retain compatibility but no replay guarantee.
 - Unexpected API exceptions return a fixed `internal_error` payload with a
   correlation ID. Logs retain the exception class, correlation ID, and matched route
@@ -125,5 +136,6 @@ worker's persisted pending-to-running claim decides whether work executes.
 - `backend/tests/test_operation_storage.py`
 - `backend/tests/test_d31_adversarial_safety.py`
 - `backend/tests/test_d32_concurrency_matrix.py`
+- `backend/tests/test_d33_recovery_matrix.py`
 - `cd backend && python -m uv run pytest`
 - `cd backend && python -m uv run ruff check .`

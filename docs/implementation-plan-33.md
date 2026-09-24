@@ -77,19 +77,19 @@ Only add production files that changed to satisfy a RED invariant.
 - Subprocess scenarios write only fixed markers `claimed`, `sent`, `response_saved`, `checkpoint_saved`, and `artifact_renamed`, then call `os._exit()` with fixed non-zero codes.
 - Remote POST count is an append-only synthetic marker count and must remain at most one after recovery/replay.
 
-- [ ] **Step 1: Add provider transmission/response crash tests**
+- [x] **Step 1: Add provider transmission/response crash tests**
 
 Run isolated subprocesses that terminate (a) after journal claim before send, (b) after one synthetic remote send before `_finish`, and (c) after `_finish` persisted success. After startup reconciliation, assert (a) and (b) are `unknown` and cannot send again, while (c) reuses the cached response. The remote marker count remains zero for (a) and one for (b)/(c), including after a second restart.
 
-- [ ] **Step 2: Add checkpoint and cancellation crash tests**
+- [x] **Step 2: Add checkpoint and cancellation crash tests**
 
 Terminate after initial snapshot persistence, after `resume_inputs`/`resume_fingerprint` persistence, and after durable `cancel_requested=True`. Valid frozen checkpoints become pending once; missing, altered, or changed-revision checkpoints become failed; persisted cancellation becomes cancelled without provider construction. A second restart performs zero transitions in every case.
 
-- [ ] **Step 3: Add artifact publication crash tests**
+- [x] **Step 3: Add artifact publication crash tests**
 
 Terminate before candidate rename, after rename before DB publication, and after DB publication. Assert no incomplete artifact row is served, an unreferenced renamed file never replaces the current artifact, an already committed artifact remains current/history, and rerunning `publish_artifact()` for the same completed job returns the same artifact without another row. Preserve the seeded prior successful artifact in all failure cases.
 
-- [ ] **Step 4: Run the complete crash matrix three times**
+- [x] **Step 4: Run the complete crash matrix three times**
 
 ```bash
 cd backend
@@ -100,14 +100,16 @@ python -m uv run pytest tests/test_external_call_recovery.py tests/test_job_reco
 python -m uv run ruff check .
 ```
 
-- [ ] **Step 5: Commit Task 2**
+- [x] **Step 5: Commit the Task 2 correction**
 
 ```bash
-git add backend/tests/test_d33_recovery_matrix.py backend/app/services/external_calls.py backend/app/services/generation_snapshots.py backend/app/services/artifact_store.py backend/app/workers/operation_dispatcher.py backend/app/workers/job_runner.py
-git commit -m "test: complete D33 process death recovery matrix"
+git add backend/tests/test_d33_recovery_matrix.py backend/app/services/artifact_store.py specification.md docs/DTD.md docs/modules/operation-core.md docs/implementation-plan-33.md
+git commit -m "fix: complete D33 resumed recovery paths"
 ```
 
-Only add changed production files.
+The correction adds the omitted shutdown/lifespan and resumed-completion evidence,
+full project recovery fields, invalid-checkpoint non-dispatch, and the narrowly
+guarded orphan-video replacement. Task 3 remains unstarted by this correction.
 
 ### Task 3: D33 evidence and gate
 

@@ -219,6 +219,48 @@ async def preserve_legacy_video(project_id: int) -> None:
         project.output_subtitle_path = artifact.subtitle_path
 
 
+def _replace_unreferenced_job_video(
+    job_id: int,
+    candidate: Path,
+    final: Path,
+    verified_video: dict[str, Any],
+) -> None:
+    with get_session_factory()() as db, atomic_write(db):
+        job = db.get(GenerationJob, job_id)
+        if job is None or job.status not in {JobStatus.pending, JobStatus.running}:
+            raise RuntimeError("このジョブの確定動画が既に存在します")
+        expected = (
+            project_dir(job.project_id)
+            / "history"
+            / f"job-{job.id:08d}"
+            / "video.mp4"
+        ).resolve()
+        if final.resolve() != expected or candidate.parent.resolve() != expected.parent:
+            raise RuntimeError("このジョブの確定動画が既に存在します")
+        final_path = relpath_for_db(final)
+        artifact_reference = db.scalar(
+            select(GenerationArtifact.id).where(
+                (GenerationArtifact.video_path == final_path)
+                | (GenerationArtifact.job_id == job_id)
+            ).limit(1)
+        )
+        project_reference = db.scalar(
+            select(Project.id).where(Project.output_video_path == final_path).limit(1)
+        )
+        if artifact_reference is not None or project_reference is not None:
+            raise RuntimeError("このジョブの確定動画が既に存在します")
+        if file_identity(candidate) != {
+            key: verified_video[key] for key in ("path", "size", "sha256")
+        }:
+            raise StaleGenerationInput("検証後に完成動画が変更されました")
+        candidate.replace(final)
+        if any(
+            file_identity(final)[key] != verified_video[key]
+            for key in ("size", "sha256")
+        ):
+            raise StaleGenerationInput("確定中に完成動画が変更されました")
+
+
 async def publish_artifact(
     job_id: int, candidate: Path, subtitle: Path | None, *,
     settled_inputs: dict[str, Any], materials: list[dict[str, Any]],
@@ -228,8 +270,9 @@ async def publish_artifact(
     """Publish immutable success history; promote only the exact current input state.
 
     Completion and cancellation compete for the same SQLite writer boundary.
-    Renamed files before a failed commit are harmless unreferenced files; no
-    previous success is ever replaced or deleted.
+    A new verified candidate may replace only the same pending job's exact,
+    unreferenced history filename after a rename-before-commit crash. Referenced
+    successes are never replaced or deleted.
     """
     with get_session_factory()() as db:
         existing = db.scalar(
@@ -247,10 +290,8 @@ async def publish_artifact(
     verify_materials(block_videos or [])
     final = candidate.with_name("video.mp4")
     if final.exists():
-        # A prior crash can leave an unreferenced immutable result. A different
-        # candidate must never silently overwrite it.
         if file_identity(final)["sha256"] != video["sha256"]:
-            raise RuntimeError("このジョブの確定動画が既に存在します")
+            _replace_unreferenced_job_video(job_id, candidate, final, video)
     else:
         candidate.replace(final)
     video = {**video, **file_identity(final)}

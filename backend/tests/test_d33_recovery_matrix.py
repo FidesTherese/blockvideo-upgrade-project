@@ -33,11 +33,13 @@ from app.operations.bootstrap import operation_service
 from app.operations.contracts import OperationRequest
 from app.services import artifact_store
 from app.services.external_calls import ExternalOutcomeUnknown, job_call_context, journaled_post
-from app.services.generation_snapshots import fingerprint_inputs
+from app.services.generation_snapshots import capture_inputs, fingerprint_inputs
 from app.services.job_records import create_pending_job
 from app.services.paths import project_dir
 from app.services.settings_history import configuration, record_settings
 from app.services.transactions import atomic_write
+from app.workers import operation_dispatcher
+from app.workers.job_runner import JobRegistry
 from app.workers.operation_dispatcher import (
     dispatch_pending_operation_jobs,
     mark_interrupted_operation_jobs,
@@ -79,7 +81,12 @@ def recovery_snapshot(project_id: int) -> dict[str, object]:
                 "revision": project.revision,
                 "settings": _canonical(configuration(project)),
                 "status": project.status.value,
+                "progress": project.progress,
+                "current_stage": project.current_stage,
                 "current_artifact_id": project.current_artifact_id,
+                "output_video_path": project.output_video_path,
+                "output_subtitle_path": project.output_subtitle_path,
+                "error_message": project.error_message,
             },
             "settings_revisions": [
                 _record(row)
@@ -397,7 +404,12 @@ def test_canonical_snapshot_reopens_complete_stable_state(temp_storage) -> None:
     assert first["project"]["id"] == project_id
     assert first["project"]["revision"] == 1
     assert first["project"]["status"] == "completed"
+    assert first["project"]["progress"] == 0.0
+    assert first["project"]["current_stage"] is None
     assert first["project"]["current_artifact_id"] == artifact_id
+    assert first["project"]["output_video_path"] == f"projects/{project_id}/history/prior.mp4"
+    assert first["project"]["output_subtitle_path"] is None
+    assert first["project"]["error_message"] is None
     assert first["project"]["settings"] == {
         "visual_focus_enabled": True,
         "subtitle_mode": "sentence",
@@ -776,6 +788,35 @@ def checkpoint_death() -> None:
     }[scenario])
 
 
+async def shutdown_death() -> None:
+    from app.main import app
+    from app.workers import operation_dispatcher
+
+    observed_running = asyncio.Event()
+
+    async def local_generation(job_id: int, cancel_check) -> None:
+        del cancel_check
+        with get_session_factory()() as db, atomic_write(db):
+            job = db.get(GenerationJob, job_id)
+            assert job is not None
+            assert job.status == JobStatus.running
+            job.current_stage = "shutdown-observed"
+            project = db.get(Project, job.project_id)
+            project.current_stage = "shutdown-observed"
+        marker("durable_running")
+        observed_running.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            marker("task_cancelled")
+            raise
+
+    operation_dispatcher.run_generation_job = local_generation
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(observed_running.wait(), timeout=10)
+        marker("lifespan_exit")
+
+
 async def artifact_death() -> None:
     job = newest_job()
     candidate = extra
@@ -817,6 +858,8 @@ if scenario.startswith("provider_"):
     asyncio.run(provider_death())
 elif scenario.startswith("checkpoint_"):
     checkpoint_death()
+elif scenario == "shutdown":
+    asyncio.run(shutdown_death())
 elif scenario.startswith("artifact_"):
     asyncio.run(artifact_death())
 else:
@@ -1006,16 +1049,54 @@ def test_checkpoint_and_cancellation_process_death_is_stable(
     job = next(row for row in recovered["jobs"] if row["id"] == job_id)
     assert job["status"] == expected_status
     assert recovered["project"]["current_artifact_id"] == prior_artifact_id
-    if scenario == "checkpoint_cancelled":
+    if expected_status in {"failed", "cancelled"}:
         class RejectingRegistry:
             def is_running(self, target: int) -> bool:
-                pytest.fail(f"cancelled job {target} reached dispatch")
+                pytest.fail(f"terminal job {target} reached dispatch")
 
             def submit(self, target: int, factory: Any) -> None:
                 del factory
-                pytest.fail(f"cancelled job {target} reached provider construction")
+                pytest.fail(f"terminal job {target} reached provider construction")
 
         assert dispatch_pending_operation_jobs(registry=RejectingRegistry()) == 0
+    assert recovery_snapshot(project_id) == recovered
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == recovered
+
+
+def test_shutdown_cancellation_reconciles_running_job_without_remote_duplicate(
+    temp_storage: Path,
+) -> None:
+    project_id, prior_artifact_id = _seed_canonical_state()
+    job_id = _new_running_job(project_id)
+    marker_path = temp_storage / "shutdown.markers"
+
+    result = _run_process_death("shutdown", project_id, marker_path)
+
+    assert result.returncode == 0, result.stderr
+    assert _marker_lines(marker_path) == [
+        "durable_running",
+        "lifespan_exit",
+        "task_cancelled",
+    ]
+    crashed = recovery_snapshot(project_id)
+    job = next(row for row in crashed["jobs"] if row["id"] == job_id)
+    assert job["status"] == "running"
+    assert job["current_stage"] == "shutdown-observed"
+    assert crashed["project"]["current_stage"] == "shutdown-observed"
+    assert [
+        row for row in crashed["external_calls"] if row["job_id"] == job_id
+    ] == []
+
+    assert restart_twice() == (1, 0)
+    recovered = recovery_snapshot(project_id)
+    job = next(row for row in recovered["jobs"] if row["id"] == job_id)
+    assert job["status"] == "pending"
+    assert job["recovery_message"] == "再起動後、安全な保存地点から処理を再開します。"
+    assert recovered["project"]["current_artifact_id"] == prior_artifact_id
+    assert [
+        row for row in recovered["external_calls"] if row["job_id"] == job_id
+    ] == []
     assert recovery_snapshot(project_id) == recovered
     assert restart_twice() == (0, 0)
     assert recovery_snapshot(project_id) == recovered
@@ -1093,6 +1174,187 @@ def test_artifact_publication_process_death_preserves_history_and_identity(
         assert len(
             [row for row in replayed["artifacts"] if row["job_id"] == job_id]
         ) == 1
+
+
+def test_resumed_artifact_after_rename_completes_once_and_replays_stably(
+    temp_storage: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_id, prior_artifact_id = _seed_canonical_state()
+    prior_path = _materialize_prior_artifact(project_id, prior_artifact_id)
+    job_id = _new_running_job(project_id)
+    with get_session_factory()() as db, atomic_write(db):
+        checkpointed_job = db.get(GenerationJob, job_id)
+        checkpointed_job.plan_json = {
+            **(checkpointed_job.plan_json or {}),
+            "resume_inputs": checkpointed_job.input_snapshot,
+            "resume_fingerprint": checkpointed_job.input_fingerprint,
+        }
+    directory = project_dir(project_id) / "history" / f"job-{job_id:08d}"
+    candidate = directory / "video.pending.mp4"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"abandoned-verified-video")
+    marker_path = temp_storage / "resumed-artifact-after-rename.markers"
+
+    result = _run_process_death(
+        "artifact_after_rename", project_id, marker_path, candidate
+    )
+
+    assert result.returncode == 92, result.stderr
+    assert _marker_lines(marker_path) == ["checkpoint_saved", "artifact_renamed"]
+    abandoned = directory / "video.mp4"
+    assert abandoned.read_bytes() == b"abandoned-verified-video"
+    assert restart_twice() == (1, 0)
+    pending = recovery_snapshot(project_id)
+    job = next(row for row in pending["jobs"] if row["id"] == job_id)
+    assert job["status"] == "pending"
+    assert pending["project"]["current_artifact_id"] == prior_artifact_id
+
+    candidate.write_bytes(b"new-verified-candidate")
+
+    async def validate(path: Path) -> dict[str, object]:
+        return {
+            **artifact_store.file_identity(path),
+            "duration_ms": 1000,
+            "width": 320,
+            "height": 180,
+        }
+
+    monkeypatch.setattr(artifact_store, "validate_video", validate)
+    callback_count = 0
+
+    async def complete_locally(target_job_id: int, cancel_check: Any) -> None:
+        nonlocal callback_count
+        callback_count += 1
+        assert target_job_id == job_id
+        with get_session_factory()() as db:
+            resumed_job = db.get(GenerationJob, job_id)
+            project = db.get(Project, project_id)
+            assert resumed_job is not None
+            assert project is not None
+            assert resumed_job.status == JobStatus.running
+            assert resumed_job.input_revision == project.revision == 1
+            assert resumed_job.input_fingerprint == fingerprint_inputs(
+                resumed_job.input_snapshot
+            )
+            assert resumed_job.input_fingerprint == fingerprint_inputs(
+                capture_inputs(project)
+            )
+            assert resumed_job.plan_json["resume_fingerprint"] == fingerprint_inputs(
+                resumed_job.plan_json["resume_inputs"]
+            )
+            assert resumed_job.plan_json["resume_fingerprint"] == (
+                resumed_job.input_fingerprint
+            )
+            settled_inputs = resumed_job.plan_json["resume_inputs"]
+        await artifact_store.publish_artifact(
+            job_id,
+            candidate,
+            None,
+            settled_inputs=settled_inputs,
+            materials=[],
+            cancel_check=cancel_check,
+        )
+
+    monkeypatch.setattr(operation_dispatcher, "run_generation_job", complete_locally)
+
+    async def dispatch_and_wait() -> None:
+        registry = JobRegistry()
+        assert dispatch_pending_operation_jobs(registry=registry) == 1
+        assert dispatch_pending_operation_jobs(registry=registry) == 0
+        tasks = list(registry._tasks.values())
+        assert len(tasks) == 1
+        await asyncio.gather(*tasks)
+
+    asyncio.run(dispatch_and_wait())
+
+    assert callback_count == 1
+    completed = recovery_snapshot(project_id)
+    job = next(row for row in completed["jobs"] if row["id"] == job_id)
+    artifacts = [row for row in completed["artifacts"] if row["job_id"] == job_id]
+    assert job["status"] == "completed"
+    assert len(artifacts) == 1
+    assert completed["project"]["current_artifact_id"] == artifacts[0]["id"]
+    assert completed["project"]["output_video_path"] == artifacts[0]["video_path"]
+    assert abandoned.read_bytes() == b"new-verified-candidate"
+    assert prior_path.read_bytes() == b"prior-success"
+    assert any(
+        row["id"] == prior_artifact_id for row in completed["artifacts"]
+    )
+    assert [row for row in completed["external_calls"] if row["job_id"] == job_id] == []
+
+    candidate.write_bytes(b"must-not-replace-current")
+
+    async def reject_validation(path: Path) -> dict[str, object]:
+        pytest.fail(f"completed replay revalidated candidate {path}")
+
+    monkeypatch.setattr(artifact_store, "validate_video", reject_validation)
+    replayed = asyncio.run(
+        artifact_store.publish_artifact(
+            job_id,
+            candidate,
+            None,
+            settled_inputs=job["input_snapshot"],
+            materials=[],
+            cancel_check=lambda: pytest.fail(
+                "completed replay reconsidered cancellation"
+            ),
+        )
+    )
+    assert replayed.id == artifacts[0]["id"]
+    assert abandoned.read_bytes() == b"new-verified-candidate"
+    assert recovery_snapshot(project_id) == completed
+    assert restart_twice() == (0, 0)
+    assert recovery_snapshot(project_id) == completed
+
+
+def test_resumed_publication_does_not_replace_referenced_job_history_video(
+    temp_storage: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_id, prior_artifact_id = _seed_canonical_state()
+    job_id = _new_running_job(project_id)
+    directory = project_dir(project_id) / "history" / f"job-{job_id:08d}"
+    candidate = directory / "video.pending.mp4"
+    final = directory / "video.mp4"
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"new-candidate")
+    final.write_bytes(b"referenced-current")
+    final_identity = artifact_store.file_identity(final)
+    with get_session_factory()() as db:
+        prior = db.get(GenerationArtifact, prior_artifact_id)
+        project = db.get(Project, project_id)
+        prior.video_path = final_identity["path"]
+        prior.manifest_json = {"schema_version": 1, "video": final_identity}
+        project.output_video_path = final_identity["path"]
+        db.commit()
+
+    async def validate(path: Path) -> dict[str, object]:
+        return {
+            **artifact_store.file_identity(path),
+            "duration_ms": 1000,
+            "width": 320,
+            "height": 180,
+        }
+
+    monkeypatch.setattr(artifact_store, "validate_video", validate)
+    with get_session_factory()() as db:
+        settled_inputs = db.get(GenerationJob, job_id).input_snapshot
+    with pytest.raises(RuntimeError, match="確定動画"):
+        asyncio.run(
+            artifact_store.publish_artifact(
+                job_id,
+                candidate,
+                None,
+                settled_inputs=settled_inputs,
+                materials=[],
+                cancel_check=lambda: False,
+            )
+        )
+    assert final.read_bytes() == b"referenced-current"
+    snapshot = recovery_snapshot(project_id)
+    assert snapshot["project"]["current_artifact_id"] == prior_artifact_id
+    assert [row for row in snapshot["artifacts"] if row["job_id"] == job_id] == []
 
 
 @pytest.mark.parametrize("boundary", ["before", "after"])

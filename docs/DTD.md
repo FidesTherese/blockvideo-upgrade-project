@@ -391,12 +391,43 @@ Tests inject failures with monkeypatches at existing callable seams:
 `artifact_store.publish_artifact`, and job-control transitions. Process-kill tests
 terminate an isolated app/worker only after an observed durable marker.
 
-No generic production failpoint registry is added. If a demonstrated crash gap
-requires a seam, add one private keyword-only callback defaulting to `None` and
-construct it only in tests; environment variables and HTTP payloads cannot enable it.
-Unknown remote calls remain terminal for automatic replay. Local calls may be
-retried only under existing fingerprint rules. Publication always validates file
-identity before changing current-artifact pointers.
+`recovery_snapshot()['project']` records `id`, `revision`, settings, `status`,
+`progress`, `current_stage`, `current_artifact_id`, `output_video_path`,
+`output_subtitle_path`, and `error_message` so restart comparisons include the full
+project recovery surface.
+
+The shutdown case runs the actual FastAPI lifespan and polling dispatcher in a child
+process. A deterministic local generation callback observes and persists the worker's
+`running` claim, then remains active until lifespan exit and asyncio task
+cancellation. Reopened state must be running before reconciliation, become pending on
+the first reconciliation, remain unchanged on the second, retain prior history, and
+contain no external-call row for that job.
+
+The resumed-completion case starts from a fingerprint-valid persisted checkpoint,
+reconciles it to pending, and submits it exactly once through a real `JobRegistry`.
+The injected local callback verifies job input snapshot/fingerprint, checkpoint
+snapshot/fingerprint, project revision, and current captured input before publishing.
+Invalid or stale checkpoints become failed and cannot reach registry submission.
+
+`artifact_store.publish_artifact()` retains committed-artifact replay as its first
+branch. If a verified new candidate encounters different bytes at `video.mp4`, the
+only permitted replacement is under one SQLite writer transaction and requires all
+of the following: the job is pending/running; the destination is exactly
+`projects/<project>/history/job-<zero-padded-job-id>/video.mp4`; the candidate is in
+that same job-history directory; no `GenerationArtifact` references the destination
+or already belongs to the job; no `Project.output_video_path` references the
+destination; and the candidate still matches its verified size/SHA-256. After atomic
+rename, the final bytes must retain that identity. Every referenced/current file,
+non-job-history destination, terminal job, changed candidate, or concurrent committed
+artifact fails closed. A later publication transaction performs the unchanged input,
+remote-call, cancellation, manifest, artifact, current-pointer, and completion checks.
+A crash between orphan replacement and publication remains recoverable by the same
+rule; no prior successful artifact is deleted.
+
+No generic production failpoint registry is added. Environment variables and HTTP
+payloads cannot enable a failpoint. Unknown remote calls remain terminal for
+automatic replay. Local calls may be retried only under the fingerprint rules above.
+Publication validates file identity before changing current-artifact pointers.
 
 ### D34 migration and startup design
 
@@ -1334,8 +1365,12 @@ independent review gates supply the recorded trust decisions.
   real-model probe reported separately.
 - **D32:** thread/session and spawned-process barriers; assert one winner and complete
   persisted invariants after reopening the DB.
-- **D33:** crash matrix at each durable boundary; restart twice to prove state
-  stability; remote POST counter must remain one.
+- **D33:** crash matrix at each durable boundary; full project recovery fields;
+  actual FastAPI lifespan/dispatcher shutdown cancellation; restart twice to prove
+  state stability; remote POST counter must remain one; valid-checkpoint
+  submit-once/completion through `JobRegistry`; invalid-checkpoint non-dispatch; and
+  rename-before-commit orphan replacement restricted to the exact unreferenced job
+  history path with referenced/current artifact protection and stable replay.
 - **D34:** empty/current/upstream/D30/partial/newer/corrupt fixtures; scratch-metadata
   affinity equality for every existing known column and rejection of each affinity
   mismatch/name collision; preservation of unknown extra tables/columns; backup hash,
