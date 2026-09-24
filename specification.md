@@ -84,15 +84,23 @@ registry, but the database job claim remains authoritative. This is single-serve
 race correctness, not a multi-server or capacity claim.
 
 D33 recovery evidence includes the complete persisted project progress/stage/output/
-error view. A real FastAPI lifespan subprocess proves shutdown cancellation leaves a
-durable running checkpoint that startup classifies once and then keeps stable without
-a remote call. A verified resumed job is submitted once through `JobRegistry` and
-completes from its frozen input identity. When a rename-before-commit crash leaves the
-exact `history/job-<id>/video.mp4` unreferenced, a newly verified candidate for that
-same recoverable job may replace only that orphan. Any artifact or project reference,
-other destination, stale input, terminal job, or unresolved remote work still blocks
-replacement/publication. Prior history remains immutable and completed publication
-replays the existing artifact.
+error view. FastAPI shutdown first stops the dispatcher, then
+`JobRegistry.shutdown()` cancels and awaits every live generation task without
+terminalizing its durable row; the lifespan subprocess proves cancellation occurs
+before lifespan exit. Startup classifies that running checkpoint once and then keeps
+it stable without a remote call. A verified resumed job is submitted once through
+`JobRegistry` and completes from its frozen input identity. Candidate validation may
+precede the writer transaction, but no initial rename or orphan replacement may occur
+until that same transaction has rechecked a running, non-cancelled job, no unresolved
+call, an existing project, exact revision equality, equality between the job and
+settled fingerprints, and equality between current-project and settled fingerprints.
+Accepted generated checkpoints update the job snapshot/fingerprint together. The
+transaction permits only the exact same-job history destination and checks references
+even when existing destination bytes are identical. Any artifact path reference,
+same-job artifact, project output/current reference, other destination, stale input,
+terminal job, or unresolved remote work blocks filesystem mutation and publication.
+Only an exact unreferenced same-job orphan may be replaced by the verified candidate.
+Prior history remains immutable and completed publication replays the existing artifact.
 
 D40 accepts completed human-operation or independent-review evidence only with an
 exact lowercase 64-hex artifact SHA-256. Missing or malformed completed artifacts

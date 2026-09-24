@@ -33,9 +33,14 @@ from app.operations.bootstrap import operation_service
 from app.operations.contracts import OperationRequest
 from app.services import artifact_store
 from app.services.external_calls import ExternalOutcomeUnknown, job_call_context, journaled_post
-from app.services.generation_snapshots import capture_inputs, fingerprint_inputs
+from app.services.generation_snapshots import (
+    GenerationCancelled,
+    StaleGenerationInput,
+    capture_inputs,
+    fingerprint_inputs,
+)
 from app.services.job_records import create_pending_job
-from app.services.paths import project_dir
+from app.services.paths import project_dir, relpath_for_db
 from app.services.settings_history import configuration, record_settings
 from app.services.transactions import atomic_write
 from app.workers import operation_dispatcher
@@ -791,6 +796,7 @@ def checkpoint_death() -> None:
 async def shutdown_death() -> None:
     from app.main import app
     from app.workers import operation_dispatcher
+    from app.workers.job_runner import job_registry
 
     observed_running = asyncio.Event()
 
@@ -812,9 +818,17 @@ async def shutdown_death() -> None:
             raise
 
     operation_dispatcher.run_generation_job = local_generation
+    shutdown_registry = job_registry.shutdown
+
+    async def observed_shutdown() -> None:
+        marker("registry_shutdown_started")
+        await shutdown_registry()
+        marker("registry_shutdown_finished")
+
+    job_registry.shutdown = observed_shutdown
     async with app.router.lifespan_context(app):
         await asyncio.wait_for(observed_running.wait(), timeout=10)
-        marker("lifespan_exit")
+    marker("lifespan_exit")
 
 
 async def artifact_death() -> None:
@@ -1076,8 +1090,10 @@ def test_shutdown_cancellation_reconciles_running_job_without_remote_duplicate(
     assert result.returncode == 0, result.stderr
     assert _marker_lines(marker_path) == [
         "durable_running",
-        "lifespan_exit",
+        "registry_shutdown_started",
         "task_cancelled",
+        "registry_shutdown_finished",
+        "lifespan_exit",
     ]
     crashed = recovery_snapshot(project_id)
     job = next(row for row in crashed["jobs"] if row["id"] == job_id)
@@ -1355,6 +1371,154 @@ def test_resumed_publication_does_not_replace_referenced_job_history_video(
     snapshot = recovery_snapshot(project_id)
     assert snapshot["project"]["current_artifact_id"] == prior_artifact_id
     assert [row for row in snapshot["artifacts"] if row["job_id"] == job_id] == []
+
+
+@pytest.mark.parametrize(
+    ("blocker", "error_type"),
+    [
+        ("cancelled", GenerationCancelled),
+        ("stale_revision", StaleGenerationInput),
+        ("stale_job_input", StaleGenerationInput),
+        ("stale_project_input", StaleGenerationInput),
+        ("unresolved_call", ExternalOutcomeUnknown),
+    ],
+)
+def test_publication_eligibility_failure_leaves_candidate_and_destination_unchanged(
+    temp_storage: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocker: str,
+    error_type: type[Exception],
+) -> None:
+    project_id, _prior_artifact_id = _seed_canonical_state()
+    job_id = _new_running_job(project_id)
+    directory = project_dir(project_id) / "history" / f"job-{job_id:08d}"
+    candidate = directory / "video.pending.mp4"
+    final = directory / "video.mp4"
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate_bytes = f"candidate-{blocker}".encode()
+    candidate.write_bytes(candidate_bytes)
+
+    async def validate(path: Path) -> dict[str, object]:
+        return {
+            **artifact_store.file_identity(path),
+            "duration_ms": 1000,
+            "width": 320,
+            "height": 180,
+        }
+
+    monkeypatch.setattr(artifact_store, "validate_video", validate)
+    with get_session_factory()() as db, atomic_write(db):
+        job = db.get(GenerationJob, job_id)
+        project = db.get(Project, project_id)
+        settled_inputs = job.input_snapshot
+        if blocker == "cancelled":
+            job.cancel_requested = True
+        elif blocker == "stale_revision":
+            project.revision += 1
+        elif blocker == "stale_job_input":
+            job.input_fingerprint = "0" * 64
+        elif blocker == "stale_project_input":
+            project.source_script = "publication must not adopt this changed input"
+        else:
+            db.add(
+                ExternalCall(
+                    job_id=job_id,
+                    fingerprint="f" * 64,
+                    provider="synthetic",
+                    endpoint="https://synthetic.invalid/d33-publication",
+                    remote_side_effect=True,
+                    status="unknown",
+                )
+            )
+
+    with pytest.raises(error_type):
+        asyncio.run(
+            artifact_store.publish_artifact(
+                job_id,
+                candidate,
+                None,
+                settled_inputs=settled_inputs,
+                materials=[],
+                cancel_check=lambda: False,
+            )
+        )
+
+    assert candidate.read_bytes() == candidate_bytes
+    assert not final.exists()
+    assert [
+        row
+        for row in recovery_snapshot(project_id)["artifacts"]
+        if row["job_id"] == job_id
+    ] == []
+
+
+@pytest.mark.parametrize(
+    "reference_kind",
+    ["artifact_path", "same_job", "project_output", "project_current"],
+)
+def test_identical_destination_reference_never_removes_or_replaces_files(
+    temp_storage: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reference_kind: str,
+) -> None:
+    project_id, prior_artifact_id = _seed_canonical_state()
+    job_id = _new_running_job(project_id)
+    directory = project_dir(project_id) / "history" / f"job-{job_id:08d}"
+    candidate = directory / "video.pending.mp4"
+    final = directory / "video.mp4"
+    directory.mkdir(parents=True, exist_ok=True)
+    identical_bytes = b"identical-but-referenced"
+    candidate.write_bytes(identical_bytes)
+    final.write_bytes(identical_bytes)
+    final_path = relpath_for_db(final)
+
+    with get_session_factory()() as db, atomic_write(db):
+        project = db.get(Project, project_id)
+        prior = db.get(GenerationArtifact, prior_artifact_id)
+        if reference_kind == "artifact_path":
+            prior.video_path = final_path
+        elif reference_kind == "same_job":
+            prior.job_id = job_id
+        elif reference_kind == "project_output":
+            project.output_video_path = final_path
+        else:
+            prior.video_path = final_path
+            project.current_artifact_id = prior.id
+        settled_inputs = db.get(GenerationJob, job_id).input_snapshot
+
+    async def validate(path: Path) -> dict[str, object]:
+        return {
+            **artifact_store.file_identity(path),
+            "duration_ms": 1000,
+            "width": 320,
+            "height": 180,
+        }
+
+    monkeypatch.setattr(artifact_store, "validate_video", validate)
+
+    def publication() -> GenerationArtifact:
+        return asyncio.run(
+            artifact_store.publish_artifact(
+                job_id,
+                candidate,
+                None,
+                settled_inputs=settled_inputs,
+                materials=[],
+                cancel_check=lambda: False,
+            )
+        )
+
+    if reference_kind == "same_job":
+        assert publication().id == prior_artifact_id
+    else:
+        with pytest.raises(RuntimeError, match="確定動画"):
+            publication()
+
+    assert candidate.read_bytes() == identical_bytes
+    assert final.read_bytes() == identical_bytes
+    snapshot = recovery_snapshot(project_id)
+    assert len(snapshot["artifacts"]) == 1
+    assert snapshot["project"]["current_artifact_id"] == prior_artifact_id
 
 
 @pytest.mark.parametrize("boundary", ["before", "after"])

@@ -219,46 +219,23 @@ async def preserve_legacy_video(project_id: int) -> None:
         project.output_subtitle_path = artifact.subtitle_path
 
 
-def _replace_unreferenced_job_video(
-    job_id: int,
-    candidate: Path,
-    final: Path,
-    verified_video: dict[str, Any],
-) -> None:
-    with get_session_factory()() as db, atomic_write(db):
-        job = db.get(GenerationJob, job_id)
-        if job is None or job.status not in {JobStatus.pending, JobStatus.running}:
-            raise RuntimeError("このジョブの確定動画が既に存在します")
-        expected = (
-            project_dir(job.project_id)
-            / "history"
-            / f"job-{job.id:08d}"
-            / "video.mp4"
-        ).resolve()
-        if final.resolve() != expected or candidate.parent.resolve() != expected.parent:
-            raise RuntimeError("このジョブの確定動画が既に存在します")
-        final_path = relpath_for_db(final)
-        artifact_reference = db.scalar(
-            select(GenerationArtifact.id).where(
-                (GenerationArtifact.video_path == final_path)
-                | (GenerationArtifact.job_id == job_id)
-            ).limit(1)
-        )
-        project_reference = db.scalar(
-            select(Project.id).where(Project.output_video_path == final_path).limit(1)
-        )
-        if artifact_reference is not None or project_reference is not None:
-            raise RuntimeError("このジョブの確定動画が既に存在します")
-        if file_identity(candidate) != {
-            key: verified_video[key] for key in ("path", "size", "sha256")
-        }:
-            raise StaleGenerationInput("検証後に完成動画が変更されました")
-        candidate.replace(final)
-        if any(
-            file_identity(final)[key] != verified_video[key]
-            for key in ("size", "sha256")
-        ):
-            raise StaleGenerationInput("確定中に完成動画が変更されました")
+def _destination_is_referenced(db: Any, job_id: int, final_path: str) -> bool:
+    artifact_reference = db.scalar(
+        select(GenerationArtifact.id).where(
+            (GenerationArtifact.video_path == final_path)
+            | (GenerationArtifact.job_id == job_id)
+        ).limit(1)
+    )
+    current_artifact_ids = select(GenerationArtifact.id).where(
+        GenerationArtifact.video_path == final_path
+    )
+    project_reference = db.scalar(
+        select(Project.id).where(
+            (Project.output_video_path == final_path)
+            | (Project.current_artifact_id.in_(current_artifact_ids))
+        ).limit(1)
+    )
+    return artifact_reference is not None or project_reference is not None
 
 
 async def publish_artifact(
@@ -274,11 +251,16 @@ async def publish_artifact(
     unreferenced history filename after a rename-before-commit crash. Referenced
     successes are never replaced or deleted.
     """
+    final = candidate.with_name("video.mp4")
     with get_session_factory()() as db:
         existing = db.scalar(
             select(GenerationArtifact).where(GenerationArtifact.job_id == job_id)
         )
         if existing is not None:
+            if final.exists() and not _destination_is_referenced(
+                db, job_id, relpath_for_db(final)
+            ):
+                raise RuntimeError("このジョブの確定動画の参照を確認できません")
             db.expunge(existing)
             return existing
     if cancel_check():
@@ -288,13 +270,6 @@ async def publish_artifact(
         raise StaleGenerationInput("検証後に完成動画が変更されました")
     verify_materials(materials)
     verify_materials(block_videos or [])
-    final = candidate.with_name("video.mp4")
-    if final.exists():
-        if file_identity(final)["sha256"] != video["sha256"]:
-            _replace_unreferenced_job_video(job_id, candidate, final, video)
-    else:
-        candidate.replace(final)
-    video = {**video, **file_identity(final)}
     subtitle_identity = file_identity(subtitle) if subtitle else None
     settled_fingerprint = fingerprint_inputs(settled_inputs)
     with get_session_factory()() as db, atomic_write(db):
@@ -303,6 +278,7 @@ async def publish_artifact(
             raise StaleGenerationInput("生成ジョブが見つかりません")
         existing = db.scalar(select(GenerationArtifact).where(GenerationArtifact.job_id == job_id))
         if existing is not None:
+            db.expunge(existing)
             return existing
         if job.cancel_requested or cancel_check() or job.status == JobStatus.cancelled:
             raise GenerationCancelled("ユーザーによりキャンセルされました")
@@ -315,12 +291,35 @@ async def publish_artifact(
         project = db.get(Project, job.project_id)
         if project is None:
             raise StaleGenerationInput("対象プロジェクトが見つかりません")
+        if project.revision != job.input_revision:
+            raise StaleGenerationInput("生成開始後にプロジェクトの版が変更されました")
+        if job.input_fingerprint != settled_fingerprint:
+            raise StaleGenerationInput("生成ジョブの入力と確定入力が一致しません")
         current_fingerprint = fingerprint_inputs(capture_inputs(project))
-        same_revision = project.revision == job.input_revision
-        if same_revision and current_fingerprint != settled_fingerprint:
-            raise StaleGenerationInput("設定の版が同じまま参照入力が変わりました")
+        if current_fingerprint != settled_fingerprint:
+            raise StaleGenerationInput("生成開始後に参照入力が変更されました")
         verify_materials(materials)
         verify_materials(block_videos or [])
+        expected = (
+            project_dir(job.project_id)
+            / "history"
+            / f"job-{job.id:08d}"
+            / "video.mp4"
+        ).resolve()
+        if final.resolve() != expected or candidate.parent.resolve() != expected.parent:
+            raise RuntimeError("このジョブの確定動画を公開できません")
+        final_path = relpath_for_db(final)
+        if _destination_is_referenced(db, job.id, final_path):
+            raise RuntimeError("このジョブの確定動画が既に参照されています")
+        if file_identity(candidate) != {
+            key: video[key] for key in ("path", "size", "sha256")
+        }:
+            raise StaleGenerationInput("検証後に完成動画が変更されました")
+        candidate.replace(final)
+        final_identity = file_identity(final)
+        if any(final_identity[key] != video[key] for key in ("size", "sha256")):
+            raise StaleGenerationInput("確定中に完成動画が変更されました")
+        video = {**video, **final_identity}
         manifest = {
             "schema_version": 1, "job_id": job.id, "revision": job.input_revision,
             "requested_input_fingerprint": job.input_fingerprint,
@@ -341,14 +340,13 @@ async def publish_artifact(
         )
         db.add(artifact)
         db.flush()
-        if same_revision and current_fingerprint == settled_fingerprint:
-            project.current_artifact_id = artifact.id
-            project.output_video_path = artifact.video_path
-            project.output_subtitle_path = artifact.subtitle_path
-            project.status = ProjectStatus.completed
-            project.progress = 1.0
-            project.current_stage = "done"
-            project.error_message = None
+        project.current_artifact_id = artifact.id
+        project.output_video_path = artifact.video_path
+        project.output_subtitle_path = artifact.subtitle_path
+        project.status = ProjectStatus.completed
+        project.progress = 1.0
+        project.current_stage = "done"
+        project.error_message = None
         job.status = JobStatus.completed
         job.progress = 1.0
         job.current_stage = "done"

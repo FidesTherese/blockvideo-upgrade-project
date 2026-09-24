@@ -1371,6 +1371,8 @@ async def run_generation_job(job_id: int, cancel_check: Callable[[], bool]) -> N
                 raise StaleGenerationInput("生成中に設定が変更されました")
             expected_fingerprint = fingerprint_inputs(snapshot)
             expected_materials = collect_completed_materials(project)
+            job.input_snapshot = snapshot
+            job.input_fingerprint = expected_fingerprint
             job.plan_json = {**(job.plan_json or {}), "resume_inputs": snapshot,
                              "resume_fingerprint": expected_fingerprint,
                              "stage_materials": expected_materials}

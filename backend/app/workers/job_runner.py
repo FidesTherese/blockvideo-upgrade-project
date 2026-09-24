@@ -139,6 +139,14 @@ class JobRegistry:
         mark_running(job_id)
         return task
 
+    async def shutdown(self) -> None:
+        """Cancel and await live tasks without changing durable job outcomes."""
+        tasks = tuple(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     def request_cancel(self, job_id: int) -> bool:
         """Signal a live task or persist cancellation for a pending job.
 

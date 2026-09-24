@@ -73,7 +73,9 @@ async def test_all_successes_same_revision_have_distinct_immutable_files(temp_st
 
 
 @pytest.mark.asyncio
-async def test_valid_old_completion_is_history_but_cannot_replace_current(temp_storage, accept_synthetic_probe):
+async def test_old_revision_completion_cannot_publish_history_or_replace_current(
+    temp_storage, accept_synthetic_probe
+):
     with get_session_factory()() as db:
         project, job = make_job(db)
         project_id, old_job_id, old_snapshot = project.id, job.id, capture_inputs(project)
@@ -84,13 +86,16 @@ async def test_valid_old_completion_is_history_but_cannot_replace_current(temp_s
         new_id, current_snapshot = new_job.id, capture_inputs(project)
     current = await store.publish_artifact(new_id, candidate_for(project_id, new_id, b"new"), None,
                                            settled_inputs=current_snapshot, materials=[], cancel_check=lambda: False)
-    old = await store.publish_artifact(old_job_id, candidate_for(project_id, old_job_id, b"old"), None,
-                                       settled_inputs=old_snapshot, materials=[], cancel_check=lambda: False)
+    stale_candidate = candidate_for(project_id, old_job_id, b"old")
+    with pytest.raises(StaleGenerationInput):
+        await store.publish_artifact(old_job_id, stale_candidate, None,
+                                     settled_inputs=old_snapshot, materials=[], cancel_check=lambda: False)
+    assert stale_candidate.read_bytes() == b"old"
+    assert not stale_candidate.with_name("video.mp4").exists()
     with get_session_factory()() as db:
         project = db.get(Project, project_id)
         assert project.current_artifact_id == current.id
-        assert not store.artifact_to_summary(old, project)["is_current"]
-        assert store.artifact_is_available(old)
+        assert list(db.scalars(select(GenerationArtifact))) == [db.get(GenerationArtifact, current.id)]
 
 
 @pytest.mark.asyncio

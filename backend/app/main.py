@@ -33,6 +33,7 @@ from app.core.access_logging import protect_access_logs
 from app.db import init_db
 from app.services.transactions import WriteBusyError
 from app.services.job_records import ProjectBusyError, UnresolvedExternalWorkError
+from app.workers import operation_dispatcher
 from app.workers.operation_dispatcher import mark_interrupted_operation_jobs, run_operation_dispatcher
 
 
@@ -67,6 +68,7 @@ async def lifespan(app: FastAPI):
         dispatcher.cancel()
         with suppress(asyncio.CancelledError):
             await dispatcher
+        await operation_dispatcher.job_registry.shutdown()
 
 
 def create_app() -> FastAPI:

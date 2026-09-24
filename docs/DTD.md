@@ -397,11 +397,18 @@ terminate an isolated app/worker only after an observed durable marker.
 project recovery surface.
 
 The shutdown case runs the actual FastAPI lifespan and polling dispatcher in a child
-process. A deterministic local generation callback observes and persists the worker's
-`running` claim, then remains active until lifespan exit and asyncio task
-cancellation. Reopened state must be running before reconciliation, become pending on
-the first reconciliation, remain unchanged on the second, retain prior history, and
-contain no external-call row for that job.
+process. `JobRegistry.shutdown() -> None` snapshots the registry's live tasks, calls
+`task.cancel()` on each, and awaits all of them with `asyncio.gather(...,
+return_exceptions=True)`; it does not set cooperative cancellation flags or write a
+terminal outcome. `main.lifespan()` cancels/awaits the polling dispatcher first and
+then awaits the process singleton's `shutdown()` before returning from the lifespan
+context. A deterministic local generation callback observes and persists the worker's
+`running` claim, then remains active until registry shutdown cancellation. Fixed test
+markers prove `registry_shutdown_started`, callback `task_cancelled`, and
+`registry_shutdown_finished` all occur before `lifespan_exit`. Reopened state must be
+running before reconciliation, become pending on the first reconciliation, remain
+unchanged on the second, retain prior history, and contain no external-call row for
+that job.
 
 The resumed-completion case starts from a fingerprint-valid persisted checkpoint,
 reconciles it to pending, and submits it exactly once through a real `JobRegistry`.
@@ -410,19 +417,33 @@ snapshot/fingerprint, project revision, and current captured input before publis
 Invalid or stale checkpoints become failed and cannot reach registry submission.
 
 `artifact_store.publish_artifact()` retains committed-artifact replay as its first
-branch. If a verified new candidate encounters different bytes at `video.mp4`, the
-only permitted replacement is under one SQLite writer transaction and requires all
-of the following: the job is pending/running; the destination is exactly
-`projects/<project>/history/job-<zero-padded-job-id>/video.mp4`; the candidate is in
-that same job-history directory; no `GenerationArtifact` references the destination
-or already belongs to the job; no `Project.output_video_path` references the
-destination; and the candidate still matches its verified size/SHA-256. After atomic
-rename, the final bytes must retain that identity. Every referenced/current file,
-non-job-history destination, terminal job, changed candidate, or concurrent committed
-artifact fails closed. A later publication transaction performs the unchanged input,
-remote-call, cancellation, manifest, artifact, current-pointer, and completion checks.
-A crash between orphan replacement and publication remains recoverable by the same
-rule; no prior successful artifact is deleted.
+branch because that path performs no filesystem mutation. It may validate a new
+candidate before opening the writer transaction, but both an initial rename and an
+orphan replacement occur only inside the same `atomic_write` transaction that
+publishes the artifact. Before either filesystem operation, the transaction requires:
+(1) the job exists, is exactly `running`, and is neither durably nor cooperatively
+cancelled; (2) no unresolved external call exists; (3) the project exists; (4)
+`project.revision == job.input_revision`; (5) `job.input_fingerprint ==
+fingerprint_inputs(settled_inputs)`; (6) the current project fingerprint equals that
+settled fingerprint; and (7) materials and the candidate still match their verified
+identities. Pipeline checkpoint acceptance writes the newly accepted generated
+snapshot to both `job.input_snapshot` and `job.input_fingerprint` together with the
+resume snapshot/fingerprint so these equalities remain explicit at publication.
+
+The destination must resolve exactly to
+`projects/<project>/history/job-<zero-padded-job-id>/video.mp4`, and the candidate
+must be in that same directory. The transaction performs destination reference
+queries whenever the final path exists, including when candidate and destination
+bytes have the same SHA-256; implementation performs the query unconditionally as a
+fail-closed simplification. A `GenerationArtifact.video_path` reference, an artifact
+already owned by the same job, a `Project.output_video_path` reference, or a project's
+current-artifact reference to that path blocks all rename/replacement and publication.
+There is no identical-byte shortcut. Only an exact unreferenced same-job history path
+may be created or replaced with the still-verified candidate, after which the final
+size/SHA-256 is checked before manifest/artifact/current-pointer/completion writes.
+A crash after rename but before commit can leave an orphan recoverable by the same
+rule; referenced/current files and prior successful history are never deleted or
+replaced.
 
 No generic production failpoint registry is added. Environment variables and HTTP
 payloads cannot enable a failpoint. Unknown remote calls remain terminal for

@@ -73,7 +73,7 @@ Only add production files that changed to satisfy a RED invariant.
 - Modify only after RED: `backend/app/services/external_calls.py`, `backend/app/services/generation_snapshots.py`, `backend/app/services/artifact_store.py`, `backend/app/workers/operation_dispatcher.py`, `backend/app/workers/job_runner.py`
 
 **Interfaces:**
-- Use existing seams `external_calls._finish`, `generation_snapshots.capture_inputs`, `artifact_store.publish_artifact`, `JobRegistry.request_cancel(job_id: int) -> bool`, and `mark_interrupted_operation_jobs() -> int`.
+- Use seams `external_calls._finish`, `generation_snapshots.capture_inputs`, `artifact_store.publish_artifact`, `JobRegistry.request_cancel(job_id: int) -> bool`, `JobRegistry.shutdown() -> None`, and `mark_interrupted_operation_jobs() -> int`.
 - Subprocess scenarios write only fixed markers `claimed`, `sent`, `response_saved`, `checkpoint_saved`, and `artifact_renamed`, then call `os._exit()` with fixed non-zero codes.
 - Remote POST count is an append-only synthetic marker count and must remain at most one after recovery/replay.
 
@@ -109,7 +109,11 @@ git commit -m "fix: complete D33 resumed recovery paths"
 
 The correction adds the omitted shutdown/lifespan and resumed-completion evidence,
 full project recovery fields, invalid-checkpoint non-dispatch, and the narrowly
-guarded orphan-video replacement. Task 3 remains unstarted by this correction.
+guarded orphan-video replacement. The follow-up safety correction moves initial
+rename and orphan replacement under the publication writer transaction's complete
+eligibility recheck, removes identical-byte reference bypasses, requires exact
+revision/input equality, and makes lifespan shutdown explicitly cancel/await the
+process registry before exit. Task 3 remains unstarted by this correction.
 
 ### Task 3: D33 evidence and gate
 

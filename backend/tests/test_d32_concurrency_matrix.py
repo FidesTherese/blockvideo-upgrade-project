@@ -997,7 +997,7 @@ async def test_cancel_vs_publication_preserves_prior_artifact_and_terminalizes_o
         with pytest.raises(GenerationCancelled):
             await artifact_store.publish_artifact(
                 next_job_id,
-                final_candidate,
+                candidate,
                 None,
                 settled_inputs=next_inputs,
                 materials=[],

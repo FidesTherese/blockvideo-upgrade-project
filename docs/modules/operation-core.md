@@ -79,10 +79,16 @@ for exact replay. Process-local secrets are dropped only after commit, followed 
 best-effort filesystem cleanup. Startup dispatch may receive an internal
 `JobRegistry` for testing, but registry liveness is only an optimization: each
 worker's persisted pending-to-running claim decides whether work executes. Startup
-reconciliation returns only fingerprint-valid interrupted jobs to pending. Resumed
-publication may replace different bytes only at that job's exact unreferenced history
-`video.mp4`; any artifact/project reference or non-job path blocks replacement before
-the normal publication transaction updates history/current pointers.
+reconciliation returns only fingerprint-valid interrupted jobs to pending. FastAPI
+shutdown stops the dispatcher and then uses `JobRegistry.shutdown()` to cancel and
+await live tasks while preserving durable running checkpoints. Publication performs
+both an initial rename and orphan replacement only inside the artifact writer
+transaction after exact running/cancellation, unresolved-call, project, revision,
+job/settled fingerprint, and current-project/settled fingerprint checks. Accepted
+pipeline checkpoints update the job snapshot/fingerprint together. The exact same-job
+history destination is reference-checked even for identical bytes; artifact-path,
+same-job artifact, project output/current, and non-job-path cases block filesystem
+mutation before history/current pointers are written.
 
 ## Key Decisions and Limits
 
@@ -103,12 +109,14 @@ the normal publication transaction updates history/current pointers.
   only after database commit, with filesystem removal remaining best effort.
 - The dispatcher accepts a keyword-only injected registry, defaulting to the process
   singleton. A registry may submit a stale candidate, but the database job claim is
-  authoritative and permits one execution. FastAPI shutdown cancels live tasks while
-  preserving their durable running checkpoint for startup reconciliation.
+  authoritative and permits one execution. `JobRegistry.shutdown()` cancels and
+  awaits all tracked tasks without marking completion; FastAPI calls it after stopping
+  the dispatcher, preserving durable running checkpoints for startup reconciliation.
 - A rename-before-publication orphan is replaceable only by a newly verified candidate
-  for the same pending/running job at its exact history path. Referenced/current
-  artifacts and prior successful history remain immutable; committed publication
-  replays its existing artifact row.
+  for the same exactly running job at its exact history path after all publication
+  eligibility checks pass in the writer transaction. Reference checks run even for
+  identical bytes. Referenced/current artifacts and prior successful history remain
+  immutable; committed publication replays its existing artifact row.
 - Legacy absolute calls without request identity retain compatibility but no replay guarantee.
 - Unexpected API exceptions return a fixed `internal_error` payload with a
   correlation ID. Logs retain the exception class, correlation ID, and matched route
