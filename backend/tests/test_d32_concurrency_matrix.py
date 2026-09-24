@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -1109,6 +1109,101 @@ def test_nonrecoverable_retry_vs_reconciliation_has_at_most_one_child(
     assert snapshot(project_id) == state
 
 
+def test_remote_in_flight_retry_vs_reconciliation_stays_unknown(
+    temp_storage: Path, monkeypatch
+) -> None:
+    from app.operations import service as operation_service_module
+
+    project_id = make_project()
+    source_request = OperationRequest(
+        operation_id="project.generation.start",
+        target={"project_id": project_id},
+        arguments={"kind": "full"},
+        request_id="d32-remote-in-flight-source",
+        base_revision=1,
+    )
+    with get_session_factory()() as db:
+        source_result = operation_service.execute(db, source_request)
+        source = db.get(GenerationJob, source_result.job_id)
+        assert source is not None
+        source.status = JobStatus.running
+        db.add(
+            ExternalCall(
+                job_id=source.id,
+                fingerprint="d32-remote-in-flight",
+                provider="synthetic",
+                endpoint="https://synthetic.invalid",
+                remote_side_effect=True,
+                status="in_flight",
+            )
+        )
+        db.commit()
+        source_job_id = source.id
+
+    retry_request = OperationRequest(
+        operation_id="project.generation.retry",
+        target={"project_id": project_id},
+        arguments={"job_id": source_job_id},
+        request_id="d32-remote-in-flight-retry",
+        base_revision=1,
+    )
+    barrier = Barrier(2)
+    original_operation_write = operation_service_module.atomic_write
+    original_recovery_write = dispatcher.atomic_write
+
+    @contextmanager
+    def synchronized_operation_write(db: Session) -> Iterator[None]:
+        barrier.wait(timeout=20)
+        with original_operation_write(db):
+            yield
+
+    @contextmanager
+    def synchronized_recovery_write(db: Session) -> Iterator[None]:
+        barrier.wait(timeout=20)
+        with original_recovery_write(db):
+            yield
+
+    monkeypatch.setattr(
+        operation_service_module, "atomic_write", synchronized_operation_write
+    )
+    monkeypatch.setattr(dispatcher, "atomic_write", synchronized_recovery_write)
+
+    def retry() -> OperationError:
+        with get_session_factory()() as db:
+            with pytest.raises(OperationError) as caught:
+                operation_service.execute(db, retry_request)
+            return caught.value
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        recovery_future = pool.submit(dispatcher.mark_interrupted_operation_jobs)
+        retry_future = pool.submit(retry)
+        assert recovery_future.result(timeout=30) == 1
+        retry_error = retry_future.result(timeout=30)
+
+    assert retry_error.reason_code in {"project_busy", "external_outcome_unknown"}
+    state = snapshot(project_id)
+    assert len(state["jobs"]) == 1
+    assert state["jobs"][0]["id"] == source_job_id
+    assert state["jobs"][0]["status"] == "unknown"
+    assert state["jobs"][0]["parent_job_id"] is None
+    assert len(state["external_calls"]) == 1
+    assert state["external_calls"][0]["job_id"] == source_job_id
+    assert state["external_calls"][0]["status"] == "unknown"
+    assert state["external_calls"][0]["error_code"] == "process_interrupted"
+    assert [row["request_id"] for row in state["receipts"]] == [
+        source_request.request_id
+    ]
+    assert state["receipts"][0]["job_id"] == source_job_id
+    assert state["artifacts"] == []
+
+    monkeypatch.setattr(
+        operation_service_module, "atomic_write", original_operation_write
+    )
+    monkeypatch.setattr(dispatcher, "atomic_write", original_recovery_write)
+    assert dispatcher.mark_interrupted_operation_jobs() == 0
+    assert snapshot(project_id) == state
+
+
 @pytest.mark.asyncio
 async def test_delete_racing_pending_claim_is_blocked_and_receipt_survives(
     temp_storage: Path, monkeypatch
@@ -1271,7 +1366,9 @@ def test_delete_racing_unknown_or_unresolved_work_requires_resolution(
             db.scalars(select(ExternalCall).where(ExternalCall.job_id == source_job_id))
         )
         for call in calls:
-            db.delete(call)
+            call.status = "failed"
+            call.error_code = "explicitly_resolved"
+            call.finished_at = datetime.now().astimezone()
 
     create_barrier = Barrier(2)
 
@@ -1305,9 +1402,7 @@ def test_delete_racing_unknown_or_unresolved_work_requires_resolution(
         assert survivor is not None
         assert survivor.title == "D32 concurrent survivor"
         assert db.get(GenerationJob, source_job_id) is None
-        assert list(
-            db.scalars(select(ExternalCall).where(ExternalCall.job_id == source_job_id))
-        ) == []
+        assert list(db.scalars(select(ExternalCall))) == []
         receipt = db.get(OperationReceipt, source_request.request_id)
         assert receipt is not None
         assert receipt.result_json == source_result.model_dump(mode="json")
@@ -1344,12 +1439,30 @@ async def test_competing_startup_scans_claim_five_pending_jobs_once(
         await asyncio.sleep(0)
 
     monkeypatch.setattr(dispatcher, "run_generation_job", work)
-    scan_barrier = Barrier(2)
-    registries = (JobRegistry(), JobRegistry())
+    first_submit_barrier = Barrier(2)
+
+    class BlindRegistry(JobRegistry):
+        def __init__(self) -> None:
+            super().__init__()
+            self._first_submit = True
+
+        def is_running(self, job_id: int) -> bool:
+            return False
+
+        def submit(
+            self,
+            job_id: int,
+            coro_factory: Callable[[Callable[[], bool]], Awaitable[Any]],
+        ) -> asyncio.Task[Any]:
+            if self._first_submit:
+                self._first_submit = False
+                first_submit_barrier.wait(timeout=20)
+            return super().submit(job_id, coro_factory)
+
+    registries = (BlindRegistry(), BlindRegistry())
 
     def scan(registry: JobRegistry) -> int:
         async def run() -> int:
-            scan_barrier.wait(timeout=20)
             submitted = dispatcher.dispatch_pending_operation_jobs(registry=registry)
             tasks = list(registry._tasks.values())
             if tasks:
@@ -1360,7 +1473,8 @@ async def test_competing_startup_scans_claim_five_pending_jobs_once(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         submitted = list(pool.map(scan, registries))
-    assert sum(submitted) >= 5
+    assert submitted == [5, 5]
+    assert sum(submitted) == 10
     assert counts == {job_id: 1 for job_id in job_ids}
     with get_session_factory()() as db:
         jobs = list(

@@ -19,7 +19,7 @@ from app.workers.job_runner import JobRegistry, job_registry
 
 def dispatch_pending_operation_jobs(*, registry: JobRegistry | None = None) -> int:
     """Submit persisted pending jobs; workers perform the atomic running claim."""
-    target_registry = registry or job_registry
+    target_registry = registry if registry is not None else job_registry
     with get_session_factory()() as db:
         pending = list(db.execute(
             select(GenerationJob.id, GenerationJob.project_id)

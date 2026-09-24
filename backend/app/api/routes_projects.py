@@ -19,6 +19,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.api.utils import (
+    delete_project_external_calls,
     ensure_project_deletable,
     ensure_project_idle,
     ensure_render_assets_ready,
@@ -402,6 +403,7 @@ def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
     secret_store.drop(project_id)
     db.execute(delete(SettingsRevision).where(SettingsRevision.project_id == project_id))
     db.execute(delete(GenerationArtifact).where(GenerationArtifact.project_id == project_id))
+    delete_project_external_calls(project_id, db)
     db.delete(project)
     db.commit()
     # Best-effort filesystem cleanup; ignore failures.

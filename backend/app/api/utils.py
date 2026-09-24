@@ -10,11 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 
 
-def ensure_project_idle(project_id: int, db) -> None:
+def ensure_project_idle(project_id: int, db: Session) -> None:
     """Reject writes while a durable or process-local generation is active."""
     from app.services.job_records import has_active_project_job
     from app.workers.job_runner import job_registry
@@ -23,7 +24,7 @@ def ensure_project_idle(project_id: int, db) -> None:
         raise HTTPException(status_code=409, detail="このプロジェクトは生成中です。完了後に再実行してください。")
 
 
-def ensure_project_deletable(project_id: int, db) -> None:
+def ensure_project_deletable(project_id: int, db: Session) -> None:
     """Reject deletion while local or externally uncertain work may still finish."""
     from sqlalchemy import select
 
@@ -54,6 +55,17 @@ def ensure_project_deletable(project_id: int, db) -> None:
             status_code=409,
             detail="外部処理の結果が未確定です。確認できるまで削除できません。",
         )
+
+
+def delete_project_external_calls(project_id: int, db: Session) -> None:
+    """Delete resolved journal rows before their owning jobs cascade."""
+    from sqlalchemy import delete, select
+
+    from app.models.external_call import ExternalCall
+    from app.models.job import GenerationJob
+
+    job_ids = select(GenerationJob.id).where(GenerationJob.project_id == project_id)
+    db.execute(delete(ExternalCall).where(ExternalCall.job_id.in_(job_ids)))
 
 
 def ensure_render_assets_ready(project) -> None:
