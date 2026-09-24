@@ -1360,6 +1360,20 @@ async def test_delete_racing_pending_claim_is_blocked_and_receipt_survives(
     with get_session_factory()() as db:
         assert db.get(Project, project_id) is None
         assert db.get(GenerationJob, source_result.job_id) is None
+        assert list(
+            db.scalars(
+                select(SettingsRevision).where(
+                    SettingsRevision.project_id == project_id
+                )
+            )
+        ) == []
+        assert list(
+            db.scalars(
+                select(GenerationArtifact).where(
+                    GenerationArtifact.project_id == project_id
+                )
+            )
+        ) == []
         assert db.get(OperationReceipt, source_request.request_id) is not None
         assert operation_service.execute(db, source_request) == source_result
 
@@ -1484,6 +1498,20 @@ def test_delete_racing_unknown_or_unresolved_work_requires_resolution(
         assert survivor.title == "D32 concurrent survivor"
         assert db.get(GenerationJob, source_job_id) is None
         assert list(db.scalars(select(ExternalCall))) == []
+        assert list(
+            db.scalars(
+                select(SettingsRevision).where(
+                    SettingsRevision.project_id == project_id
+                )
+            )
+        ) == []
+        assert list(
+            db.scalars(
+                select(GenerationArtifact).where(
+                    GenerationArtifact.project_id == project_id
+                )
+            )
+        ) == []
         receipt = db.get(OperationReceipt, source_request.request_id)
         assert receipt is not None
         assert receipt.result_json == source_result.model_dump(mode="json")
