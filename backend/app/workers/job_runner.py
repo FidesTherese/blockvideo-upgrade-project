@@ -46,9 +46,25 @@ class JobRegistry:
     """
 
     def __init__(self) -> None:
-        """Create empty task and cancellation registries."""
+        """Create an accepting task and cancellation registry."""
         self._tasks: dict[int, asyncio.Task] = {}
         self._cancel_flags: dict[int, asyncio.Event] = {}
+        self._accepting = True
+
+    @property
+    def accepting(self) -> bool:
+        """Return whether this lifecycle currently accepts submissions."""
+        return self._accepting
+
+    def start(self) -> None:
+        """Open a fully drained registry for a new application lifespan."""
+        if self._tasks or self._cancel_flags:
+            raise RuntimeError("job registry cannot reopen before shutdown completes")
+        self._accepting = True
+
+    def close(self) -> None:
+        """Stop admission synchronously before dispatcher or task draining."""
+        self._accepting = False
 
     def submit(
         self,
@@ -71,6 +87,8 @@ class JobRegistry:
             private session, and removes registry entries.
 
         """
+        if not self._accepting:
+            raise RuntimeError("job registry is closing")
         existing = self._tasks.get(job_id)
         if existing is not None:
             return existing
@@ -140,7 +158,8 @@ class JobRegistry:
         return task
 
     async def shutdown(self) -> None:
-        """Cancel and await live tasks without changing durable job outcomes."""
+        """Close admission, then cancel and await every previously accepted task."""
+        self.close()
         tasks = tuple(self._tasks.values())
         for task in tasks:
             task.cancel()

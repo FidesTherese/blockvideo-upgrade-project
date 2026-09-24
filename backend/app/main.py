@@ -61,10 +61,12 @@ async def lifespan(app: FastAPI):
     )
     init_db()
     mark_interrupted_operation_jobs()
+    operation_dispatcher.job_registry.start()
     dispatcher = asyncio.create_task(run_operation_dispatcher())
     try:
         yield
     finally:
+        operation_dispatcher.job_registry.close()
         dispatcher.cancel()
         with suppress(asyncio.CancelledError):
             await dispatcher

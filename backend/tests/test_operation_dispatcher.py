@@ -69,6 +69,84 @@ def test_lifespan_recovers_committed_pending_job(temp_storage, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_shutdown_closes_admission_before_draining_accepted_tasks(temp_storage) -> None:
+    accepted = execute(adjustment(make_project(), "accepted-before-shutdown", generate=True))
+    rejected = execute(adjustment(make_project(), "rejected-after-shutdown", generate=True))
+    registry = JobRegistry()
+    work_started = asyncio.Event()
+    cancellation_started = asyncio.Event()
+    allow_cancellation = asyncio.Event()
+    rejected_factory_called = False
+
+    async def accepted_work(_cancel_check):
+        work_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_started.set()
+            await allow_cancellation.wait()
+            raise
+
+    async def rejected_work(_cancel_check):
+        nonlocal rejected_factory_called
+        rejected_factory_called = True
+
+    accepted_task = registry.submit(accepted.job_id, accepted_work)
+    await asyncio.wait_for(work_started.wait(), timeout=5)
+    shutdown_task = asyncio.create_task(registry.shutdown())
+    await asyncio.wait_for(cancellation_started.wait(), timeout=5)
+
+    rejected_task = None
+    try:
+        with pytest.raises(RuntimeError, match="closing"):
+            rejected_task = registry.submit(rejected.job_id, rejected_work)
+    finally:
+        allow_cancellation.set()
+        await asyncio.wait_for(shutdown_task, timeout=5)
+        if rejected_task is not None:
+            rejected_task.cancel()
+            await asyncio.gather(rejected_task, return_exceptions=True)
+            await registry.shutdown()
+
+    assert accepted_task.done()
+    assert not rejected_factory_called
+    assert registry._tasks == {}
+    assert registry._cancel_flags == {}
+    assert not registry.is_running(accepted.job_id)
+    assert not registry.is_running(rejected.job_id)
+
+
+def test_repeated_lifespans_reopen_registry_before_dispatcher(
+    temp_storage, monkeypatch
+) -> None:
+    from app import main as main_module
+
+    registry = JobRegistry()
+    dispatcher_start_states: list[bool] = []
+
+    async def controlled_dispatcher() -> None:
+        dispatcher_start_states.append(registry.accepting)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main_module, "init_db", lambda: None)
+    monkeypatch.setattr(main_module, "mark_interrupted_operation_jobs", lambda: 0)
+    monkeypatch.setattr(main_module, "run_operation_dispatcher", controlled_dispatcher)
+    monkeypatch.setattr(dispatcher, "job_registry", registry)
+    application = create_app()
+
+    async def run_lifespans() -> None:
+        for _ in range(2):
+            async with application.router.lifespan_context(application):
+                await asyncio.sleep(0)
+                assert registry.accepting
+            assert not registry.accepting
+
+    asyncio.run(run_lifespans())
+
+    assert dispatcher_start_states == [True, True]
+
+
+@pytest.mark.asyncio
 async def test_pending_cancellation_survives_empty_registry(temp_storage, monkeypatch) -> None:
     result = execute(adjustment(make_project(), generate=True))
     registry = JobRegistry()

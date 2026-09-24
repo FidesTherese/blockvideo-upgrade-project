@@ -113,7 +113,17 @@ guarded orphan-video replacement. The follow-up safety correction moves initial
 rename and orphan replacement under the publication writer transaction's complete
 eligibility recheck, removes identical-byte reference bypasses, requires exact
 revision/input equality, and makes lifespan shutdown explicitly cancel/await the
-process registry before exit. Task 3 remains unstarted by this correction.
+process registry before exit.
+
+- [x] **Step 6: Close the final Task 2 publication and shutdown races**
+
+Recheck supplied subtitle identity inside the publication writer transaction before
+rename and immediately before artifact construction. Mutation/deletion rejects with
+only the crash-contract same-job orphan permitted and no database/reference change.
+Close `JobRegistry` admission before shutdown snapshot/drain, reject post-close submit
+without task/cancellation/liveness state, and reopen the drained singleton before the
+dispatcher on every lifespan. Cover the post-rename subtitle boundary, concurrent
+shutdown/submit, and repeated lifespan entry. Task 3 remains unstarted.
 
 ### Task 3: D33 evidence and gate
 

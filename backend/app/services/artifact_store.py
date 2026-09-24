@@ -315,6 +315,12 @@ async def publish_artifact(
             key: video[key] for key in ("path", "size", "sha256")
         }:
             raise StaleGenerationInput("検証後に完成動画が変更されました")
+        if subtitle is not None:
+            try:
+                if file_identity(subtitle) != subtitle_identity:
+                    raise StaleGenerationInput("検証後に字幕ファイルが変更されました")
+            except (OSError, ValueError) as exc:
+                raise StaleGenerationInput("検証後に字幕ファイルが欠損しました") from exc
         candidate.replace(final)
         final_identity = file_identity(final)
         if any(final_identity[key] != video[key] for key in ("size", "sha256")):
@@ -329,15 +335,21 @@ async def publish_artifact(
             "metadata": [file_identity(path) for path in
                          (final.parent / "project.json", final.parent / "timeline.json") if path.exists()],
         }
-        # Metadata is also immutable and complete before its DB reference exists.
-        manifest_path = final.parent / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        if subtitle is not None:
+            try:
+                if file_identity(subtitle) != subtitle_identity:
+                    raise StaleGenerationInput("確定中に字幕ファイルが変更されました")
+            except (OSError, ValueError) as exc:
+                raise StaleGenerationInput("確定中に字幕ファイルが欠損しました") from exc
         artifact = GenerationArtifact(
             project_id=job.project_id, job_id=job.id, revision=job.input_revision,
             input_fingerprint=settled_fingerprint, video_path=video["path"],
             subtitle_path=subtitle_identity["path"] if subtitle_identity else None,
             manifest_json=manifest,
         )
+        # Metadata is also immutable and complete before its DB reference exists.
+        manifest_path = final.parent / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         db.add(artifact)
         db.flush()
         project.current_artifact_id = artifact.id

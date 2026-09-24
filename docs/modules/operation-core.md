@@ -2,17 +2,12 @@
 
 ## Purpose
 
-Provide one typed, state-aware execution boundary for normal UI/API and
-natural-language entry points. Units 01–10 add subtitle-size writes and status
-reads; D11 adds durable replay, revisions, relative adjustment and generation
-intent without retrieval or an LLM. D12–D15 adds dependency planning, input-bound
-video history, external-call recovery and independent control handlers. D31 adds
-a shared negative-intent veto before request construction and a fixed unexpected-
-error boundary. D32 makes dialogue supersession precedence, deletion lifecycle
-checks, and injectable startup dispatch explicit without changing the database-
-authoritative single-server model. D33 proves lifespan cancellation and resumed
-completion, including guarded recovery from an unreferenced rename-before-commit
-video.
+Provide one typed, state-aware execution boundary for UI/API and natural-language
+entry points. It owns durable replay, revisions, settings and generation intent,
+input-bound history, recovery, cancellation, negative-intent vetoes, and registered
+operation dispatch. D32–D33 retain the database-authoritative single-server model
+while hardening dialogue/deletion races, lifespan cancellation, resumed completion,
+and rename-before-commit recovery.
 
 ## Project Position
 
@@ -55,40 +50,33 @@ Direct external dependencies are existing Pydantic, SQLAlchemy, and FastAPI pack
 
 ## Control Flow
 
-Under `BEGIN IMMEDIATE`, the service looks up the request receipt first. A replay
-returns its saved response before recalculating relative values or checking current
-readiness. An ID conflict fails. A new request passes catalog/argument, target,
-readiness and revision checks, resolves any delta to an absolute value, and invokes
-the registered handler. Settings, revision, receipt and optional pending job commit
-together. A dispatcher delivers committed pending jobs to the existing worker.
-Provider work runs outside the transaction. Handler keys remain explicit
-callables. For natural-language continuations, the claim transaction checks the
-parent's durable successor before resolving project revision; once one successor
-commits, later contenders persist `dialogue_superseded` rather than a revision-
-dependent loser reason. For other natural-language requests, schema-valid model
-output remains an untrusted proposal. The shared D31 guard vetoes documented global
-or operation-family negative intent before `OperationRequest` construction; a veto
-is dismissed without a prepared request, confirmation token, receipt, or core
-effect.
+Under `BEGIN IMMEDIATE`, receipt replay precedes current-state checks; conflicting
+content fails. New requests pass catalog, argument, target, readiness, and revision
+checks before registered dispatch. Settings, revision, receipt, and optional pending
+job commit together; provider work stays outside the transaction. Continuation claims
+check the durable parent successor before revision, so later contenders resolve as
+`dialogue_superseded`. Model output remains an untrusted proposal, and the D31
+negative-intent guard dismisses vetoed requests before preparation or effects.
 
-Project deletion uses its own stricter guard: active work, an `unknown` job, or a
-remote-side-effect call still `in_flight`/`unknown` returns conflict. After explicit
-resolution, settings history, artifacts, resolved external-call rows, project and
-cascaded job rows are removed in one writer transaction; immutable receipts survive
-for exact replay. Process-local secrets are dropped only after commit, followed by
-best-effort filesystem cleanup. Startup dispatch may receive an internal
-`JobRegistry` for testing, but registry liveness is only an optimization: each
-worker's persisted pending-to-running claim decides whether work executes. Startup
-reconciliation returns only fingerprint-valid interrupted jobs to pending. FastAPI
-shutdown stops the dispatcher and then uses `JobRegistry.shutdown()` to cancel and
-await live tasks while preserving durable running checkpoints. Publication performs
-both an initial rename and orphan replacement only inside the artifact writer
-transaction after exact running/cancellation, unresolved-call, project, revision,
-job/settled fingerprint, and current-project/settled fingerprint checks. Accepted
-pipeline checkpoints update the job snapshot/fingerprint together. The exact same-job
-history destination is reference-checked even for identical bytes; artifact-path,
-same-job artifact, project output/current, and non-job-path cases block filesystem
-mutation before history/current pointers are written.
+Deletion rejects active/unknown work and unresolved remote effects. After explicit
+resolution it removes mutable rows transactionally, retains immutable receipts, then
+drops process-local secrets and performs best-effort file cleanup. Registry liveness
+is only an optimization: the persisted pending-to-running claim authorizes execution,
+and startup returns only fingerprint-valid interrupted jobs to pending. FastAPI
+startup reopens a fully drained `JobRegistry` before dispatcher creation. Shutdown
+closes registry admission, stops the dispatcher, and then cancels and awaits every
+previously accepted task while preserving durable running checkpoints. A closing
+registry rejects submission before creating a task, cancellation event, or liveness
+marker. Publication performs both an initial rename and orphan replacement only inside
+the artifact writer transaction after exact running/cancellation, unresolved-call,
+project, revision, job/settled fingerprint, and current-project/settled fingerprint
+checks. Accepted pipeline checkpoints update the job snapshot/fingerprint together.
+The exact same-job history destination is reference-checked even for identical bytes;
+artifact-path, same-job artifact, project output/current, and non-job-path cases block
+filesystem mutation before history/current pointers are written. Supplied subtitle
+identity is checked before rename and again immediately before artifact construction.
+A late subtitle mutation/deletion rolls back database publication and can leave only
+the permitted unreferenced same-job video orphan.
 
 ## Key Decisions and Limits
 
@@ -109,27 +97,21 @@ mutation before history/current pointers are written.
   only after database commit, with filesystem removal remaining best effort.
 - The dispatcher accepts a keyword-only injected registry, defaulting to the process
   singleton. A registry may submit a stale candidate, but the database job claim is
-  authoritative and permits one execution. `JobRegistry.shutdown()` cancels and
-  awaits all tracked tasks without marking completion; FastAPI calls it after stopping
-  the dispatcher, preserving durable running checkpoints for startup reconciliation.
+  authoritative and permits one execution. `JobRegistry.shutdown()` atomically closes
+  admission before snapshotting, then cancels and awaits all accepted tasks without
+  marking completion. FastAPI calls `start()` before each dispatcher lifespan and
+  shutdown after stopping the dispatcher, preserving durable running checkpoints and
+  supporting repeated application lifespans.
 - A rename-before-publication orphan is replaceable only by a newly verified candidate
   for the same exactly running job at its exact history path after all publication
   eligibility checks pass in the writer transaction. Reference checks run even for
   identical bytes. Referenced/current artifacts and prior successful history remain
   immutable; committed publication replays its existing artifact row.
-- Legacy absolute calls without request identity retain compatibility but no replay guarantee.
-- Unexpected API exceptions return a fixed `internal_error` payload with a
-  correlation ID. Logs retain the exception class, correlation ID, and matched route
-  template, not exception text, request/model bodies, prompts, raw request paths,
-  filesystem/private paths, or credentials.
-- Deterministic adversarial verification accepts only an omitted target or the
-  seeded project, then compares exact persisted content for settings/revision,
-  jobs/cancellation, receipts, artifacts, and the external-call journal in both All
-  Tools and stateful modes. Every case requires zero journal changes. A clean-process
-  import blocker proves the runner/registered handler graph does not import workers,
-  the media pipeline, or provider modules. These journal and dependency boundaries
-  do not prove arbitrary future unjournaled network code is absent. This safety
-  evidence is separate from real-model proposal quality.
+- Legacy absolute calls remain compatible without replay guarantees.
+- Unexpected errors return fixed `internal_error` responses; logs exclude exception
+  text, request/model bodies, prompts, private paths, and credentials.
+- D31 adversarial checks compare exact persisted effects with zero journal changes;
+  see its report for the bounded dependency and network claims.
 - See `docs/plan-c/work-unit-12-15.md` for migration, retention and restart behavior,
   and `docs/plan-c/work-report-31.md` for D31 evidence and limits.
 

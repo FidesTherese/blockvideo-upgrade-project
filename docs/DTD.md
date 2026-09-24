@@ -397,18 +397,28 @@ terminate an isolated app/worker only after an observed durable marker.
 project recovery surface.
 
 The shutdown case runs the actual FastAPI lifespan and polling dispatcher in a child
-process. `JobRegistry.shutdown() -> None` snapshots the registry's live tasks, calls
-`task.cancel()` on each, and awaits all of them with `asyncio.gather(...,
+process. `JobRegistry` owns an explicit `_accepting` lifecycle flag, exposed read-only
+as `accepting`. A new instance accepts by default for direct worker/test use.
+`start() -> None` reopens admission only when both task and cancellation registries
+are empty; otherwise it raises `RuntimeError`. `close() -> None` synchronously sets
+`_accepting = False`. `shutdown() -> None` invokes `close()` before taking its task
+snapshot, calls `task.cancel()` on every accepted task, and awaits all of them with `asyncio.gather(...,
 return_exceptions=True)`; it does not set cooperative cancellation flags or write a
-terminal outcome. `main.lifespan()` cancels/awaits the polling dispatcher first and
-then awaits the process singleton's `shutdown()` before returning from the lifespan
-context. A deterministic local generation callback observes and persists the worker's
-`running` claim, then remains active until registry shutdown cancellation. Fixed test
-markers prove `registry_shutdown_started`, callback `task_cancelled`, and
-`registry_shutdown_finished` all occur before `lifespan_exit`. Reopened state must be
-running before reconciliation, become pending on the first reconciliation, remain
-unchanged on the second, retain prior history, and contain no external-call row for
-that job.
+terminal outcome. `submit()` checks admission before duplicate lookup or creation and
+raises `RuntimeError` while closing, without creating a task, cancellation event, or
+liveness marker. Because submission and close/snapshot contain no await and run on the
+owning event loop, a concurrent submit either enters the snapshot or is rejected.
+`main.lifespan()` calls `start()` before creating the polling dispatcher, then on
+shutdown calls `close()` before cancelling/awaiting that dispatcher and finally awaits
+the process singleton's `shutdown()` before returning. A deterministic local generation callback observes
+and persists the worker's `running` claim, then remains active until registry shutdown
+cancellation. Fixed test markers prove `registry_shutdown_started`, callback
+`task_cancelled`, and `registry_shutdown_finished` all occur before `lifespan_exit`.
+A controlled test enters the same application lifespan twice and proves registry
+admission is reopened before dispatcher execution each time. Reopened durable state
+must be running before reconciliation, become pending on the first reconciliation,
+remain unchanged on the second, retain prior history, and contain no external-call
+row for that job.
 
 The resumed-completion case starts from a fingerprint-valid persisted checkpoint,
 reconciles it to pending, and submits it exactly once through a real `JobRegistry`.
@@ -439,11 +449,16 @@ fail-closed simplification. A `GenerationArtifact.video_path` reference, an arti
 already owned by the same job, a `Project.output_video_path` reference, or a project's
 current-artifact reference to that path blocks all rename/replacement and publication.
 There is no identical-byte shortcut. Only an exact unreferenced same-job history path
-may be created or replaced with the still-verified candidate, after which the final
-size/SHA-256 is checked before manifest/artifact/current-pointer/completion writes.
-A crash after rename but before commit can leave an orphan recoverable by the same
-rule; referenced/current files and prior successful history are never deleted or
-replaced.
+may be created or replaced with the still-verified candidate. When a subtitle is
+supplied, its initial path/size/SHA-256 identity is checked again inside the writer
+transaction before video rename and again immediately before `GenerationArtifact`
+construction. Missing or unequal subtitle identity raises `StaleGenerationInput`.
+After rename, the final video size/SHA-256 is checked before manifest/artifact/current-
+pointer/completion writes. A crash or subtitle rejection after rename but before
+commit can leave only that exact unreferenced same-job video orphan recoverable by the
+same rule; it creates no manifest or artifact row and leaves job/project/reference
+state unchanged. Referenced/current files and prior successful history are never
+deleted or replaced.
 
 No generic production failpoint registry is added. Environment variables and HTTP
 payloads cannot enable a failpoint. Unknown remote calls remain terminal for
@@ -1387,11 +1402,14 @@ independent review gates supply the recorded trust decisions.
 - **D32:** thread/session and spawned-process barriers; assert one winner and complete
   persisted invariants after reopening the DB.
 - **D33:** crash matrix at each durable boundary; full project recovery fields;
-  actual FastAPI lifespan/dispatcher shutdown cancellation; restart twice to prove
-  state stability; remote POST counter must remain one; valid-checkpoint
-  submit-once/completion through `JobRegistry`; invalid-checkpoint non-dispatch; and
-  rename-before-commit orphan replacement restricted to the exact unreferenced job
-  history path with referenced/current artifact protection and stable replay.
+  actual FastAPI lifespan/dispatcher shutdown cancellation; concurrent submit versus
+  close with no post-close task/liveness marker; repeated lifespan reopen before
+  dispatcher; restart twice to prove state stability; remote POST counter must remain
+  one; valid-checkpoint submit-once/completion through `JobRegistry`; invalid-
+  checkpoint non-dispatch; subtitle mutation/deletion at the post-rename artifact
+  boundary with transactional rollback; and rename-before-commit orphan replacement
+  restricted to the exact unreferenced job history path with referenced/current
+  artifact protection and stable replay.
 - **D34:** empty/current/upstream/D30/partial/newer/corrupt fixtures; scratch-metadata
   affinity equality for every existing known column and rejection of each affinity
   mismatch/name collision; preservation of unknown extra tables/columns; backup hash,

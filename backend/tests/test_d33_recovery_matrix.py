@@ -1452,6 +1452,68 @@ def test_publication_eligibility_failure_leaves_candidate_and_destination_unchan
     ] == []
 
 
+@pytest.mark.parametrize("change", ["mutate", "delete"])
+def test_subtitle_identity_change_at_artifact_boundary_rolls_back_publication(
+    temp_storage: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    project_id, prior_artifact_id = _seed_canonical_state()
+    prior_path = _materialize_prior_artifact(project_id, prior_artifact_id)
+    job_id = _new_running_job(project_id)
+    directory = project_dir(project_id) / "history" / f"job-{job_id:08d}"
+    candidate = directory / "video.pending.mp4"
+    final = directory / "video.mp4"
+    subtitle = directory / "subtitles.ass"
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate_bytes = b"subtitle-boundary-video"
+    candidate.write_bytes(candidate_bytes)
+    subtitle.write_bytes(b"verified-subtitles")
+    before = recovery_snapshot(project_id)
+
+    async def validate(path: Path) -> dict[str, object]:
+        return {
+            **artifact_store.file_identity(path),
+            "duration_ms": 1000,
+            "width": 320,
+            "height": 180,
+        }
+
+    monkeypatch.setattr(artifact_store, "validate_video", validate)
+    original_replace = Path.replace
+
+    def change_subtitle_after_rename(path: Path, target: Path) -> Path:
+        result = original_replace(path, target)
+        if path == candidate:
+            if change == "mutate":
+                subtitle.write_bytes(b"changed-after-initial-verification")
+            else:
+                subtitle.unlink()
+        return result
+
+    monkeypatch.setattr(Path, "replace", change_subtitle_after_rename)
+    with get_session_factory()() as db:
+        settled_inputs = db.get(GenerationJob, job_id).input_snapshot
+
+    with pytest.raises(StaleGenerationInput, match="字幕"):
+        asyncio.run(
+            artifact_store.publish_artifact(
+                job_id,
+                candidate,
+                subtitle,
+                settled_inputs=settled_inputs,
+                materials=[],
+                cancel_check=lambda: False,
+            )
+        )
+
+    assert not candidate.exists()
+    assert final.read_bytes() == candidate_bytes
+    assert not (directory / "manifest.json").exists()
+    assert recovery_snapshot(project_id) == before
+    assert prior_path.read_bytes() == b"prior-success"
+
+
 @pytest.mark.parametrize(
     "reference_kind",
     ["artifact_path", "same_job", "project_output", "project_current"],
