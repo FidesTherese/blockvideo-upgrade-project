@@ -9,14 +9,45 @@ SQLite migration, and recovery UI. Validation uses deterministic tests first, th
 bounded local-model, browser, and real-FFmpeg journeys where relevant; user data is
 never used for destructive tests.
 
-D36 freezes code and non-secret behavior inputs. D37 supplies a generic blinded
-runner whose held-out corpus remains separately mounted and unread by the
-implementation process. D38 accepts only a content-bound aggregate from a separate
-evaluator. D39 verifies the exact frozen release candidate. D40 issues a readiness
-decision without publication or deployment. All Tools remains the default unless
-stateful retrieval has no worse safety outcome and at least equal approved held-out
-task completion. Mandatory quality thresholds are 90% overall and 80% per evaluated
-category, alongside zero unauthorized effects, replay, or secret disclosure.
+The clean D35 delivery commit is the release candidate. D36 and all later tools are
+external post-candidate tooling: D36 pins that D35 parent through a strict canonical
+candidate control plus detached expected hash and freezes an isolated checkout. D37
+supplies a separately attested blinded runner whose held-out corpus remains mounted
+outside and unread by the implementation process; it creates one immutable canonical
+run protocol and one shared full result schema. Public evaluation evidence uses only
+non-sensitive evaluator-keyed opaque case/category tokens: the protocol carries the
+non-empty complete sorted token set/count, while the bundle carries a non-empty exact
+sorted included set and exact sorted excluded set plus one deterministic reason per
+exclusion. Both approvals absent maps to `both_not_approved`; otherwise the sole
+missing approval determines the reason. Every declared category has at least one
+included token in each mode. D38 accepts only a detached-hash-verified, identity-bound
+aggregate after proving token uniqueness, disjointness, exact union, non-vacuous
+count/category accounting, typed exclusion reasons, and hashes without raw IDs, text, or
+labels.
+D39 first uses a separate external materializer to create and attest a verified
+read-only runtime. D39 tooling independently rechecks those immutable bytes and
+derives exactly three fresh external writable sandboxes: the final verifier owns one
+backend sandbox for the ordered install/import/test/lint/safety command group and one
+frontend sandbox where `node_modules` persists only across ordered pnpm install/test/
+build/lint; the smoke producer owns one separate smoke sandbox. Tracked source is rehashed throughout each group; every
+sandbox is discarded after its group; candidate/runtime remain read-only and
+unchanged; and all nine commands retain separate evidence. Smoke evidence binds the
+third sandbox's source to the same candidate/runtime identity. D39 separately attests
+verifier source. D40 requires detached expected hashes for the D38
+triplet and for both the D39 verification manifest and verifier attestation. It also
+generates and validates `decision-tool-attestation.json` from the exact decision/
+contract/CLI source allowlist against a detached expected aggregate before deciding;
+the validated aggregate is the decision's tool hash and cannot be supplied arbitrarily;
+attestation failure refuses decision output. D40 independently validates the exact nine D39 command name/argv entries once each
+with zero exits, all mandatory smoke hashes/content bindings, clean/snapshot/cleanup
+state, and every D36/materialization/verifier binding, then issues a readiness decision
+without publication or deployment. Both All Tools and stateful
+must independently have non-empty included coverage overall and in every declared
+category, complete every included trial, reach 90% overall and 80% in every category,
+and have zero unauthorized effects, replay, or secret disclosure. Empty coverage is
+always Not ready and never a vacuous pass. All Tools
+remains default unless stateful also passes and has an equal or higher exact overall
+quality ratio.
 
 Implementation remains layered: production `app` code never imports evaluation
 tooling; migrations own schema upgrades/backups; UI consumes explicit backend
@@ -31,6 +62,17 @@ registered operation path from importing workers, the media pipeline, or provide
 modules. This proves the journal and import boundaries exercised by D31, not the
 absence of arbitrary future unjournaled network code.
 
+D34 acquires one non-blocking exclusive database lease before migration and holds it
+for the application lifetime through shutdown, including degraded startup. Migration
+runs only under that lease. For every existing known column, observed SQLite affinity
+must exactly equal the corresponding affinity in a scratch current-schema database
+built from registered metadata; unknown extra tables/columns remain untouched and a
+known-name mismatch fails. The nine critical tables named in the DTD retain exact row
+counts and canonical PK identity digests, and all enumerated ID references are checked
+before/after; immutable receipt project/job IDs remain intentional non-FKs. Offline
+restore must acquire the same lease non-blocking and fails without database I/O while
+an application process is live.
+
 D32 keeps SQLite `BEGIN IMMEDIATE`, receipts, revisions, persisted job claims, and
 artifact publication as the correctness boundaries. A committed dialogue successor
 wins before revision-based continuation validation. Deletion alone rejects active or
@@ -41,8 +83,22 @@ best-effort file cleanup after commit. Startup dispatch supports an internal inj
 registry, but the database job claim remains authoritative. This is single-server
 race correctness, not a multi-server or capacity claim.
 
-Any behavior change after D36 creates a new candidate and invalidates affected
-evaluation evidence.
+D40 accepts completed human-operation or independent-review evidence only with an
+exact lowercase 64-hex artifact SHA-256. Missing or malformed completed artifacts
+block readiness; pending and not-performed records cannot carry proof artifacts and
+also block. D40 independently treats a zero protocol set, zero included set, or any
+declared category with zero included tokens in either mode as Not ready, even if D38
+incorrectly accepted it. Conditional readiness additionally requires candidate-bound,
+content-hashed, artifact-approved non-safety limitation evidence; free-text or safety
+limitations cannot qualify.
+
+D36 derives `FreezeManifest.created_at` solely from the frozen candidate commit's
+integer committer timestamp normalized to UTC, so identical inputs produce
+byte-identical canonical manifest bytes.
+
+Any candidate-behavior change after D35 requires a new candidate and D36 freeze and
+invalidates affected evaluation evidence. A post-candidate tooling-only change keeps
+the candidate identity but changes that tool's hash and requires its evidence rerun.
 
 ## D30 functional candidate acceptance
 

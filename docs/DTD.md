@@ -17,10 +17,15 @@
 
 ### Technical scope and fixed decisions
 
-D31–D35 modify the production candidate. D36 freezes the resulting clean commit.
-D37 runs only through a separate evaluator against approved, separately mounted
-held-out material. D38 imports a non-sensitive aggregate. D39 verifies the exact
-frozen candidate. D40 emits a decision and never tags, publishes, or deploys.
+D31–D35 modify production behavior. The clean D35 delivery commit is the immutable
+release candidate. D36 is a later, external tooling commit: it pins that D35 parent
+through a strict canonical candidate-control file and detached expected SHA-256,
+then freezes an isolated detached checkout of the parent. D37–D40 tooling is also
+post-candidate and externally attested; none of it is candidate behavior. D37 runs
+only through a separate evaluator against approved, separately mounted held-out
+material. D38 imports a non-sensitive aggregate. D39 verifies the exact D35
+candidate from isolated temporary environments. D40 emits a decision and never
+tags, publishes, or deploys.
 
 The following choices resolve implementation ambiguities:
 
@@ -32,8 +37,13 @@ The following choices resolve implementation ambiguities:
    invariant cannot be exercised by dependency replacement or process termination.
    Public request data can never select a failpoint.
 3. D34 uses SQLite `PRAGMA user_version`; unversioned supported databases are
-   version 0 and the first explicit current schema is version 1. Python's `sqlite3`
-   backup API creates the pre-migration copy. No Alembic dependency is added.
+   version 0 and the first explicit current schema is version 1. Compatibility is
+   exact at SQLite-affinity level for every existing known column against a scratch
+   current-schema database built from registered metadata. Python's `sqlite3` backup
+   API creates the pre-migration copy. One non-blocking exclusive database lease is
+   acquired before migration and held for the full application lifespan. Offline
+   restore acquires the same lease and fails immediately while an app is live. No
+   Alembic dependency is added.
 4. Migration failure enters a degraded API state: `/api/health` and `/api/startup`
    remain readable, database-dependent endpoints return a fixed 503, and the job
    dispatcher does not start.
@@ -42,13 +52,36 @@ The following choices resolve implementation ambiguities:
    final-evaluation modes.
 6. Detailed held-out evidence remains in evaluator-controlled storage. “Sealed”
    means content-addressed and not imported into this repository; it does not imply
-   encryption. D38 requires an out-of-band expected SHA-256 for transfer-integrity
-   validation. Reviewer identity is recorded but not cryptographically proven.
+   encryption. Public protocol/result evidence identifies cases and categories only
+   with domain-separated evaluator-keyed HMAC-SHA-256 tokens; raw case IDs, text, and
+   labels never cross the evaluator boundary. D38 requires an out-of-band expected
+   SHA-256 for transfer-integrity validation. Reviewer identity is recorded but not
+   cryptographically proven.
 7. A source-request group owns one output directory; each case receives a fresh
    database/media child initialized from that case's declared state. Cases do not
    leak mutable state to sibling paraphrases.
-8. Human-operation and independent-review evidence use content-bound JSON records.
-   D40 treats absent records as blockers, not as negative results or inferred passes.
+8. Human-operation, independent-review, and accepted non-safety limitation evidence
+   use strict content-bound JSON records. D40 treats absent records as blockers, not
+   as negative results or inferred passes. Completed review evidence requires an
+   exact lowercase 64-hex artifact SHA-256; pending/not-performed evidence cannot
+   carry an artifact and always blocks.
+9. Candidate behavior fixes create a new D35 successor and restart D36. A
+   post-candidate tooling-only fix changes that tool's separate source hash and
+   reruns every evidence artifact produced by that tool without changing the
+   candidate identity.
+10. Final evaluation coverage is never vacuous. The D37 protocol has at least one
+    case token and one category token; the included set is non-empty; and every
+    protocol category has at least one included token in each mode. D37 fails before
+    publishing a result when this is false, D38 rejects it, and D40 independently
+    emits Not ready.
+11. When approval ledgers exclude a case, the reason is deterministic:
+    `both_not_approved` when both approvals are absent, otherwise
+    `human_not_approved` or `independent_not_approved` for the sole absent approval.
+12. D40 generates and validates a canonical decision-source attestation before
+    loading decision evidence. Its aggregate is computed from the exact allowlisted
+    decision, shared-contract, verification-contract, attestation-contract, and CLI
+    source files; `ReadinessDecision.decision_tool_sha256` is derived only from that
+    validated aggregate and is never accepted as a caller-provided value.
 
 Runtime remains Windows 11 compatible, Python `>=3.12`, Node `>=20`, local SQLite,
 and the existing single-server worker. No cloud call, new runtime dependency, or
@@ -68,18 +101,31 @@ flowchart LR
     Worker --> Journal[External-call journal]
     Worker --> Artifacts[Immutable artifacts]
 
-    Startup[Startup lifecycle] --> Migration[migrations]
+    Startup[Startup lifecycle] --> Lease[application-lifetime DB lease]
+    Lease --> Migration[migrations]
     Migration --> DB
+    Restore[offline restore] --> Lease
     Startup --> Status[startup_status]
     API --> Status
 
     Adv[evaluation.adversarial] --> Lang
-    Freeze[release_candidate.freeze] --> Manifest[Freeze manifest]
-    Blind[evaluation.blinded_runner] --> Lang
-    Blind --> Aggregate[Aggregate bundle]
-    Import[evaluation.result_import] --> Aggregate
-    Decision[evaluation.release_decision] --> Aggregate
-    Manifest --> Blind
+
+    Control[Detached candidate control + expected hash] --> Freeze[External D36 freezer]
+    Freeze --> Manifest[Freeze manifest: D35 parent]
+    Manifest --> Blind[External D37 evaluator]
+    Blind --> Host[External unlabeled trial host]
+    Host -->|subprocess only| Candidate[Detached D35 candidate]
+    Blind --> Protocol[Immutable run protocol.json]
+    Blind --> Aggregate[Shared result bundle]
+    Aggregate --> Import[External D38 importer]
+    Protocol --> Import
+    Import --> Accepted[D38 accepted triplet]
+    Manifest --> Materialize[External D39 runtime materializer]
+    Materialize --> Runtime[Read-only verified runtime + materialization evidence]
+    Runtime --> Verify[External D39 verifier]
+    Verify --> Verification[D39 verification + verifier attestation]
+    Accepted --> Decision[External D40 decision]
+    Verification --> Decision
     Manifest --> Decision
 ```
 
@@ -90,13 +136,17 @@ contracts/models <- services <- API/main
 interpretation <- language_operations <- API
 operations core <- language_operations
 DB/model metadata <- migrations <- main
-app public services <- evaluation and release scripts
-release_candidate <- release scripts
+D35 app public interfaces <- external evaluation trial-host subprocesses
+D36 contracts/fingerprints <- D36 freeze script
+D24 contracts + D36 unlabeled wire contracts <- D37 evaluator
+D37 shared result contracts <- D38 importer <- D40 decision
+D36 freeze + D39 verifier contracts <- D40 decision
 ```
 
 Prohibited directions:
 
-- `app` packages must not import `evaluation` or `release_candidate`.
+- `app` packages must not import `evaluation`; no D36–D40 tool is copied into or
+  imported by the detached D35 candidate.
 - `migrations` must not import API routes, operations, workers, evaluation, or UI.
 - model interpretation must not import handlers, DB models, or workers.
 - the browser must not decide retryability, migration safety, or remote-call status.
@@ -108,7 +158,7 @@ No new third-party package is selected. Direct in-scope dependencies are:
 
 | Dependency | Version/constraint | Symbols and role |
 |---|---|---|
-| Python standard library | Python 3.12.12 verified | `unicodedata.normalize`, `re`, `hashlib.sha256`, `json`, `sqlite3.connect`, `sqlite3.Connection.backup`, `os.open`, `os.replace`, `shutil.disk_usage`, `subprocess.run`, `pathlib.Path` |
+| Python standard library | Python 3.12.12 verified | `unicodedata.normalize`, `re`, `hashlib.sha256`, `json`, `sqlite3.connect`, `sqlite3.Connection.backup`, `os.open`, `os.close`, `os.unlink`, `os.replace`, `shutil.disk_usage`, `subprocess.run`, `pathlib.Path` |
 | SQLAlchemy | locked by `uv.lock`; project `>=2.0.36` | existing `Session`, `select`, `inspect`, `text`; ORM and writer transactions |
 | Pydantic | locked by `uv.lock`; project `>=2.9.0` | `BaseModel`, `ConfigDict`, `Field`, validators; strict manifests and API DTOs |
 | FastAPI | locked by `uv.lock`; project `>=0.115.0` | `APIRouter`, `Depends`, `HTTPException`; startup status transport |
@@ -117,7 +167,7 @@ No new third-party package is selected. Direct in-scope dependencies are:
 | TypeScript | project `^5.6.3` | exact frontend mirrors of backend enums |
 | Vitest/Testing Library | Vitest 2.1.9 verified | component and interaction tests |
 
-Official sources checked 2026-09-23:
+Official sources previously recorded as checked 2026-09-23:
 
 - Python `sqlite3.Connection.backup`: <https://docs.python.org/3/library/sqlite3.html#sqlite3.Connection.backup>
 - SQLite `PRAGMA user_version` and `PRAGMA integrity_check`:
@@ -127,9 +177,18 @@ Official sources checked 2026-09-23:
 - SQLAlchemy SQLite dialect/transaction behavior:
   <https://docs.sqlalchemy.org/en/20/dialects/sqlite.html>
 
+Additional authoritative contract reference added for this amendment; live network
+verification was not rerun in this documentation-only session:
+
+- SQLite declared-type affinity rules:
+  <https://www.sqlite.org/datatype3.html#determination_of_column_affinity>
+
 The backup connection is synchronous and owned/closed by the migration runner.
-Migration and application startup are single-threaded. Existing async model/provider
-clients retain their present ownership and deadlines.
+The application lifespan owns the database lease from pre-migration startup until
+all database users stop at shutdown. Migration and application startup are
+single-threaded. Offline restore owns a separate lease for only its stopped-app
+operation. Existing async model/provider clients retain their present ownership and
+deadlines.
 
 ### Intended repository structure
 
@@ -142,35 +201,45 @@ backend/app/
 │   ├── __init__.py
 │   ├── backup.py                      # consistent verified SQLite backup
 │   ├── contracts.py                   # MigrationResult/Error
-│   ├── runner.py                      # lock, classify, migrate, verify
+│   ├── lease.py                       # non-blocking application-lifetime DB lease
+│   ├── runner.py                      # classify, migrate, verify under caller lease
 │   └── schema.py                      # v0 -> v1 additive schema operation
 ├── language_operations/
 │   └── intent_guard.py                # deterministic negative-control veto
 ├── services/
 │   └── job_liveness.py                # worker-free process-local liveness view
-├── api/
-│   └── routes_startup.py              # GET /api/startup
-└── release_candidate/
-    ├── __init__.py
-    ├── contracts.py                   # freeze/verification manifests
-    ├── fingerprints.py                # canonical hashes
-    ├── freeze.py                      # clean-tree candidate freeze
-    └── verification.py                # D39 evidence checks
+└── api/
+    └── routes_startup.py              # GET /api/startup
 backend/evaluation/
 ├── adversarial.py
+├── final_protocol.json                # D36 candidate policy template only
+├── unlabeled_contracts.py             # strict label-free host wire model
+├── tool_attestation.py                # D36-owned, reused external-tool manifests
+├── release_candidate/
+│   ├── __init__.py
+│   ├── contracts.py                   # candidate control/freeze contracts
+│   ├── fingerprints.py                # canonical hashes
+│   └── freeze.py                      # clean detached-candidate freeze
+├── scripts/
+│   ├── evaluation_trial_host.py       # external one-case candidate host
+│   ├── freeze_candidate.py            # D36 external CLI
+│   ├── materialize_candidate_runtime.py # D39 materialize/cleanup CLI
+│   ├── d39_smoke.py                   # external candidate smoke orchestration
+│   ├── verify_release_candidate.py    # D39 final external verifier CLI
+│   └── attest_release_decision.py     # D40 source-attestation generate/validate CLI
 ├── blinded_contracts.py
 ├── blinded_runner.py
 ├── blinded_scoring.py
 ├── sealed_evidence.py
-├── result_contracts.py
+├── result_contracts.py                # one D37-owned D37–D40 bundle schema
 ├── result_import.py
+├── runtime_materialization.py         # read-only runtime copy/evidence/cleanup
+├── release_verification.py
 └── release_decision.py
 backend/scripts/
 ├── run_adversarial.py
-├── freeze_candidate.py
 ├── run_blinded_evaluation.py
 ├── import_evaluation_result.py
-├── verify_release_candidate.py
 └── decide_release_readiness.py
 frontend/src/components/
 ├── RecoveryStatus.tsx
@@ -339,12 +408,55 @@ identity before changing current-artifact pointers.
   columns are present.
 - Values greater than 1 are rejected as `schema_too_new`.
 
-Version 0 classification is structural. Known project/block/job tables may be
-present; unknown extra tables are preserved. If a known column has an incompatible
-type/name collision, migration fails `unsupported_legacy_schema`. Missing tables
-are created from current metadata. Missing columns are added only when nullable or
-when a server default can preserve existing rows. No column is dropped, renamed, or
-retyped.
+Version 0 classification is structural. The critical known tables are exactly
+`projects`, `blocks`, `generation_jobs`, `operation_requests`, `external_calls`,
+`generation_artifacts`, `settings_revisions`, `language_requests`, and
+`language_turns`. Unknown extra tables and unknown extra columns are preserved.
+Before accepting any non-empty supported v0 or v1 database, registered
+`Base.metadata` creates a scratch current-schema SQLite database. `PRAGMA table_info` is read from both files.
+For every existing column whose table and column name are known to current metadata,
+the observed SQLite affinity must equal the scratch column's affinity. Affinity is
+derived from the declared type using SQLite's ordered rules: `INT` -> `INTEGER`;
+`CHAR`/`CLOB`/`TEXT` -> `TEXT`; `BLOB` or an empty declaration -> `BLOB`;
+`REAL`/`FLOA`/`DOUB` -> `REAL`; otherwise `NUMERIC`. A known-column name collision
+with any unequal affinity fails `unsupported_legacy_schema`; aliases, coercible
+runtime values, and SQLAlchemy type-family similarity do not relax the comparison.
+Missing tables are created from current metadata. Missing columns are added only
+when nullable or when a server default can preserve existing rows. No column is
+dropped, renamed, or retyped.
+
+Before backup or DDL, the runner captures for every critical table that exists:
+(1) exact row count and (2) a canonical primary-key identity digest. The digest is
+SHA-256 over compact, sorted-key, UTF-8 JSON containing the table name, ordered PK
+column names from the scratch schema, and every PK tuple encoded as typed values
+(`integer` with canonical decimal text or `text` with the exact string), sorted by
+the canonical encoded tuple bytes. There are no locale-dependent conversions. After
+migration, every pre-existing critical table must have the same count and digest;
+newly created critical tables must be empty. Backup verification computes and
+compares the same values against the source snapshot. These are identity-preservation
+checks, not full-row content hashes.
+
+The runner also executes `PRAGMA foreign_key_check` and explicit ID-reference checks
+before backup and after migration. Required ownership references are:
+`blocks.project_id -> projects.id`, `generation_jobs.project_id -> projects.id`,
+non-null `generation_jobs.parent_job_id -> generation_jobs.id` with equal project
+ownership, `external_calls.job_id -> generation_jobs.id`,
+`generation_artifacts.project_id -> projects.id`, non-null
+`generation_artifacts.job_id -> generation_jobs.id` with equal project ownership,
+`settings_revisions.project_id -> projects.id`, non-null
+`settings_revisions.restored_from_revision` to the same project's revision,
+non-null `projects.current_artifact_id -> generation_artifacts.id` with equal project
+ownership, `language_turns.request_id -> language_requests.request_id`, and non-null
+`language_turns.parent_request_id`/`successor_request_id` to existing request and
+turn IDs with reciprocal predecessor/successor consistency. The
+`operation_requests.project_id` and nullable `operation_requests.job_id` columns are
+intentional non-FKs: immutable receipts survive project/job deletion and reserve
+those IDs against reuse, so existence is not required; when a referenced job still exists, its project ID
+must equal the receipt project ID. `language_requests.project_id` and
+`core_request_id` are likewise durable correlation references: when the target or
+receipt exists its ID and ownership must agree, but absence is valid for deleted
+projects or requests that never committed an operation. No relationship is validated
+by row order, display text, title, or other mutable content.
 
 #### Migration interfaces
 
@@ -359,23 +471,42 @@ class MigrationResult:
 
 class MigrationError(RuntimeError):
     reason_code: Literal[
-        "migration_locked", "schema_too_new", "unsupported_database",
+        "database_lease_unavailable", "schema_too_new", "unsupported_database",
         "unsupported_legacy_schema", "backup_failed", "backup_invalid",
         "migration_failed", "migration_verification_failed"
     ]
 
-def migrate_database(database_url: str, metadata: MetaData) -> MigrationResult: ...
+class DatabaseLease:
+    database_path: Path
+    lock_path: Path
+    def assert_held_for(self, database_url: str) -> None: ...
+    def release(self) -> None: ...
+
+def acquire_database_lease(database_url: str) -> DatabaseLease: ...
+
+def migrate_database(
+    database_url: str, metadata: MetaData, *, lease: DatabaseLease
+) -> MigrationResult: ...
+
+def restore_database_backup(
+    database_url: str, backup_path: Path, expected_sha256: str
+) -> None: ...
 ```
 
 Only file-backed `sqlite:///` URLs are migrated. In-memory test databases are
 created directly and assigned version 1. Any other dialect fails
 `unsupported_database`; D34 does not claim cross-database support.
 
-A sibling `<database>.migration.lock` is acquired with `os.open(...,
-O_CREAT|O_EXCL|O_WRONLY)`. The file contains PID and UTC time but those values are
-never returned through HTTP. A stale lock is not removed automatically; explicit
-operator removal after confirming no process is running is safer than concurrent
-migration.
+`acquire_database_lease()` resolves the configured file-backed database and attempts
+one sibling `<database>.migration.lock` creation with `os.open(...,
+O_CREAT|O_EXCL|O_WRONLY)`. Acquisition never polls, sleeps, retries, or removes an
+existing file; contention raises `database_lease_unavailable` before the database is
+opened. The file contains PID and UTC time but those values are never returned
+through HTTP. The returned `DatabaseLease` retains ownership until `release()`;
+release is idempotent, closes the descriptor, removes only its owned lease file, and
+occurs after all database users stop. A stale lease is not removed automatically;
+explicit operator removal is allowed only after confirming no application or restore
+process is running.
 
 For a non-empty version-0 DB, free space must exceed database size plus 16 MiB.
 `sqlite3.Connection.backup()` writes to a temporary sibling in
@@ -384,15 +515,24 @@ source table row counts must match. The file is flushed, atomically renamed, and
 SHA-256 recorded. The migration then uses one SQLite transaction for additive DDL
 and `PRAGMA user_version=1`. Post-verification checks integrity, required tables and
 columns, preserved pre-migration row counts, and foreign-key violations. Failure
-rolls back where SQLite permits and retains the verified backup. Operational
-rollback copies the selected verified backup to a new temporary file, verifies its
-hash/integrity, then atomically replaces the stopped application's DB; reverse SQL
-is prohibited.
+rolls back where SQLite permits and retains the verified backup. Every migration
+entry point requires a live caller-owned `DatabaseLease` bound to the same canonical
+database path and rejects a missing, released, or mismatched lease before database
+I/O; migration never releases the application lease.
+
+Operational rollback is offline only. `restore_database_backup()` first acquires the
+same database lease non-blocking, then copies the selected verified backup to a new
+temporary file, verifies its expected hash/integrity, atomically replaces the target,
+and releases the lease in `finally`. If an application (including degraded startup)
+is live, restore fails `database_lease_unavailable` before reading the backup or
+opening/replacing the target. Reverse SQL is prohibited.
 
 `db.init_db()` becomes registration plus `Base.metadata.create_all()` only for a
 migration-approved/current database; reflective mutation moves to
-`migrations/schema.py`. `main.lifespan()` calls migration before `init_db()` and
-before interrupted-job recovery.
+`migrations/schema.py`. `main.lifespan()` registers models, acquires the lease, calls
+migration before `init_db()` and interrupted-job recovery, retains the lease while
+ready or degraded, stops dispatcher/database users at shutdown, and releases the
+lease as its final database-lifecycle action.
 
 #### Degraded startup contract
 
@@ -438,12 +578,21 @@ the user to the documented backup/restart procedure. `GenerationHistory` uses th
 new fields for labels and control visibility. All buttons remain native buttons,
 status text uses `role="status"` or `role="alert"`, and focus order follows DOM order.
 
-### D36 freeze manifest design
+### D36 frozen D35 candidate and external trial boundary
 
-`release_candidate/contracts.py` defines frozen Pydantic models with
-`extra="forbid"`:
+The candidate is exactly the clean `[DONE] Mission 35 Add recovery-oriented
+operational UI` commit. D36 tooling is committed later and freezes an isolated,
+detached checkout of that D35 parent. Before any D36 output, the operator supplies a
+canonical `CandidateControl` plus its expected SHA-256 through a separate channel:
 
 ```python
+class CandidateControl(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal[1]
+    git_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    git_commit_subject: Literal["[DONE] Mission 35 Add recovery-oriented operational UI"]
+    git_tree_clean: Literal[True]
+
 class FileFingerprint(BaseModel):
     path: str
     sha256: str
@@ -454,6 +603,7 @@ class FreezeManifest(BaseModel):
     candidate_id: str
     git_commit: str
     git_tree_clean: Literal[True]
+    candidate_control_sha256: str
     created_at: str
     runtime: dict[str, str]
     schema_version_number: int
@@ -462,133 +612,585 @@ class FreezeManifest(BaseModel):
     aggregate_sha256: str
 ```
 
-The allowlist includes backend/frontend manifests and lockfiles, `app`, `evaluation`,
-`scripts`, frontend `src`, operation definitions/search scope, retrieval profiles,
-DTD/specification/work-unit contracts, and test commands. It excludes `.env`, DBs,
-media, model weights, node_modules, caches, and held-out material. External model
-weights are represented by the configured profile's recorded fingerprint. Paths are
-repository-relative POSIX strings sorted lexically. Canonical JSON uses UTF-8,
-`sort_keys=True`, compact separators, and `allow_nan=False`.
+`evaluation/release_candidate/freeze.py` reads bounded control bytes once, validates
+the detached lowercase 64-hex digest before parsing, requires byte-for-byte canonical
+JSON and the exact fields above, and then matches commit, subject, and cleanliness to
+the detached candidate. `FreezeManifest.created_at` is not wall-clock time: it is the
+candidate commit's integer committer timestamp (`git show -s --format=%ct`) rendered
+in UTC exactly as `YYYY-MM-DDTHH:MM:SSZ`. Git timestamps are second precision, so no
+fraction is emitted. The freezer rechecks commit and cleanliness immediately before
+atomic publication. Given identical candidate-control bytes, candidate bytes,
+allowlisted inputs, and runtime/version strings, canonical manifest bytes are
+byte-identical; generation time, host locale, timezone, temp paths, and directory
+enumeration order cannot affect them. The fingerprint allowlist contains D35 behavior and its manifests,
+lockfiles, frontend source, profiles, tests, and design contracts as they existed in
+D35; it explicitly excludes all later D36–D40 tooling plus `.env`, databases, media,
+weights, caches, `node_modules`, and held-out material. Paths are lexical relative
+POSIX paths. `candidate_id` is
+`aggregate_sha256[:16] + "-" + git_commit[:12]`. D36 also creates the shared strict `evaluation/tool_attestation.py` contract. A
+separate canonical D36 source attestation identifies the post-candidate
+freezer/protocol/unlabeled-contract/host allowlist and never replaces
+`FreezeManifest.git_commit` or `aggregate_sha256`; D37–D40 reuse the attestation
+model and canonical hashing unchanged.
 
-`freeze_candidate` runs `git status --porcelain` and `git rev-parse HEAD`; dirty
-behavior inputs fail. It writes only under ignored `release-evidence/<candidate-id>`
-so manifest creation does not dirty the tree. `candidate_id` is the first 16 hex
-characters of the aggregate SHA-256 plus the commit's first 12 characters.
+`evaluation/final_protocol.json` is the canonical D36 policy template only. The
+external `evaluation_trial_host` accepts exactly one strict independent wire object:
 
-### D37 blinded runner and scoring design
+```python
+class UnlabeledTrialCase(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal[1]
+    case_id: str
+    group_id: str
+    category: str
+    split: Literal["held_out"]
+    event: UnlabeledEvent
+    initial: UnlabeledInitialState
+    case_sha256: str
+```
 
-`blinded_contracts.py` defines `EvaluationProtocol` version 1 with modes exactly
-`("all_tools", "stateful")`, per-call 180-second deadline, maximum four model calls,
-source-group isolation, approval/corpus/freeze hashes, and complete case IDs. It
-reuses D24 `Case`, `ReviewLedger`, `eligibility`, and case digest contracts without
-changing labels.
+Neither this model nor any nested model may inherit from, import, embed, deserialize
+through, or expose D24's label-bearing `Case`; no field graph may contain `expected`,
+accepted operations/answers, scoring labels, review state, or generic extras. D37
+projects each approved `Case` through an explicit allowlist before serialization.
+The host rejects label/review/scoring fields, multiple cases, wrong mode/index
+combinations, or non-empty output before candidate invocation. It executes D35
+public/application interfaces only through a candidate-rooted subprocess; all case
+storage and observations remain external. Its redacted observation contains effects,
+call/failure classes, replay/confirmation observations, and hashes, never request
+text, model bodies, labels, expected values, or private paths.
 
-`blinded_runner.py` validates the freeze first, loads human and independent ledgers,
-selects only doubly approved held-out cases, groups by `group_id`, and creates
-`<output>/groups/<group-id>/<case-id>/<mode>/`. Each case/mode gets a fresh fixture
-from its declared initial state. Execution order is deterministic: sorted group,
-sorted case, then modes alternating first position by case index to reduce fixed
-order bias. Both modes use the same adapter instance configuration and limits.
+### D37 canonical protocol artifact and shared full result bundle
 
-`blinded_scoring.py` extends submit scoring to execute the declared event and checks:
-interpretation class, accepted operation alternatives, question fields, settings,
-revision, full settings history, jobs, cancellation state, receipts, artifacts,
-replay, and confirmation behavior. `task_complete` is true only if every required
-phase and effect check passes. `unauthorized_effect` is true when any setting,
-revision, job, cancellation, receipt effect, or artifact publication occurs beyond
-the expected contract. Safety counts never treat refusal as task completion for an
-unambiguous executable request.
+`EvaluationProtocol` is strict version 1. It binds `candidate_id`, exact modes
+`("all_tools", "stateful")`, 180 seconds per call, at most four model calls,
+`fresh_case_state_under_source_group`, corpus hash, separate human and independent
+approval hashes, D36 freeze hash, D36 candidate trial-tool hash, D37 evaluator/runner
+tool hash, model-configuration hash, stateful-index hash, and only opaque case/category
+identities. The evaluator owns a secret corpus-token key that never appears in a CLI,
+manifest, protocol, bundle, log, source tree, or repository fixture. The key file contains exactly 32 raw bytes and is read once with a 33-byte bounded
+read; shorter or longer files fail. For each validated ASCII D24 case ID the evaluator
+computes lowercase 64-hex
+`HMAC-SHA256(key, b"blockvideo-case-v1\0" + utf8(case_id))`. Each case's private
+category ID is exactly its first validated non-empty D24 `tags` entry; category tokens
+use the separate domain
+`b"blockvideo-category-v1\0" + utf8(category_id)`. The canonical
+protocol contains `case_count`, the complete lexicographically sorted unique
+`case_tokens`, and `case_categories` sorted by `(case_token, category_token)`, with
+exactly one binding per case token. `case_count`, `case_tokens`, `category_count`,
+and `category_tokens` are all non-zero/non-empty; every declared category token is
+bound to at least one case. It contains the sorted unique category-token set/count,
+but contains no raw case ID, request text, expected value, category name, review
+label, or approval decision. A zero-case or zero-category corpus fails D37 protocol
+creation before any trial and can never produce a passing bundle.
 
-After every trial, `partial-result.json` is atomically rewritten with started,
-completed, failed, and remaining IDs. A resumed runner refuses a different freeze,
-corpus, protocol, or mode configuration and never overwrites a completed record.
-Detailed records stay in evaluator storage. `sealed_evidence.py` writes a sorted file
-manifest and SHA-256 root. The exported aggregate contains no text, labels, model
-bodies, file paths, or per-case expected values.
+```python
+OpaqueToken = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
-### D38 result import contract
+class CaseCategoryBinding(BaseModel):
+    case_token: OpaqueToken
+    category_token: OpaqueToken
 
-`result_contracts.py` defines:
+def opaque_case_token(key: bytes, case_id: str) -> OpaqueToken: ...
+def opaque_category_token(key: bytes, category_id: str) -> OpaqueToken: ...
+
+class EvaluationProtocol(BaseModel):
+    schema_version: Literal[1]
+    candidate_id: str
+    modes: tuple[Literal["all_tools"], Literal["stateful"]]
+    per_call_deadline_seconds: Literal[180]
+    maximum_model_calls: Literal[4]
+    isolation: Literal["fresh_case_state_under_source_group"]
+    corpus_sha256: str
+    human_approval_sha256: str
+    independent_approval_sha256: str
+    freeze_sha256: str
+    d36_trial_tool_sha256: str
+    d37_evaluator_tool_sha256: str
+    model_configuration_sha256: str
+    stateful_index_sha256: str
+    category_count: Annotated[int, Field(gt=0)]
+    category_tokens: Annotated[tuple[OpaqueToken, ...], Field(min_length=1)]
+    case_count: Annotated[int, Field(gt=0)]
+    case_tokens: Annotated[tuple[OpaqueToken, ...], Field(min_length=1)]
+    case_categories: tuple[CaseCategoryBinding, ...]
+```
+
+Each run exclusively creates one immutable canonical `<run-output>/protocol.json`
+before its first trial. The SHA-256 of those exact bytes is `protocol_sha256`.
+Resume requires the same existing bytes. Mutation, replacement, regeneration, or use
+of D36 `final_protocol.json` as the result protocol fails closed. D38 validates this
+run artifact; D40 consumes its identity only through D38-accepted evidence.
+
+`evaluation/result_contracts.py` is owned by D37 and is the only D37–D40 aggregate
+schema. Every model is frozen/strict with `extra="forbid"`; D38 and D40 import these
+models unchanged and may not redeclare, subclass, normalize, infer omissions, or
+create a reduced schema:
 
 ```python
 class CategoryResult(BaseModel):
-    category: str
-    included: int
+    category_token: OpaqueToken
+    included: Annotated[int, Field(gt=0)]
     completed: int
     task_complete: int
     unauthorized_effects: int
+    unauthorized_replays: int
+    secret_disclosures: int
 
 class ModeResult(BaseModel):
     mode: Literal["all_tools", "stateful"]
-    included: int
+    included: Annotated[int, Field(gt=0)]
     completed: int
     task_complete: int
     unauthorized_effects: int
+    unauthorized_replays: int
+    secret_disclosures: int
     transport_failures: int
     deadline_failures: int
-    categories: list[CategoryResult]
+    categories: tuple[CategoryResult, ...]
+
+class ExcludedCaseToken(BaseModel):
+    case_token: OpaqueToken
+    reason: Literal[
+        "both_not_approved",
+        "human_not_approved",
+        "independent_not_approved",
+    ]
 
 class EvaluationResultBundle(BaseModel):
     schema_version: Literal[1]
     candidate_id: str
     freeze_sha256: str
     corpus_sha256: str
-    approval_sha256: str
+    human_approval_sha256: str
+    independent_approval_sha256: str
     protocol_sha256: str
-    included_count: int
-    excluded_count: int
+    d36_trial_tool_sha256: str
+    d37_evaluator_tool_sha256: str
+    protocol_case_count: Annotated[int, Field(gt=0)]
+    included_count: Annotated[int, Field(gt=0)]
+    excluded_count: Annotated[int, Field(ge=0)]
+    included_case_tokens: Annotated[tuple[OpaqueToken, ...], Field(min_length=1)]
+    excluded_cases: tuple[ExcludedCaseToken, ...]
     evaluator_role: Literal["independent_evaluator"]
     evaluator_name: str
     executed_at: str
     sealed_evidence_sha256: str
-    modes: list[ModeResult]
+    modes: tuple[ModeResult, ModeResult]
 ```
 
-Import requires `--expected-sha256` supplied separately from the bundle. Validation
-checks canonical bundle hash, exact candidate/freeze/protocol hashes, one result per
-mode, identical included counts, category sums, completed+failure accounting,
-nonnegative bounded counts, and zero omitted trials. It writes canonical accepted
-bundle and validation JSON under the candidate evidence directory. It never opens
-the sealed detailed evidence.
+The evaluator name is explicit, non-empty, and bounded; `executed_at` is canonical
+UTC evidence time. `included_case_tokens` is unique and lexicographically sorted.
+`excluded_cases` is unique and sorted by `case_token`; each item carries exactly one
+approval reason. Reason selection is total and deterministic: both approvals absent
+maps to `both_not_approved`; only human absent maps to `human_not_approved`; only
+independent absent maps to `independent_not_approved`; a doubly approved case is
+included and has no exclusion entry. Included and excluded token sets are disjoint,
+their exact union equals the protocol's complete token set, their lengths equal the
+declared counts, and `protocol_case_count == included_count + excluded_count ==
+protocol.case_count`. `included_count >= 1` and `included_case_tokens` is non-empty.
+For every opaque category token, included/excluded counts are derived from the
+protocol bindings; the derived included count is at least one and each mode's
+category `included` value must equal it and therefore be at least one. A category
+whose cases are all excluded invalidates the D37 run rather than becoming a vacuous
+category pass. D38 derives the reason-by-category exclusion matrix directly from the
+protocol bindings and excluded entries; its row/category and reason totals must each
+sum exactly to `excluded_count`. Each mode uses the protocol's exact non-empty sorted
+category-token set/order and `included_count`; category totals equal mode totals;
+`task_complete <= completed <= included`; and
+`completed + transport_failures + deadline_failures == included`. No failed,
+timed-out, or omitted trial becomes an exclusion. The bundle contains no raw case
+IDs, request text, expected values, category names, or labels. Scoring covers declared events,
+full persisted effects, receipts/artifacts, replay, confirmation, and disclosure.
+Unexpected mutation, replay, and disclosure are separately counted overall and by
+category. Detailed records remain sealed in evaluator storage.
 
-### D39 verification design
+D36 candidate trial-tool, D37 evaluator/runner, D38 importer, D39 verifier, and D40
+decision sources each have separate canonical `ToolAttestation.aggregate_sha256`
+values. They are never combined with each other, the approvals, or the candidate
+fingerprint.
 
-`release_candidate.verification` executes an explicit command allowlist and records
-command, exit code, start/end UTC, and SHA-256 of bounded stdout/stderr files. It
-verifies the checkout commit/cleanliness against D36 before and after checks. Required
-commands are full backend pytest, Ruff, frontend test/build/lint, D31–D35 focused
-suites, clean temporary installation/import, legacy migration/backup/restore smoke,
-and both-mode demo startup. Browser and FFmpeg evidence is referenced by hash from a
-bounded manual/smoke manifest; synthetic providers are mandatory. Secret scanning
-checks tracked files and candidate evidence for known environment key names and
-private absolute path prefixes without recording matched values.
+### D38 validation and import bindings
 
-Any behavior change after D36 invalidates verification. The script does not amend,
-commit, tag, publish, or deploy.
+The importer first validates the raw result bytes against the separately supplied
+`--expected-sha256`, then parses only D37's shared `EvaluationResultBundle`. It reads
+the supplied D37 `protocol.json` as bounded raw canonical bytes and requires its hash
+to equal `bundle.protocol_sha256`. It cross-binds protocol, bundle, freeze, and tool attestations for candidate, corpus,
+separate human/independent approvals, D36 freeze, D36 trial tool, D37 evaluator tool,
+model configuration, stateful index, opaque categories, and the complete case-token
+set. It rejects duplicate tokens, unsorted arrays, a token in both sets, any missing or
+extra token, zero protocol/included/category coverage, a category with no included
+token in either mode, count mismatch, category-binding mismatch, exclusion
+reason/count mismatch, and any raw ID/text/label field. It recomputes exact
+union and per-category accounting from protocol tokens
+rather than trusting aggregate counts. D36 `final_protocol.json`, equivalent regenerated policy, a
+protocol outside the run output, non-canonical bytes, and symlinks are rejected.
 
-### D40 decision design
+```python
+class ImportValidation(BaseModel):
+    schema_version: Literal[1]
+    status: Literal["accepted"]
+    candidate_id: str
+    source_bundle_sha256: str
+    accepted_bundle_sha256: str
+    corpus_sha256: str
+    human_approval_sha256: str
+    independent_approval_sha256: str
+    protocol_sha256: str
+    freeze_sha256: str
+    d36_trial_tool_sha256: str
+    d37_evaluator_tool_sha256: str
+    d38_import_tool_sha256: str
+    checks: dict[str, Literal[True]]
+```
 
-`release_decision.py` consumes the D36 manifest, D38 accepted bundle, D39
-verification manifest, and two `ReviewEvidence` records:
+`checks` has exactly these keys, all `true`, with no extras:
+`bundle_detached_sha256`, `bundle_canonical`, `protocol_canonical`,
+`protocol_sha256`, `candidate_binding`, `corpus_binding`, `approval_bindings`,
+`freeze_binding`, `tool_bindings`, `token_syntax`, `token_unique_sorted`,
+`token_disjoint`, `token_exact_union`, `token_counts`, `nonempty_coverage`,
+`exclusion_reasons`, `category_accounting`, `mode_accounting`, and
+`sealed_evidence_hash_syntax`.
+
+The importer revalidates all accounting invariants above, evaluator identity/time,
+and exact two-mode/category symmetry without normalization. It atomically writes the
+canonical shared-schema `accepted-result.json`, `validation.json`, and a separate
+`d38-tool-attestation.json`. `validation.accepted_bundle_sha256` hashes the exact
+accepted bytes; `validation.d38_import_tool_sha256` equals the importer attestation's
+aggregate hash. It never opens, enumerates, or reconstructs sealed detailed evidence.
+
+### D39 external exact-candidate verification
+
+Materialization is a separate pre-smoke operation, not an internal side effect of the
+final verifier:
+
+```python
+def materialize_candidate_runtime(
+    *, candidate_root: Path, freeze_manifest_path: Path,
+    work_root: Path, output_path: Path,
+) -> RuntimeMaterialization: ...
+
+def cleanup_candidate_runtime(
+    *, runtime_root: Path, work_root: Path, materialization_path: Path,
+    expected_materialization_sha256: str,
+) -> None: ...
+```
+
+`python -m evaluation.scripts.materialize_candidate_runtime` verifies the D36 raw
+manifest, detached D35 commit, candidate fingerprints, clean status, and
+tracked-plus-ignored snapshot before copying. It creates a new non-symlink runtime
+under the exact path `<work_root>/runtime-<runtime_instance_id>`, copies only verified
+tracked candidate files, rejects special files
+and escaping links, recomputes every file hash/size and the freeze aggregate, records
+canonical `runtime-materialization.json`, then clears write bits on every regular
+file (`stat.S_IREAD`) and leaves directories read/execute-only
+(`stat.S_IREAD | stat.S_IEXEC`); inability to apply or verify those modes fails and
+cleans the partial runtime. On Windows it verifies that `Path.stat().st_mode & stat.S_IWRITE == 0` for every
+regular file after `os.chmod()`. No command
+runs directly in this tree, so build tools cannot require source-root writes. The record binds candidate ID, D35 commit, exact freeze hash, candidate
+snapshot hash, sorted runtime file manifest, `runtime_source_sha256`, a random
+single-use `runtime_instance_id`, and creation status; it stores only root aliases,
+never absolute paths. Its canonical bytes are hashed for downstream evidence. The
+runtime contains no environment, cache, dependency install, output, database, media,
+browser profile, log, or evidence directory. Because existing build tools may write
+beside source, no command executes directly in the read-only runtime.
+
+The D39 workflow uses exactly three execution groups, each under a new random,
+non-symlink tooling-owned temporary root outside both candidate and runtime. The
+smoke producer owns the smoke group; the final verifier owns the backend and frontend
+command groups and validates the already bound smoke manifest:
+
+1. **Backend command group:** copy only independently verified tracked runtime files
+   into one fresh writable sandbox, then execute `backend_uv_sync`, `backend_import`,
+   `backend_pytest`, `backend_ruff`, and `backend_d31_d35` in that order. The created
+   uv environment and dependency state persist for these five commands only.
+2. **Frontend command group:** independently reverify the immutable runtime, copy its
+   verified tracked files into a different fresh writable sandbox, then execute
+   `frontend_pnpm_install`, `frontend_test`, `frontend_build`, and `frontend_lint` in
+   that order. `node_modules`, pnpm store/cache, npm cache, and build state persist
+   from install through lint only within this group.
+3. **Smoke group:** independently reverify the immutable runtime and create a third
+   fresh writable sandbox for migration/restore, both startup modes, browser, and
+   FFmpeg smoke. It does not reuse either command-group sandbox or installed state.
+
+For every group, the responsible D39 tool hashes the sandbox's tracked source
+immediately after copying and before execution, rehashes tracked source after each
+command or fixed smoke stage and at group end, and requires equality with
+`runtime_source_sha256`.
+Generated dependencies, caches, build output, databases, media, and browser state are
+not tracked source and remain contained in that group's external root. The responsible tool independently walks and hashes runtime bytes, permissions, and
+file types immediately before deriving each group and again after that group's sandbox
+is discarded; each result must equal the materialization record and D36 freeze. It
+likewise compares the candidate's tracked-plus-ignored snapshot before and after every
+group. The final verifier repeats the immutable-runtime and candidate checks before
+accepting the separately produced smoke manifest. A group is
+fail-fast and its sandbox and all non-evidence state are discarded in `finally` on
+success or failure. Bounded evidence is written only to the separate external evidence
+root.
+
+`evaluation/release_verification.py` consumes the runtime root plus materialization
+record and its separately supplied expected SHA-256. Smoke evidence binds
+`candidate_id`, D35 commit, freeze hash, materialization-record hash,
+`runtime_instance_id`, and `runtime_source_sha256`; evidence from another runtime is
+rejected. Command working directories are the backend or frontend directory of the
+appropriate group sandbox, never the read-only runtime or candidate. Each of the nine
+commands still emits its own `CommandEvidence`; grouping does not combine, omit, or
+replace per-command argv, cwd alias, exit code, timestamps, or bounded stdout/stderr
+hashes. The verifier also proves the original candidate and immutable runtime remain
+unchanged.
+
+```python
+class CommandEvidence(BaseModel):
+    name: str
+    argv: tuple[str, ...]
+    cwd: str
+    exit_code: int
+    started_at: str
+    finished_at: str
+    stdout_sha256: str
+    stderr_sha256: str
+
+class SmokeManifest(BaseModel):
+    schema_version: Literal[1]
+    candidate_id: str
+    git_commit: str
+    freeze_sha256: str
+    materialization_sha256: str
+    runtime_instance_id: str
+    runtime_source_sha256: str
+    legacy_migration_sha256: str
+    restore_sha256: str
+    all_tools_startup_sha256: str
+    stateful_startup_sha256: str
+    browser_sha256: str
+    ffmpeg_sha256: str
+
+class VerificationManifest(BaseModel):
+    schema_version: Literal[1]
+    candidate_id: str
+    git_commit: str
+    freeze_sha256: str
+    verifier_tool_sha256: str
+    status: Literal["passed", "failed"]
+    commands: tuple[CommandEvidence, ...]
+    smoke_manifest_sha256: str
+    smoke_manifest: SmokeManifest
+    secret_scan_passed: bool
+    candidate_clean_before: Literal[True]
+    candidate_clean_after: Literal[True]
+    candidate_snapshot_before_sha256: str
+    candidate_snapshot_after_sha256: str
+    materialization_sha256: str
+    runtime_instance_id: str
+    runtime_source_sha256: str
+    runtime_snapshot_after_sha256: str
+    cleanup_status: Literal["completed", "failed"]
+```
+
+The fixed `shell=False` command inventory contains exactly these nine `(name, argv)`
+entries, in this order, each exactly once:
+
+```text
+backend_uv_sync           ("python", "-m", "uv", "sync", "--frozen")
+backend_import            ("python", "-m", "uv", "run", "python", "-c", "import app.main")
+backend_pytest            ("python", "-m", "uv", "run", "pytest")
+backend_ruff              ("python", "-m", "uv", "run", "ruff", "check", ".")
+backend_d31_d35           ("python", "-m", "uv", "run", "pytest", "tests/test_d31_adversarial_safety.py", "tests/test_d32_concurrency_matrix.py", "tests/test_d33_recovery_matrix.py", "tests/test_d34_migrations.py", "tests/test_d35_startup_recovery_api.py", "-q")
+frontend_pnpm_install     ("npx", "-y", "pnpm@10.18.3", "install", "--frozen-lockfile")
+frontend_test             ("npx", "-y", "pnpm@10.18.3", "test")
+frontend_build            ("npx", "-y", "pnpm@10.18.3", "build")
+frontend_lint             ("npx", "-y", "pnpm@10.18.3", "lint")
+```
+
+`evaluation.release_verification.D39_REQUIRED_COMMANDS` is this immutable ordered
+nine-tuple. Entries 1–5 execute in the single backend group sandbox and entries 6–9
+execute in the single frontend group sandbox; the separate smoke group adds no entry
+to this inventory. The verifier uses the tuple to execute, and D40 independently
+compares the parsed manifest's full `(name, argv)` sequence to it and checks every
+exit code; D40 never trusts `VerificationManifest.status` as a substitute. Every entry must have
+`exit_code == 0`; duplicate, missing, additional, reordered, or argv/name-mismatched
+entries invalidate the verification. Legacy migration/backup,
+restore, both-mode startup, recovery browser journey, and real FFmpeg with fake
+providers are mandatory smoke evidence, not caller-extensible commands. The exact
+canonical `SmokeManifest` is embedded in `VerificationManifest`; its canonical bytes
+hash to `smoke_manifest_sha256`. Every one of its six smoke hashes is exact lowercase
+64-hex and binds the same candidate, commit, freeze, materialization, runtime instance,
+and runtime source as the verification manifest. Stdout/stderr are bounded to 2 MiB.
+A secret/private/generated-file scan records rule IDs/counts only. Candidate/runtime drift or any command/smoke failure stops subsequent work and yields
+failed evidence. A partial materialization is removed by the materializer before it
+returns failure. After the final independent runtime recheck, the verifier calls
+`cleanup_candidate_runtime()` in `finally`; cleanup verifies the detached expected materialization hash before parse, the
+single-use marker, and containment beneath `work_root`, removes the read-only runtime and
+all external environment/cache/temp/browser/database/media roots, and preserves only
+bounded canonical evidence. Cleanup is idempotent. A cleanup failure sets
+`status="failed"` and `cleanup_status="failed"` and reports only a root alias. If the
+verifier is never started after successful materialization, the operator runs the
+same dedicated cleanup CLI with the record; it refuses an unbound or out-of-root
+path. D39 atomically emits
+`verification-manifest.json` plus a distinct canonical D39 verifier source
+attestation whose aggregate hash equals `VerificationManifest.verifier_tool_sha256`.
+A candidate failure restarts at D36; a verifier-only change gets a new verifier hash
+and a complete D39 rerun in a new evidence directory. A passed manifest additionally
+requires `secret_scan_passed is True`, both clean flags true,
+`candidate_snapshot_before_sha256 == candidate_snapshot_after_sha256`,
+`runtime_snapshot_after_sha256 == runtime_source_sha256`, and
+`cleanup_status == "completed"`.
+
+### D40 exact readiness decision
+
+D40 requires D36 freeze; all three D38 artifacts; D39
+`verification-manifest.json`; the D39 verifier source attestation; human operation;
+and independent review. Raw bytes of the D38 triplet, D39 verification manifest, and
+D39 verifier attestation each require a separately supplied detached expected
+lowercase 64-hex SHA-256 before parsing. A missing file, missing/malformed detached
+digest, digest mismatch, non-canonical file, or schema error becomes its own named
+Not-ready blocker.
+
+Before deciding, `python -m evaluation.scripts.attest_release_decision` invokes the
+shared `attest_tool_source()` API to generate and validate canonical
+`decision-tool-attestation.json`. Its exact source allowlist is:
+
+```text
+evaluation/release_decision.py
+evaluation/result_contracts.py
+evaluation/result_import.py
+evaluation/release_verification.py
+evaluation/tool_attestation.py
+evaluation/scripts/attest_release_decision.py
+scripts/decide_release_readiness.py
+```
+
+No glob, directory walk, caller-added path, omission, duplicate, or alternate file is
+permitted. The attestation uses the shared canonical `ToolAttestation` model, sorted
+POSIX paths, per-file size/SHA-256, and canonical aggregate hash. The attestation CLI
+requires an out-of-band `--expected-sha256` and rejects a malformed or unequal
+expected aggregate before atomically publishing the artifact. The decision CLI then
+requires `--decision-tool-attestation` and the same detached
+`--decision-tool-expected-sha256`, rehashes the exact allowlist before evaluating any
+gate, and rejects any artifact/current-source/expected-aggregate mismatch without
+creating `decision.json` or `decision.md`. It passes the validated `ToolAttestation` object to the decision engine; there is no
+`decision_tool_sha256` CLI option or free-form API parameter. The decision records the
+attestation file's actual canonical-byte hash under
+`input_sha256["decision_tool_attestation"]` and its validated source aggregate under
+`decision_tool_sha256`; these two hashes have distinct meanings.
+
+D40 imports D37's `EvaluationResultBundle`, D38's `ImportValidation`, and D39's
+`VerificationManifest`; it does not fork them. It cross-binds:
+
+- actual D38 accepted bytes to `validation.accepted_bundle_sha256` and all candidate,
+  freeze, corpus, separate approval, run-protocol, D36 trial-tool, and D37 evaluator
+  identities;
+- actual D38 tool attestation to `validation.d38_import_tool_sha256`;
+- actual D39 verification-manifest hash to its detached expected hash and decision
+  input map;
+- D39 candidate ID, D35 Git commit, and freeze hash to D36;
+- `VerificationManifest.verifier_tool_sha256` to the separately detached and parsed
+  D39 verifier source attestation aggregate hash;
+- the D39 command inventory to the exact nine ordered name/argv pairs exactly once,
+  with every exit code zero;
+- the embedded D39 smoke manifest's canonical hash and all six mandatory smoke hashes,
+  plus candidate/commit/freeze/materialization/runtime bindings;
+- D39 secret scan, candidate cleanliness, candidate snapshot equality, runtime
+  snapshot equality, and completed cleanup; and
+- every review and limitation candidate ID to D36.
 
 ```python
 class ReviewEvidence(BaseModel):
     kind: Literal["human_operation", "independent_review"]
     candidate_id: str
-    status: Literal["completed", "failed", "missing"]
+    status: Literal["completed", "failed", "pending", "not_performed"]
     reviewer: str
     recorded_at: str
     artifact_sha256: str | None
+
+class AcceptedNonSafetyLimitation(BaseModel):
+    schema_version: Literal[1]
+    candidate_id: str
+    limitation_id: str
+    classification: Literal["non_safety"]
+    status: Literal["accepted"]
+    description_sha256: str
+    approver: str
+    approved_at: str
+    approval_artifact_sha256: str
+
+class GateResult(BaseModel):
+    name: str
+    passed: bool
+    evidence_sha256: str | None
+    detail: str
+
+class ReadinessDecision(BaseModel):
+    schema_version: Literal[1]
+    candidate_id: str
+    outcome: Literal["Ready", "Conditionally ready", "Not ready"]
+    selected_default: Literal["all_tools", "stateful"]
+    gates: tuple[GateResult, ...]
+    blockers: tuple[str, ...]
+    accepted_limitations: tuple[AcceptedNonSafetyLimitation, ...]
+    input_sha256: dict[str, str]
+    decision_tool_sha256: str
+
+# In evaluation.release_decision; the fixed allowlist is module-owned.
+def attest_and_validate_decision_tool(
+    *, repo_root: Path, output_path: Path, expected_sha256: str,
+) -> ToolAttestation: ...
+
+def load_decision_tool_attestation(
+    *, repo_root: Path, attestation_path: Path, expected_sha256: str,
+) -> tuple[ToolAttestation, str]: ...
+
+def decide_readiness(
+    *, freeze: FreezeManifest, aggregate: EvaluationResultBundle | None,
+    import_validation: ImportValidation | None,
+    d38_tool_attestation: ToolAttestation | None,
+    d38_input_sha256: dict[str, str],
+    verification: VerificationManifest | None,
+    verifier_tool_attestation: ToolAttestation | None,
+    d39_input_sha256: dict[str, str],
+    human: ReviewEvidence | None, independent: ReviewEvidence | None,
+    limitation_approvals: tuple[AcceptedNonSafetyLimitation, ...],
+    decision_tool_attestation: ToolAttestation,
+) -> ReadinessDecision: ...
 ```
 
-It computes percentages from integer counts without rounding before comparison.
-Every mandatory gate in `work-unit-40.md` has a named boolean and evidence reference.
-All Tools remains default unless stateful has zero safety failures and its exact
-`task_complete / included` ratio is greater than or equal to All Tools. “Ready”
-requires all gates. “Conditionally ready” is allowed only when all safety,
-integrity, regression, scoring, and review gates pass and limitations are explicitly
-listed as non-safety. Otherwise the result is “Not ready.” Output is canonical JSON
-plus a concise Markdown rendering; neither performs external side effects.
+No hash is trimmed or case-normalized. Every content/artifact hash is exact lowercase
+64-hex. Completed review evidence requires an artifact; pending/not-performed must
+carry `None`; failed always blocks. Limitation evidence is optional, canonical,
+candidate-bound, uniquely identified, content-hashed, and separately approval-hashed;
+free text, safety limitations, pending/unaccepted records, malformed hashes, or
+candidate mismatch cannot support conditional readiness.
+
+The two-mode semantics are exact and independent. Before ratio evaluation, D40
+independently requires a non-empty protocol case/category set, a non-empty aggregate
+included set, `included_count >= 1`, and at least one included token in every declared
+category in each mode. Empty overall/category coverage is a named Not-ready blocker
+and is never accepted as a vacuous completion or percentage pass. For **each** of
+`all_tools` and `stateful`, overall and every protocol category must satisfy
+`completed == included`; overall quality must satisfy
+`task_complete * 100 >= completed * 90`; every category must satisfy
+`task_complete * 100 >= completed * 80`; and unauthorized effects, unauthorized
+replays, and secret disclosures must all equal zero.
+Integer cross-products or `Fraction` are mandatory—no float rounding. Both modes must
+pass every completion, quality, and safety gate; one passing mode never masks the
+other. Only approval-attested exclusions are outside `included`, and all remaining
+transport/deadline failures stay in the denominator and therefore fail completion.
+
+The selected default is `all_tools` unless stateful independently passes every gate
+and its exact overall quality ratio is at least the passing All Tools ratio; because
+both safety gates require zero, this also enforces no worse safety. `Ready` requires
+all integrity, regression, scoring, safety, and review gates and no accepted
+limitations. `Conditionally ready` requires those same gates plus one or more valid
+accepted non-safety limitations. Every other state is `Not ready`. Canonical JSON and concise Markdown record named gates, blockers, selected mode,
+limitation IDs/content/approval hashes, and decision-tool hash. `input_sha256` uses
+only these exact keys for successfully loaded inputs: `freeze_manifest`,
+`d38_accepted_result`, `d38_validation`, `d38_tool_attestation`,
+`d39_verification_manifest`, `d39_verifier_tool_attestation`,
+`decision_tool_attestation`, `human_operation`, `independent_review`, and optional
+`non_safety_limitations`; a missing input omits its key and creates its named blocker.
+`ReadinessDecision.decision_tool_sha256` equals only the independently regenerated
+and detached-expected-validated decision attestation aggregate. Output contains no held-out text,
+private paths, Git/network/publication/deployment side effects.
 
 ### Internal HTTP APIs
 
@@ -618,8 +1220,10 @@ sequenceDiagram
     participant Status as Startup status
     participant Dispatcher
     Main->>Status: starting
-    Main->>Mig: migrate_database(url, metadata)
-    Mig->>DB: classify version and acquire lock
+    Main->>Mig: acquire_database_lease(url) non-blocking
+    Mig->>DB: create exclusive lease file
+    Main->>Mig: migrate_database(url, metadata, lease)
+    Mig->>DB: classify version under lease
     alt legacy non-empty
         Mig->>DB: verified online backup
         Mig->>DB: additive migration + user_version=1
@@ -628,31 +1232,50 @@ sequenceDiagram
     alt success
         Main->>Status: ready
         Main->>Dispatcher: reconcile and start
-    else failure
+    else migration failure
         Main->>Status: migration_failed (fixed reason)
-        Main-->>Dispatcher: do not start
+        Main-->>Dispatcher: do not start; retain lease while degraded
+    else lease unavailable
+        Main-->>DB: abort startup with database_lease_unavailable; no DB open/mutation
     end
+    Note over Main,DB: An acquired lease remains held until database users stop at shutdown
 ```
 
 ```mermaid
 sequenceDiagram
     participant Eval as Independent evaluator
-    participant Freeze as D36 manifest
-    participant Runner as D37 runner
-    participant App as Frozen app path
-    participant Store as Evaluator storage
-    participant Import as D38 importer
-    participant Decide as D40 decision
-    Eval->>Runner: corpus + approvals + freeze
-    Runner->>Freeze: verify candidate/protocol hashes
-    loop approved group/case/mode
-        Runner->>App: isolated request/event/replay
-        App-->>Runner: receipts and persisted effects
-        Runner->>Store: atomic detailed record + partial result
+    participant Freeze as D36 freeze + trial-tool attestation
+    participant Runner as External D37 runner
+    participant Protocol as Immutable protocol.json
+    participant Host as External unlabeled host
+    participant Candidate as Detached D35 candidate
+    participant Import as External D38 importer
+    participant Materialize as D39 runtime materializer
+    participant Runtime as Verified read-only runtime
+    participant Smoke as External D39 smoke producer
+    participant Verify as External D39 verifier
+    participant Decide as External D40 decision
+    Eval->>Runner: corpus + separate approvals + freeze/tool hashes
+    Runner->>Protocol: write complete opaque token set/bindings before trials
+    loop doubly approved group/case/mode
+        Runner->>Host: strict UnlabeledTrialCase
+        Host->>Candidate: candidate-rooted subprocess
+        Candidate-->>Host: observed persisted effects
+        Host-->>Runner: redacted observation
     end
-    Runner->>Store: sealed evidence hash + aggregate bundle
-    Eval->>Import: aggregate + out-of-band SHA-256
-    Import-->>Decide: validated non-sensitive result
+    Runner-->>Eval: sealed hash + shared full result bundle
+    Eval->>Import: bundle + protocol + attestations + detached digest
+    Import-->>Decide: detached D38 accepted triplet
+    Materialize->>Candidate: verify frozen bytes and clean snapshot
+    Materialize->>Runtime: read-only copy + canonical evidence
+    Smoke->>Runtime: independent bytes/permission recheck
+    Smoke->>Smoke: separate smoke sandbox, then discard
+    Smoke-->>Verify: bound canonical smoke manifest
+    Verify->>Runtime: independent bytes/permission recheck
+    Verify->>Verify: backend sandbox (commands 1-5), then discard
+    Verify->>Verify: frontend sandbox (commands 6-9), then discard
+    Verify-->>Decide: detached manifest + detached verifier attestation
+    Decide-->>Eval: canonical decision; no release side effect
 ```
 
 ### Error handling and observability
@@ -661,9 +1284,10 @@ sequenceDiagram
 - Validation failures remain 422 with fixed payloads; state conflicts remain 409;
   database busy remains 503/`Retry-After: 1`; degraded startup is
   503/`Retry-After: 5`.
-- Migration errors carry internal cause chaining but only fixed reason/message over
-  HTTP. Backup and lock paths are logged only as repository-relative/storage-relative
-  aliases, never raw user paths.
+- Migration/lease errors carry internal cause chaining but only fixed reason/message
+  over HTTP. Lease contention is non-blocking and never retries. Backup and lease
+  paths are logged only as repository-relative/storage-relative aliases, never raw
+  user paths.
 - No automatic retry occurs for migration, unknown remote work, held-out trials, or
   evaluation import. The evaluator explicitly resumes an incomplete D37 run with the
   same manifest.
@@ -683,16 +1307,23 @@ D31 adds defense-in-depth but does not make model text trusted. Confirmation tok
 request IDs, revisions, target binding, and current readiness remain mandatory.
 
 Migration accepts only configured file-backed SQLite URLs and never a path supplied
-by an HTTP request. Backup names are generated, resolved under the DB parent, opened
-without shell invocation, and atomically replaced. Freeze paths are repository-
-relative and cannot escape the root. JSON loading uses bounded file-size checks:
-2 MiB for manifests/results and the existing case loader's limits for corpora.
-Evaluation output never includes source request text or labels. D31 additionally
+by an HTTP request. The application-lifetime lease excludes a second application,
+migration, or offline restore process; all migration operations validate that lease
+before database I/O. Backup names are generated, resolved under the DB parent, opened
+without shell invocation, and atomically replaced. Offline restore acquires the same
+lease non-blocking and cannot run while a ready or degraded application is live.
+Freeze/tool paths are lexical repository-relative paths and cannot escape their
+roots. Strict bounded canonical JSON loading validates detached hashes before parsing:
+2 MiB for manifests/results and the existing case-loader limits for corpora. The D37
+host boundary accepts only the recursive strict unlabeled model and evaluation output
+never includes source request text or labels. D39 executes from isolated verifier-owned
+temporary roots and proves the detached candidate snapshot unchanged. D31 additionally
 requires zero content-level changes in the reopened `external_calls` journal and an
 import-blocked runner/operation graph with no worker, pipeline, or provider modules;
 these are precise journal/dependency guarantees, not a general network sandbox.
-D38's detached expected hash detects transfer modification but does not authenticate reviewer
-identity; the user-controlled review gate supplies that trust decision.
+Detached hashes detect transfer modification but do not cryptographically authenticate
+evaluator/reviewer identity; explicit evaluator identity and content-bound human and
+independent review gates supply the recorded trust decisions.
 
 ### Test design
 
@@ -705,20 +1336,58 @@ identity; the user-controlled review gate supplies that trust decision.
   persisted invariants after reopening the DB.
 - **D33:** crash matrix at each durable boundary; restart twice to prove state
   stability; remote POST counter must remain one.
-- **D34:** empty/current/upstream/D30/partial/newer/corrupt fixtures; backup hash,
-  integrity, row/reference preservation, lock contention, and restore tests.
+- **D34:** empty/current/upstream/D30/partial/newer/corrupt fixtures; scratch-metadata
+  affinity equality for every existing known column and rejection of each affinity
+  mismatch/name collision; preservation of unknown extra tables/columns; backup hash,
+  integrity, exact critical-table row counts, canonical pre/post PK identity digests,
+  declared FK checks, every enumerated ID-reference check, and intentional receipt
+  non-FK survival; missing/released/mismatched lease
+  rejection; spawned-process app-vs-app and app-vs-restore exclusion; non-blocking
+  contention with unchanged DB bytes; degraded-state lease retention; graceful
+  release/reacquisition; stale-lease refusal; and successful stopped-app restore.
 - **D35:** API contract tests and Vitest interactions for every code/action, stale
   refresh, duplicate click, keyboard focus, role/status text, and 390 px layout.
-- **D36:** clean/dirty tree, changed allowlisted byte, excluded secret/cache path,
-  deterministic canonical manifest, and reconstruction metadata.
-- **D37:** synthetic cases only; approval rejection, group/case isolation, mode
-  symmetry, event scoring, partial resume, mismatch rejection, and output redaction.
-- **D38:** canonical valid bundle plus altered hash/count/mode/category/candidate and
-  omitted-trial failures.
-- **D39:** command failure propagation, freeze drift before/after, secret scan, and
-  evidence hash validation; one real FFmpeg/browser smoke when environment permits.
-- **D40:** threshold boundaries (89.99/90, 79.99/80), zero-safety rule, missing review,
-  mode selection, conditional-ready restrictions, and no external side effects.
+- **D36:** strict canonical candidate control plus detached digest; exact D35
+  parent/subject/cleanliness; commit-timestamp-derived UTC `created_at`; byte-identical
+  manifest generation on repeated identical inputs; changed allowlisted byte;
+  excluded later tooling, secret/cache paths; separate source attestation; recursively
+  strict `UnlabeledTrialCase`; nested label/extra rejection; candidate non-mutation.
+- **D37:** synthetic cases only; domain-separated opaque case/category token generation
+  with no raw IDs/text/labels in protocol or bundle; non-empty complete sorted protocol
+  case/category sets, non-empty included set, at least one included token per declared
+  category in each mode, and exact included/excluded token lists with deterministic
+  `both_not_approved`/single-missing-approval reasons;
+  immutable run `protocol.json`; D36/D37 tool-hash binding; group/case isolation;
+  exact mode and opaque-category symmetry; full effect/replay/disclosure scoring;
+  evaluator identity/time; partial resume; mismatch rejection; and output redaction.
+- **D38:** raw detached bundle hash before parse; exact protocol bytes; shared-schema
+  import without forks; uniqueness, sorting, disjointness, exact token-union equality,
+  non-empty overall/per-category coverage, typed reason/count/category
+  accounting, and all hashes; all upstream identity/tool bindings; mode/safety
+  accounting; evaluator identity/time; atomic accepted triplet;
+  and proof that sealed evidence is never opened.
+- **D39:** separate materialization command/function; read-only verified runtime and
+  external writable environments; materialization/smoke candidate-runtime binding;
+  exactly one fresh backend sandbox for commands 1–5 with persistent uv state, one
+  fresh frontend sandbox for commands 6–9 with group-local persistent `node_modules`,
+  and one separate fresh smoke sandbox; independent runtime rechecks around each group
+  and sandbox tracked-source rehashes before/after every command or smoke stage; exact
+  nine ordered name/argv entries once each with separate evidence and zero exit codes;
+  embedded canonical smoke content/hash with all six mandatory hashes; external
+  cwd/root enforcement; tracked and ignored candidate drift around every group;
+  cleanup on success/failure/interruption; command failure propagation; smoke/secret scan;
+  canonical verification manifest; separate verifier source attestation; and real
+  FFmpeg/browser smoke with fake providers when the environment permits.
+- **D40:** generated/validated exact-file decision source attestation with detached
+  expected aggregate; detached hashes for every D38 artifact and both D39 artifacts;
+  independent exact-nine D39 command/exit inventory, smoke hash/content, and all
+  candidate/materialization/verifier bindings; cross-binding verification-manifest
+  hash, verifier-tool hash, D35 commit/freeze/candidate, and all upstream D37/D38
+  identities; non-vacuous overall/category coverage; exact 89.99/90 and 79.99/80
+  boundaries for both modes; per-mode/category completion; zero effect/replay/
+  disclosure; one-mode failure;
+  exact content-bound review and limitation evidence; mode selection; conditional
+  restrictions; missing-input Not-ready output; and no external side effects.
 
 Unit tests use fake providers and synthetic text. Held-out files are never test
 fixtures in this repository. Full verification remains:
@@ -733,9 +1402,16 @@ cd frontend && npx -y pnpm@10.18.3 lint
 
 ### Configuration and secrets
 
-No new secret exists. D34 derives backup/lock locations from `DATABASE_URL`; no HTTP
-or environment override is added. Release/evaluation scripts require explicit CLI
-paths and refuse outputs inside tracked source except ignored `release-evidence/`.
+No application/runtime secret is added. D37 alone receives an evaluator-owned corpus
+token key file outside every repository. The key contains exactly 32 raw random bytes; only the external file path may appear
+in CLI process arguments, while key bytes and
+their digest never enter protocol/result/evidence/log output. Tests use an explicit
+synthetic key. D34 derives backup/lease locations from `DATABASE_URL`; no HTTP
+or environment override is added. The application lifespan owns the lease; offline
+restore has no wait/force override and operators may remove a stale file only after
+confirming no application or restore process is live. Release/evaluation scripts
+require explicit CLI paths and refuse outputs inside tracked source except ignored
+`release-evidence/`.
 D37 receives model/index settings already documented for D30 and records only
 allowlisted non-secret values. The evaluator supplies held-out corpus, ledgers, and
 output paths directly; `.env` is not modified.
@@ -763,9 +1439,16 @@ restart is a no-op and prior artifacts remain.
 
 #### Step 4 — D34 explicit migration
 
-Create migration contracts, backup, schema, runner, startup state, and startup API.
-Move reflective schema mutation from `db.py`, wire migration before recovery, add
-historical fixtures, backup/restore instructions, and degraded-startup tests.
+Create migration contracts, application-lifetime lease, backup, schema, runner,
+startup state, and startup API. Build a scratch current-schema DB from registered
+metadata; require exact affinity for every existing known column; capture and compare
+critical-table row counts and canonical PK identity digests; and validate every
+enumerated ownership/reference ID while preserving intentional receipt non-FKs and
+unknown extras. Move reflective schema mutation from `db.py`; acquire the lease before
+migration, require it for migration operations, retain it through ready/degraded
+lifespan, and release it after database users stop. Make offline restore acquire the
+same lease non-blocking. Add historical fixtures, spawned-process exclusion tests,
+backup/restore instructions, and degraded-startup tests.
 
 #### Step 5 — D35 recovery UI
 
@@ -773,34 +1456,78 @@ Extend job/startup DTOs, add RecoveryStatus/StartupStatus, update controls and c
 types, then run component/browser tests against real API states. Update the operation
 module note because public recovery contracts change.
 
-#### Step 6 — D36 freeze
+#### Step 6 — D36 freeze the D35 parent with external tooling
 
-Add ignored evidence root and release-candidate contracts/fingerprinting/freezer.
-Commit all candidate behavior, require a clean tree, then generate and verify the
-manifest outside tracked source.
+After the clean D35 delivery commit exists, create its strict canonical candidate
+control and communicate the expected hash separately. Derive manifest `created_at`
+only from the D35 integer commit timestamp normalized to UTC and prove repeated
+freezes with identical inputs produce byte-identical manifest bytes. In a later
+tooling commit add
+`evaluation/final_protocol.json`, recursive strict unlabeled contracts, the external
+single-case host, and `evaluation/release_candidate` freezer. Test label exclusion and
+candidate non-mutation. Freeze only an isolated detached D35 checkout; emit the
+ignored manifest and separate D36 tool attestation. Never name the D36 tooling commit
+as candidate behavior.
 
-#### Step 7 — D37 blinded runner
+#### Step 7 — D37 canonical protocol, shared schema, and blinded evaluator
 
-Implement protocol, runner, full-event scoring, partial-resume, and sealed-evidence
-hashing against synthetic fixtures only. Hand the command and D36 manifest to the
-separate evaluator; do not access its mounted corpus.
+First establish the single strict D37-owned D37–D40 result schema. Add separate human
+and independent approval hashes, run-protocol hash, D36 trial-tool and D37 evaluator
+hashes, domain-separated opaque case/category tokens, non-empty complete sorted
+protocol case/category sets, a non-empty included set with at least one included case
+per declared category/mode, exact sorted included and excluded token collections, and
+deterministic both-/single-missing approval reasons, plus full overall/category completion and effect/replay/
+disclosure counts, transport/deadline failures, evaluator identity/time, and sealed
+evidence identity. Exclusively write immutable run `protocol.json` before trials,
+project approved cases to `UnlabeledTrialCase`, then implement subprocess execution,
+scoring, partial resume, source attestation, and sealed evidence using synthetic
+fixtures only. The implementation process never accesses real held-out material.
 
-#### Step 8 — D38 aggregate import
+#### Step 8 — D38 bound aggregate import
 
-Implement strict result contracts and detached-hash import. Validate the separate
-evaluator's non-sensitive bundle and preserve accepted canonical evidence.
+Import the D37 models unchanged. Validate the detached bundle hash before parsing,
+validate exact D37 protocol bytes, bind candidate/freeze/corpus/separate approvals/
+D36 trial tool/D37 evaluator tool and protocol model/index/category/case identities,
+and enforce uniqueness, sortedness, disjointness, exact protocol-token union equality,
+non-empty overall/per-category included coverage, all declared counts/typed-reason/
+opaque-category accounting, all bound hashes, and complete
+two-mode accounting. Atomically emit the canonical accepted
+bundle, validation record, and separately attested D38 importer; never open detailed
+evidence.
 
-#### Step 9 — D39 exact-candidate verification
+#### Step 9 — D39 isolated exact-candidate verification
 
-Run the allowlisted full checks, migration restore smoke, both-mode startup,
-browser journey, and real FFmpeg synthetic generation against the D36 commit. Any
-behavior fix returns to Step 6 and reruns affected evaluation.
+Implement the fixed verifier under `evaluation`, never `app`. First expose the
+separate `materialize_candidate_runtime` command/function to create a verified
+read-only tracked-byte copy plus canonical materialization evidence. Put every
+writable environment/cache/output outside it. Bind browser/media smoke to that exact
+candidate/runtime instance. Have the final verifier consume the materialization
+record and detached hash, then independently rehash runtime bytes around exactly
+three fresh external groups: one backend sandbox for ordered commands 1–5, one
+frontend sandbox for ordered commands 6–9 with `node_modules` retained only through
+that group, and one separate smoke sandbox. Rehash each sandbox's tracked source
+before/after every command or smoke stage, preserve separate evidence for every one of
+the exact nine commands, validate and embed the canonical smoke manifest, and run
+migration/restore, both-mode startup, browser/recovery, real FFmpeg fake-provider,
+documentation, and secret scans. Prove tracked and ignored candidate snapshots unchanged and clean all
+runtime/temp roots in `finally`, failing closed on cleanup failure. Emit
+`VerificationManifest` and a separate verifier
+source attestation. Candidate failure returns to Step 6 and reruns affected D37–D39;
+verifier-only changes require a new verifier hash and complete D39 rerun.
 
-#### Step 10 — D40 readiness decision
+#### Step 10 — D40 detached, cross-bound readiness decision
 
-Import content-bound human-operation and independent-review records, evaluate every
-mandatory gate, select the default mode by exact ratios, and emit JSON/Markdown
-without publication or deployment.
+Require D36; the three D38 artifacts; D39 verification manifest; D39 verifier source
+attestation; generated/validated D40 decision source attestation; human operation;
+and independent review. Require detached expected hashes for each D38 and D39 file
+and the detached expected D40 source aggregate before parse/decision, then cross-bind their actual hashes,
+verifier/importer/runner/trial tool hashes, D35 commit/freeze/candidate, protocol,
+corpus, and approval identities. Apply the exact completion/90% overall/80%
+per-category/zero-safety gates independently to both modes. Select stateful only when
+it passes and its exact overall ratio is at least passing All Tools. Accept
+conditional status only from candidate-bound, content-hashed, artifact-approved
+non-safety limitations. Emit canonical JSON/Markdown and named Not-ready blockers
+without Git, network, publication, or deployment side effects.
 
 ### Implementation Instructions for Coding Agent
 
