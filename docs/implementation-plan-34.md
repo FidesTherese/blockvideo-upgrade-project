@@ -21,9 +21,10 @@
   `unsupported_legacy_schema` before DDL.
 - Upstream and D30 fixtures are frozen explicit SQL and must not be derived from current
   metadata by dropping current tables/columns.
-- A non-empty v0 database is backed up and verified before migration. Backup and canonical sidecar metadata are temp-hashed/identity-checked, fsynced, atomically published, directory-fsynced where supported, and reverified after publication.
+- A non-empty v0 database is backed up and verified before migration. Backup and canonical sidecar metadata are temp-hashed/identity-checked, fsynced, lease-revalidated immediately before each atomic publication, directory-fsynced where supported, and reverified after publication. Lease loss leaves no partial publication.
+- After creation, the backup root must pass `lstat` as a non-symlink, non-reparse directory and resolve exactly to `database_path.parent.resolve() / ".backups"` before any backup bytes are written.
 - Restore accepts only a regular non-symlink backup under the exact target sibling `.backups` directory and validates canonical target-bound metadata, schema, critical identities, references, integrity, and hash before removing stale SQLite sidecars and atomically replacing/reverifying the target.
-- Lease release uses an identity/token-bound atomic tombstone rename; it never deletes a replacement owner's lease and safely restores a moved replacement when the lock path remains absent.
+- Lease acquisition stores the exact canonical token payload. Assertion and release require exact descriptor/path bytes plus acquired descriptor/path identity. Release uses an identity/payload-bound atomic tombstone rename; it never deletes a replacement owner's lease and safely restores a moved replacement when the lock path remains absent.
 - Task 1 keeps a deprecated `_add_missing_columns(engine)` compatibility wrapper only
   so legacy tests collect; it delegates to `apply_v0_to_v1()` and is never called by
   `init_db()` or startup. Tasks 2/3 migrate those tests to the runner and remove it.
@@ -158,6 +159,15 @@ git commit -m "feat: define D34 SQLite schema migration"
 **Interfaces:**
 
 ```python
+create_verified_backup(
+    database_path: Path,
+    source: sqlite3.Connection,
+    metadata: MetaData,
+    expected_identities: dict[str, TableIdentity],
+    source_schema_version: int,
+    *,
+    before_publish: Callable[[], None],
+) -> VerifiedBackup
 migrate_database(
     database_url: str, metadata: MetaData, *, lease: DatabaseLease
 ) -> MigrationResult

@@ -155,7 +155,12 @@ def migrate_database(
             if table_count:
                 lease.assert_held_for(database_url)
                 backup = create_verified_backup(
-                    database_path, connection, metadata, before, version
+                    database_path,
+                    connection,
+                    metadata,
+                    before,
+                    version,
+                    before_publish=lambda: lease.assert_held_for(database_url),
                 )
 
             lease.assert_held_for(database_url)

@@ -65,9 +65,12 @@ absence of arbitrary future unjournaled network code.
 D34 acquires one non-blocking exclusive database lease before migration and holds it
 for the application lifetime through shutdown, including degraded startup. Migration
 runs only under that lease. Lease acquisition creates a missing database parent before
-creating the sibling lock; release atomically tombstones the current path, validates
-the owned open-file identity/token, and never deletes a raced replacement owner's
-lease. Known table and column matching uses SQLite-compatible ASCII folding (A--Z to
+creating the sibling lock and retains the exact canonical token payload written at
+acquisition. Ownership checks and release both require the descriptor and current path
+to retain the acquired inode identity and exact payload bytes. Release atomically
+tombstones the current path and never deletes a raced replacement owner's lease;
+in-place content tampering is never accepted as owner evidence. Known table and column
+matching uses SQLite-compatible ASCII folding (A--Z to
 a--z only); non-ASCII characters remain unchanged. ASCII-case-colliding duplicate
 known identifiers and affinity mismatches fail before DDL. Unknown extra
 tables/columns retain their actual spellings and remain untouched. The nine critical tables named in the
@@ -78,6 +81,10 @@ turn links are null-safe, and all other enumerated ID references are checked bef
 after. Immutable receipt project/job IDs remain intentional non-FKs. Backup publication hashes, integrity/identity-checks, and fsyncs temporary bytes before
 atomic replacement, rechecks the published hash, and atomically publishes canonical
 metadata bound to the target path, source schema/critical identities, and backup hash.
+A required lease callback revalidates ownership immediately before each backup and
+metadata replacement; lease loss removes every partial publication. After creation,
+the `.backups` root must be a non-reparse, non-symlink directory whose resolved path
+is exactly the canonical database-parent sibling before any backup bytes are written.
 Offline restore must acquire the same lease non-blocking and fails without database I/O
 while an application process is live. It accepts only regular non-symlink files in the
 exact target `.backups` sibling, validates target binding/hash/schema/identity/references,

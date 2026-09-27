@@ -695,6 +695,41 @@ def test_lease_file_is_exclusive_bounded_and_never_removed_as_stale(
     assert lease.lock_path.read_text(encoding="ascii") == "stale"
 
 
+def test_lease_assert_rejects_in_place_payload_tamper(tmp_path: Path) -> None:
+    database = tmp_path / "assert-tamper.db"
+    url = _url(database)
+    lease = acquire_database_lease(url)
+    original_identity = lease.lock_path.stat().st_ino
+    lease.lock_path.write_bytes(b"mutated-in-place")
+    assert lease.lock_path.stat().st_ino == original_identity
+
+    try:
+        with pytest.raises(MigrationError) as exc_info:
+            lease.assert_held_for(url)
+        assert exc_info.value.reason_code == "database_lease_unavailable"
+    finally:
+        try:
+            lease.release()
+        except MigrationError:
+            lease.lock_path.unlink(missing_ok=True)
+
+
+def test_lease_release_rejects_in_place_payload_tamper(tmp_path: Path) -> None:
+    database = tmp_path / "release-tamper.db"
+    lease = acquire_database_lease(_url(database))
+    original_identity = lease.lock_path.stat().st_ino
+    tampered = b"mutated-in-place"
+    lease.lock_path.write_bytes(tampered)
+    assert lease.lock_path.stat().st_ino == original_identity
+
+    with pytest.raises(MigrationError) as exc_info:
+        lease.release()
+
+    assert exc_info.value.reason_code == "database_lease_unavailable"
+    assert lease.lock_path.read_bytes() == tampered
+    lease.lock_path.unlink()
+
+
 def test_spawned_lease_contention_is_immediate_and_precedes_database_io(
     tmp_path: Path,
 ) -> None:
@@ -823,6 +858,116 @@ def test_runner_rejects_missing_released_and_mismatched_lease_before_database_io
         migrate_database(url, Base.metadata, lease=released)
     assert released_error.value.reason_code == "database_lease_unavailable"
     assert not database.exists()
+
+
+def test_backup_rejects_non_directory_publication_root(tmp_path: Path) -> None:
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    before = database.read_bytes()
+    backup_root = tmp_path / ".backups"
+    backup_root.write_bytes(b"not-a-directory")
+
+    with pytest.raises(MigrationError) as exc_info:
+        _migrate(database)
+
+    assert exc_info.value.reason_code == "backup_failed"
+    assert database.read_bytes() == before
+    assert backup_root.read_bytes() == b"not-a-directory"
+
+
+def test_backup_rejects_redirected_symlink_root_before_writing(tmp_path: Path) -> None:
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    before = database.read_bytes()
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    backup_root = tmp_path / ".backups"
+    try:
+        backup_root.symlink_to(redirected, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+
+    with pytest.raises(MigrationError) as exc_info:
+        _migrate(database)
+
+    assert exc_info.value.reason_code == "backup_failed"
+    assert database.read_bytes() == before
+    assert tuple(redirected.iterdir()) == ()
+
+
+def test_backup_lease_loss_before_backup_publication_leaves_no_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.migrations import backup as backup_module
+
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    before = database.read_bytes()
+    url = _url(database)
+    lease = acquire_database_lease(url)
+    original_hash = backup_module.sha256_file
+    original_replace = backup_module._atomic_replace
+    tampered = False
+    publications = 0
+
+    def hash_then_lose_lease(path: Path) -> str:
+        nonlocal tampered
+        digest = original_hash(path)
+        if not tampered and path.suffix == ".tmp":
+            lease.lock_path.write_bytes(b"lease-lost-before-backup-publication")
+            tampered = True
+        return digest
+
+    def record_publication(source: Path, destination: Path) -> None:
+        nonlocal publications
+        publications += 1
+        original_replace(source, destination)
+
+    monkeypatch.setattr(backup_module, "sha256_file", hash_then_lose_lease)
+    monkeypatch.setattr(backup_module, "_atomic_replace", record_publication)
+    try:
+        with pytest.raises(MigrationError) as exc_info:
+            migrate_database(url, Base.metadata, lease=lease)
+        assert exc_info.value.reason_code == "database_lease_unavailable"
+        assert publications == 0
+        assert database.read_bytes() == before
+        assert tuple((tmp_path / ".backups").iterdir()) == ()
+    finally:
+        try:
+            lease.release()
+        except MigrationError:
+            lease.lock_path.unlink(missing_ok=True)
+
+
+def test_backup_lease_loss_before_metadata_publication_removes_published_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.migrations import backup as backup_module
+
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    before = database.read_bytes()
+    url = _url(database)
+    lease = acquire_database_lease(url)
+    original_replace = backup_module._atomic_replace
+    publications = 0
+
+    def publish_backup_then_lose_lease(source: Path, destination: Path) -> None:
+        nonlocal publications
+        original_replace(source, destination)
+        publications += 1
+        if publications == 1:
+            lease.lock_path.write_bytes(b"lease-lost-before-metadata-publication")
+
+    monkeypatch.setattr(backup_module, "_atomic_replace", publish_backup_then_lose_lease)
+    try:
+        with pytest.raises(MigrationError) as exc_info:
+            migrate_database(url, Base.metadata, lease=lease)
+        assert exc_info.value.reason_code == "database_lease_unavailable"
+        assert publications == 1
+        assert database.read_bytes() == before
+        assert tuple((tmp_path / ".backups").iterdir()) == ()
+    finally:
+        try:
+            lease.release()
+        except MigrationError:
+            lease.lock_path.unlink(missing_ok=True)
 
 
 def test_runner_rejects_invalid_backup_integrity_without_publishing(

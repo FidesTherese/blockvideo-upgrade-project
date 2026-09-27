@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -31,6 +32,18 @@ def _descriptor_bytes(descriptor: int) -> bytes:
     return b"".join(chunks)
 
 
+def _path_identity_and_bytes(path: Path) -> tuple[tuple[int, int], bytes]:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        path_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError("lease path is not a regular file")
+        return (path_stat.st_dev, path_stat.st_ino), _descriptor_bytes(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 @dataclass
 class DatabaseLease:
     database_path: Path
@@ -38,9 +51,31 @@ class DatabaseLease:
     _descriptor: int | None = field(repr=False)
     _identity: tuple[int, int] = field(repr=False)
     _token: str = field(repr=False)
+    _payload: bytes = field(repr=False)
+
+    def _assert_owned_lock(self) -> None:
+        descriptor = self._descriptor
+        if descriptor is None:
+            raise MigrationError("database_lease_unavailable")
+        try:
+            descriptor_stat = os.fstat(descriptor)
+            descriptor_identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
+            path_identity, path_bytes = _path_identity_and_bytes(self.lock_path)
+            if (
+                not stat.S_ISREG(descriptor_stat.st_mode)
+                or descriptor_identity != self._identity
+                or path_identity != self._identity
+                or _descriptor_bytes(descriptor) != self._payload
+                or path_bytes != self._payload
+            ):
+                raise MigrationError("database_lease_unavailable")
+        except MigrationError:
+            raise
+        except OSError as exc:
+            raise MigrationError("database_lease_unavailable") from exc
 
     def assert_held_for(self, database_url: str) -> None:
-        """Reject released leases and leases bound to another database."""
+        """Require the original path, inode, descriptor, and canonical token bytes."""
         if self._descriptor is None:
             raise MigrationError("database_lease_unavailable")
         try:
@@ -49,19 +84,20 @@ class DatabaseLease:
             raise MigrationError("database_lease_unavailable") from exc
         if requested_path != self.database_path:
             raise MigrationError("database_lease_unavailable")
-        try:
-            current = self.lock_path.stat()
-        except OSError as exc:
-            raise MigrationError("database_lease_unavailable") from exc
-        if (current.st_dev, current.st_ino) != self._identity:
-            raise MigrationError("database_lease_unavailable")
+        self._assert_owned_lock()
 
     def release(self) -> None:
-        """Atomically isolate and delete only this owner's lock inode and token."""
+        """Atomically isolate and delete only the unchanged owned lease payload."""
         descriptor = self._descriptor
         if descriptor is None:
             return
-        owned_bytes = _descriptor_bytes(descriptor)
+        try:
+            self._assert_owned_lock()
+        except MigrationError:
+            self._descriptor = None
+            os.close(descriptor)
+            raise
+
         owned_identity = self._identity
         self._descriptor = None
         os.close(descriptor)
@@ -72,12 +108,11 @@ class DatabaseLease:
             os.replace(self.lock_path, tombstone)
         except FileNotFoundError:
             return
-        moved = tombstone.stat()
-        moved_owned_file = (
-            (moved.st_dev, moved.st_ino) == owned_identity
-            and tombstone.read_bytes() == owned_bytes
-        )
-        if moved_owned_file:
+        try:
+            moved_identity, moved_bytes = _path_identity_and_bytes(tombstone)
+        except OSError as exc:
+            raise MigrationError("database_lease_unavailable") from exc
+        if moved_identity == owned_identity and moved_bytes == self._payload:
             tombstone.unlink()
             return
 
@@ -86,6 +121,8 @@ class DatabaseLease:
         except OSError as exc:
             raise MigrationError("database_lease_unavailable") from exc
         tombstone.unlink()
+        if moved_identity == owned_identity:
+            raise MigrationError("database_lease_unavailable")
 
 
 def acquire_database_lease(database_url: str) -> DatabaseLease:
@@ -100,20 +137,27 @@ def acquire_database_lease(database_url: str) -> DatabaseLease:
         raise MigrationError("database_lease_unavailable") from exc
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     token = uuid.uuid4().hex
+    payload = f"pid={os.getpid()}\nutc={timestamp}\ntoken={token}\n".encode("ascii")
     stat_result = os.fstat(descriptor)
-    lease = DatabaseLease(
-        database_path=database_path,
-        lock_path=lock_path,
-        _descriptor=descriptor,
-        _identity=(stat_result.st_dev, stat_result.st_ino),
-        _token=token,
-    )
+    identity = (stat_result.st_dev, stat_result.st_ino)
     try:
-        payload = f"pid={os.getpid()}\nutc={timestamp}\ntoken={token}\n".encode("ascii")
         if os.write(descriptor, payload) != len(payload):
             raise OSError("incomplete lease write")
         os.fsync(descriptor)
-        return lease
-    except Exception:
-        lease.release()
-        raise
+        return DatabaseLease(
+            database_path=database_path,
+            lock_path=lock_path,
+            _descriptor=descriptor,
+            _identity=identity,
+            _token=token,
+            _payload=payload,
+        )
+    except Exception as exc:
+        os.close(descriptor)
+        try:
+            current = lock_path.lstat()
+            if (current.st_dev, current.st_ino) == identity:
+                lock_path.unlink()
+        except OSError:
+            pass
+        raise MigrationError("database_lease_unavailable") from exc

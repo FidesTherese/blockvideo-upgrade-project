@@ -578,6 +578,16 @@ class DatabaseLease:
 
 def acquire_database_lease(database_url: str) -> DatabaseLease: ...
 
+def create_verified_backup(
+    database_path: Path,
+    source: sqlite3.Connection,
+    metadata: MetaData,
+    expected_identities: dict[str, TableIdentity],
+    source_schema_version: int,
+    *,
+    before_publish: Callable[[], None],
+) -> VerifiedBackup: ...
+
 def critical_identity_snapshot(
     connection: sqlite3.Connection, metadata: MetaData
 ) -> dict[str, TableIdentity]: ...
@@ -606,10 +616,15 @@ Acquisition never polls, sleeps, retries, or removes an
 existing file; contention raises `database_lease_unavailable` before the database is
 opened. The file contains PID and UTC time but those values are never returned
 through HTTP. The returned `DatabaseLease` retains ownership until `release()` and stores the
-open-file identity plus a random token written into the lock. Release closes the
-Windows descriptor only after capturing that identity/token, atomically renames the
-current lock path to a unique owner tombstone, and deletes the tombstone only when
-both identity and token match. If a replacement lock was moved by the race, release
+open-file identity plus the exact canonical PID/UTC/random-token payload bytes written
+at acquisition. `assert_held_for()` and `release()` each read both the retained
+descriptor and the current lock path and require the descriptor identity, path
+identity, and both byte sequences to equal the acquired identity/payload. In-place
+content mutation therefore invalidates ownership and release never treats freshly
+self-read mutated bytes as its token. Release closes the Windows descriptor only after
+this validation, atomically renames the current lock path to a unique owner tombstone,
+and deletes the tombstone only when its identity and bytes still match the acquisition
+record. If a replacement lock was moved by the race, release
 atomically hard-links it back only when the lock path is still absent, then removes
 the tombstone; a restore collision fails without deleting either other-owner file.
 Release is idempotent and occurs after all database users stop. A stale lease is not
@@ -618,15 +633,22 @@ application or restore process is running.
 
 For a non-empty version-0 DB, free space must exceed database size plus 16 MiB.
 `sqlite3.Connection.backup()` writes to a temporary sibling in
-`<db-parent>/.backups/`; `PRAGMA integrity_check` must return exactly `ok`; critical
-source identities must match. The temporary file is fsynced and hashed before
-publication, atomically replaced into its final name, directory-fsynced where the
-platform permits, then rehashed; unequal pre/post hashes fail and remove the
-incomplete publication. A canonical JSON `<backup>.metadata.json` sidecar binds
+`<db-parent>/.backups/`. Immediately after `mkdir`, the root is checked with `lstat`:
+symlinks, Windows reparse points, and non-directories fail, and its strict resolved
+path must equal `database_path.parent.resolve() / ".backups"` before any temporary
+backup is opened. `PRAGMA integrity_check` must return exactly `ok`; critical source
+identities must match. The temporary file is fsynced and hashed before publication.
+`create_verified_backup()` requires a `before_publish` callback; the runner supplies
+`lambda: lease.assert_held_for(database_url)`, and the backup module invokes it
+immediately before both the backup and metadata `os.replace` calls. The published
+backup is directory-fsynced where the platform permits, then rehashed; unequal
+pre/post hashes fail and remove the incomplete publication. A canonical JSON `<backup>.metadata.json` sidecar binds
 metadata schema version 1, SHA-256 of the normalized canonical target path, source
 `user_version`, complete source critical-identity snapshot, and backup SHA-256. Its
-temporary bytes are fsynced, atomically published, directory-fsynced, and read back
-exactly. The migration then uses one SQLite transaction for additive DDL and
+temporary bytes are fsynced, lease-revalidated, atomically published,
+directory-fsynced, and read back exactly. Lease loss before either publication removes
+temporary files and any already published backup so no incomplete pair remains. The
+migration then uses one SQLite transaction for additive DDL and
 `PRAGMA user_version=1`. Post-verification checks integrity, required tables and
 columns, preserved pre-migration identities, and references. Failure rolls back where
 SQLite permits and retains only a complete verified backup/metadata pair. Every
@@ -1491,6 +1513,9 @@ independent review gates supply the recorded trust decisions.
   WAL/SHM/journal removal only after validation; final reopen verification; spawned-process
   app-vs-app and app-vs-restore exclusion; non-blocking contention with unchanged DB
   bytes; degraded-state lease retention; forced lease replacement/release races;
+  descriptor/path exact-payload checks and in-place tamper rejection; lease loss
+  immediately before each backup publication with no retained partial;
+  redirected/symlink/reparse/non-directory backup-root rejection before writes;
   graceful release/reacquisition; stale-lease refusal; and successful stopped-app restore.
 - **D35:** API contract tests and Vitest interactions for every code/action, stale
   refresh, duplicate click, keyboard focus, role/status text, and 390 px layout.

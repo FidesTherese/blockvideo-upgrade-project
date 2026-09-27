@@ -15,7 +15,12 @@ from historical BlockVideo databases.
   stop at shutdown.
 - Create and verify a database backup before applying pending migrations. Hash,
   integrity-check, identity-check, and fsync temporary bytes before atomic publication;
-  rehash published bytes and atomically/fsynced publish canonical target-bound metadata.
+  require a live-lease callback immediately before each backup/metadata replacement,
+  rehash published bytes, and atomically/fsynced publish canonical target-bound metadata.
+  Lease loss must remove every temporary or partially published pair.
+- After creating `.backups`, reject a symlink, Windows reparse point, or non-directory,
+  and require its strict resolved path to equal the canonical database-parent sibling
+  before writing backup bytes.
 - Apply ordered additive migrations transactionally where SQLite permits it and only
   while the application owns that lease.
 - Build a scratch current-schema SQLite database from registered metadata and match
@@ -41,7 +46,10 @@ from historical BlockVideo databases.
   `.backups`, validates canonical target binding, hash, schema, critical identity,
   integrity, and references, then removes stale `-wal`, `-shm`, and `-journal` files
   under the lease before atomic replacement and final fsync/reopen verification.
-- Release a lease through an identity/token-bound atomic owner tombstone. If a raced
+- Store the exact canonical lease payload at acquisition. Both ownership assertion and
+  release read the retained descriptor and current path and require exact acquired bytes
+  plus descriptor/path inode identity. In-place tampering invalidates ownership.
+- Release a lease through an identity/payload-bound atomic owner tombstone. If a raced
   replacement is moved, restore it without overwrite or fail while retaining it; never
   delete another owner's lease.
 - Create missing database parent directories before lock creation, then test empty,
@@ -61,8 +69,10 @@ metadata; critical row counts and PK identity digests are unchanged; required
 references pass; unknown extras and intentional receipt non-FKs survive. Every backup
 has a canonical target-bound metadata sidecar and identical pre/post-publication hash.
 A failed or unsupported migration leaves the source restorable and produces a bounded
-startup error with no secret/path leakage. Wrong-target, escaping, symlink, special,
-schema/identity/reference-incompatible restores fail before target mutation. Migration,
+startup error with no secret/path leakage. Lease loss before either publication leaves
+no backup or metadata partial, and a redirected/symlink/reparse/non-directory backup
+root is rejected before writes. In-place lock tampering fails assertion and release.
+Wrong-target, escaping, symlink, special, schema/identity/reference-incompatible restores fail before target mutation. Migration,
 live use, and restore are mutually excluded across processes; contention returns
 immediately, raced lease release preserves the other owner, and restore succeeds only
 after the application lease is released.

@@ -6,7 +6,9 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import uuid
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -179,12 +181,31 @@ def _atomic_replace(source: Path, destination: Path) -> None:
     os.replace(source, destination)
 
 
+def _validated_backup_root(database_path: Path) -> Path:
+    backup_root = database_path.parent / ".backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    root_stat = backup_root.lstat()
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    file_attributes = getattr(root_stat, "st_file_attributes", 0)
+    expected_root = database_path.parent.resolve() / ".backups"
+    if (
+        stat.S_ISLNK(root_stat.st_mode)
+        or file_attributes & reparse_flag
+        or not stat.S_ISDIR(root_stat.st_mode)
+        or backup_root.resolve(strict=True) != expected_root
+    ):
+        raise MigrationError("backup_failed")
+    return backup_root
+
+
 def create_verified_backup(
     database_path: Path,
     source: sqlite3.Connection,
     metadata: MetaData,
     expected_identities: dict[str, TableIdentity],
     source_schema_version: int,
+    *,
+    before_publish: Callable[[], None],
 ) -> VerifiedBackup:
     """Verify temp bytes before and after durable atomic backup publication."""
     temporary_path: Path | None = None
@@ -199,8 +220,7 @@ def create_verified_backup(
         if free_bytes <= database_size + _FREE_SPACE_GUARD_BYTES:
             raise MigrationError("backup_failed")
 
-        backup_root = database_path.parent / ".backups"
-        backup_root.mkdir(parents=True, exist_ok=True)
+        backup_root = _validated_backup_root(database_path)
         fsync_directory(database_path.parent)
         unique = uuid.uuid4().hex
         temporary_path = backup_root / f".{database_path.name}.{unique}.tmp"
@@ -225,6 +245,7 @@ def create_verified_backup(
             stream.flush()
             os.fsync(stream.fileno())
         pre_publish_sha256 = sha256_file(temporary_path)
+        before_publish()
         _atomic_replace(temporary_path, final_path)
         fsync_directory(backup_root)
         if sha256_file(final_path) != pre_publish_sha256:
@@ -240,6 +261,7 @@ def create_verified_backup(
             stream.write(backup_metadata.canonical_bytes())
             stream.flush()
             os.fsync(stream.fileno())
+        before_publish()
         _atomic_replace(metadata_temporary_path, final_metadata_path)
         fsync_directory(backup_root)
         if final_metadata_path.read_bytes() != backup_metadata.canonical_bytes():
