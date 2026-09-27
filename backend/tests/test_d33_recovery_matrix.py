@@ -162,6 +162,41 @@ def restart_twice() -> tuple[int, int]:
     return mark_interrupted_operation_jobs(), mark_interrupted_operation_jobs()
 
 
+def _assert_publication_recovery_is_stable(
+    project_id: int,
+    job_id: int,
+    prior_artifact_id: int,
+    expected_status: str,
+) -> None:
+    immediate = recovery_snapshot(project_id)
+    assert any(
+        row["id"] == prior_artifact_id for row in immediate["artifacts"]
+    )
+    artifact_rows = immediate["artifacts"]
+    external_calls = immediate["external_calls"]
+    pointers = {
+        key: immediate["project"][key]
+        for key in (
+            "current_artifact_id",
+            "output_video_path",
+            "output_subtitle_path",
+        )
+    }
+
+    assert mark_interrupted_operation_jobs() == 1
+    after_first = recovery_snapshot(project_id)
+    job = next(row for row in after_first["jobs"] if row["id"] == job_id)
+    assert job["status"] == expected_status
+    assert after_first["artifacts"] == artifact_rows
+    assert after_first["external_calls"] == external_calls
+    assert {
+        key: after_first["project"][key] for key in pointers
+    } == pointers
+
+    assert mark_interrupted_operation_jobs() == 0
+    assert recovery_snapshot(project_id) == after_first
+
+
 class _ReplyAdapter:
     def __init__(self, operation_id: str, arguments: dict[str, Any]) -> None:
         self.operation_id = operation_id
@@ -1079,6 +1114,33 @@ def test_checkpoint_and_cancellation_process_death_is_stable(
     assert recovery_snapshot(project_id) == recovered
 
 
+@pytest.mark.asyncio
+async def test_immediate_shutdown_drains_unstarted_task_and_reopens_registry(
+    temp_storage: Path,
+) -> None:
+    del temp_storage
+    project_id, _prior_artifact_id = _seed_canonical_state()
+    with get_session_factory()() as db, atomic_write(db):
+        job_id = create_pending_job(db, project_id).id
+    registry = JobRegistry()
+    callback_started = False
+
+    async def work(_cancel_check: Any) -> None:
+        nonlocal callback_started
+        callback_started = True
+
+    task = registry.submit(job_id, work)
+    await registry.shutdown()
+
+    assert task.cancelled()
+    assert not callback_started
+    assert registry._tasks == {}
+    assert registry._cancel_flags == {}
+    assert not registry.is_running(job_id)
+    registry.start()
+    assert registry.accepting
+
+
 def test_shutdown_cancellation_reconciles_running_job_without_remote_duplicate(
     temp_storage: Path,
 ) -> None:
@@ -1372,6 +1434,9 @@ def test_resumed_publication_does_not_replace_referenced_job_history_video(
     snapshot = recovery_snapshot(project_id)
     assert snapshot["project"]["current_artifact_id"] == prior_artifact_id
     assert [row for row in snapshot["artifacts"] if row["job_id"] == job_id] == []
+    _assert_publication_recovery_is_stable(
+        project_id, job_id, prior_artifact_id, "pending"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1390,7 +1455,7 @@ def test_publication_eligibility_failure_leaves_candidate_and_destination_unchan
     blocker: str,
     error_type: type[Exception],
 ) -> None:
-    project_id, _prior_artifact_id = _seed_canonical_state()
+    project_id, prior_artifact_id = _seed_canonical_state()
     job_id = _new_running_job(project_id)
     directory = project_dir(project_id) / "history" / f"job-{job_id:08d}"
     candidate = directory / "video.pending.mp4"
@@ -1451,6 +1516,13 @@ def test_publication_eligibility_failure_leaves_candidate_and_destination_unchan
         for row in recovery_snapshot(project_id)["artifacts"]
         if row["job_id"] == job_id
     ] == []
+    expected_status = {
+        "cancelled": "cancelled",
+        "unresolved_call": "unknown",
+    }.get(blocker, "failed")
+    _assert_publication_recovery_is_stable(
+        project_id, job_id, prior_artifact_id, expected_status
+    )
 
 
 @pytest.mark.parametrize("change", ["mutate", "delete"])
@@ -1512,6 +1584,10 @@ def test_subtitle_identity_change_at_artifact_boundary_rolls_back_publication(
     assert final.read_bytes() == candidate_bytes
     assert not (directory / "manifest.json").exists()
     assert recovery_snapshot(project_id) == before
+    assert prior_path.read_bytes() == b"prior-success"
+    _assert_publication_recovery_is_stable(
+        project_id, job_id, prior_artifact_id, "pending"
+    )
     assert prior_path.read_bytes() == b"prior-success"
 
 
@@ -1582,6 +1658,9 @@ def test_identical_destination_reference_never_removes_or_replaces_files(
     snapshot = recovery_snapshot(project_id)
     assert len(snapshot["artifacts"]) == 1
     assert snapshot["project"]["current_artifact_id"] == prior_artifact_id
+    _assert_publication_recovery_is_stable(
+        project_id, job_id, prior_artifact_id, "pending"
+    )
 
 
 @pytest.mark.parametrize("boundary", ["flush", "commit"])
@@ -1590,7 +1669,7 @@ def test_artifact_database_failure_leaves_only_unreferenced_video_orphan(
     monkeypatch: pytest.MonkeyPatch,
     boundary: str,
 ) -> None:
-    project_id, _prior_artifact_id = _seed_canonical_state()
+    project_id, prior_artifact_id = _seed_canonical_state()
     job_id = _new_running_job(project_id)
     directory = project_dir(project_id) / "history" / f"job-{job_id:08d}"
     candidate = directory / "video.pending.mp4"
@@ -1609,9 +1688,9 @@ def test_artifact_database_failure_leaves_only_unreferenced_video_orphan(
         }
 
     monkeypatch.setattr(artifact_store, "validate_video", validate)
+    original_flush = Session.flush
+    original_commit = Session.commit
     if boundary == "flush":
-        original_flush = Session.flush
-
         def fail_artifact_flush(self: Session, objects: Any = None) -> None:
             if any(isinstance(value, GenerationArtifact) for value in self.new):
                 raise OSError("synthetic artifact flush failure")
@@ -1644,6 +1723,11 @@ def test_artifact_database_failure_leaves_only_unreferenced_video_orphan(
     assert set(directory.iterdir()) == {final}
     assert not (directory / "manifest.json").exists()
     assert recovery_snapshot(project_id) == before
+    monkeypatch.setattr(Session, "flush", original_flush)
+    monkeypatch.setattr(Session, "commit", original_commit)
+    _assert_publication_recovery_is_stable(
+        project_id, job_id, prior_artifact_id, "pending"
+    )
 
 
 @pytest.mark.parametrize("boundary", ["before", "after"])

@@ -3,7 +3,7 @@
 ## D33 current result (2026-09-24 JST)
 
 Read `work-unit-33.md`, `work-report-33.md`, the D33 section of `docs/DTD.md`, and
-`docs/modules/operation-core.md` first. D33 verifies exactly 37 canonical request,
+`docs/modules/operation-core.md` first. D33 verifies exactly 38 canonical request,
 provider, checkpoint, cancellation, shutdown, publication, replay, and database-
 failure scenarios against isolated SQLite/media roots. Fixed fsynced subprocess
 markers prove provider claim/send/response boundaries, checkpoint persistence,
@@ -17,18 +17,20 @@ after exact revision/input/reference checks; only an exact unreferenced same-job
 video orphan may be replaced; subtitle identity is rechecked; successful metadata
 lives only in transactional `GenerationArtifact.manifest_json`. Pipeline checkpoint
 acceptance synchronizes job input identity. `JobRegistry` closes admission before
-drain, cancels/awaits accepted tasks, rejects post-close submission without local
-state, and reopens before each lifespan dispatcher. No schema, dependency, public
+drain, repeatedly cancels/awaits and removes all accepted tasks plus cancellation/
+liveness state until quiescent, rejects post-close submission without local state,
+and reopens before each lifespan dispatcher. No schema, dependency, public
 test selector, real provider, distributed lock, or queue was added.
 
-Focused recovery gate: 145 passed, including all 37 D33 scenarios, with one existing
-Starlette/httpx warning in 36.92s. The first full backend run had 1170 passed, 7
-skipped and one known timing-sensitive D22 diagnostics-equality failure; its isolated
-rerun passed, which is not a full-suite result. One fresh sequential full rerun then
-passed 1171 with 7 existing ONNX skips and the same warning in 155.15s. Ruff passed.
-Frontend: 16 files / 123 tests passed in 9.68s; TypeScript/Vite built 188 modules in
-1.97s; ESLint passed. Exact marker, restart, remote-attempt, artifact, RED/GREEN, and
-artifact-check evidence is in `work-report-33.md`.
+Final-review D33 run: 38 passed in 22.35s. The related recovery gate passed 146,
+including all 38 D33 scenarios, with one existing Starlette/httpx warning in 42.62s.
+The first full backend run had 1171 passed, 7 skipped and one timing-sensitive D22
+shared-deadline failure; its isolated rerun passed, which is not a full-suite result.
+One fresh sequential full rerun then passed 1172 with 7 existing ONNX skips and the
+same warning in 171.33s. Ruff passed. Frontend: 16 files / 123 tests passed in
+11.54s; TypeScript/Vite built 188 modules in 2.21s; ESLint passed. Exact marker,
+restart, remote-attempt, artifact, RED/GREEN, and artifact-check evidence is in
+`work-report-33.md`.
 
 This is single-server SQLite crash/recovery correctness evidence only, not a multi-
 server, load, throughput, latency, or capacity claim. Tests used fake/synthetic

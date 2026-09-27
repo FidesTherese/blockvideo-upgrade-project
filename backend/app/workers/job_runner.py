@@ -158,13 +158,22 @@ class JobRegistry:
         return task
 
     async def shutdown(self) -> None:
-        """Close admission, then cancel and await every previously accepted task."""
+        """Close admission, then cancel, await, and remove every accepted task."""
         self.close()
-        tasks = tuple(self._tasks.values())
-        for task in tasks:
-            task.cancel()
-        if tasks:
+        while self._tasks:
+            captured = tuple(self._tasks.items())
+            tasks = tuple(task for _job_id, task in captured)
+            for task in tasks:
+                task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            for job_id, task in captured:
+                if self._tasks.get(job_id) is task:
+                    self._tasks.pop(job_id, None)
+                self._cancel_flags.pop(job_id, None)
+                clear_running(job_id)
+        for job_id in tuple(self._cancel_flags):
+            self._cancel_flags.pop(job_id, None)
+            clear_running(job_id)
 
     def request_cancel(self, job_id: int) -> bool:
         """Signal a live task or persist cancellation for a pending job.

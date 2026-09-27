@@ -1,5 +1,7 @@
 # D33 Crash and Recovery Matrix Implementation Plan
 
+**Status:** Complete. Final review verified 38 D33 scenarios, the related 146-test recovery gate, and all repository gates; D34 has not started.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prove stable restart behavior at every durable request, provider, checkpoint, cancellation, and publication boundary without duplicate remote attempts or loss of prior successful artifacts.
@@ -136,7 +138,7 @@ shutdown/submit, and repeated lifespan entry. Task 3 remains unstarted.
 **Interfaces:**
 - Report each durable marker, pre/post-restart state, second-restart transition count, remote attempt count, and retained artifact identity.
 
-- [ ] **Step 1: Run focused and full verification sequentially**
+- [x] **Step 1: Run focused and full verification sequentially**
 
 ```bash
 cd backend && python -m uv run pytest tests/test_d33_recovery_matrix.py tests/test_external_call_recovery.py tests/test_job_recovery.py tests/test_artifact_history.py tests/test_operation_durability.py tests/test_generation_controls.py -q
@@ -147,7 +149,7 @@ cd frontend && npx -y pnpm@10.18.3 build
 cd frontend && npx -y pnpm@10.18.3 lint
 ```
 
-- [ ] **Step 2: Inspect outputs and write the report**
+- [x] **Step 2: Inspect outputs and write the report**
 
 ```bash
 git status --short
@@ -157,12 +159,12 @@ git ls-files .env storage release-evidence
 
 Record exact pass/skip/failure counts and state that D34 has not started. Mark D33 incomplete if any scenario duplicates a remote send, changes frozen input, publishes an incomplete artifact, loses prior history, or changes state on the second restart.
 
-- [ ] **Step 3: Commit and push the implementation task**
+- [x] **Step 3: Commit and push the final-review correction**
 
 ```bash
-git add backend docs/plan-c/work-report-33.md docs/plan-c/handoff.md docs/modules/operation-core.md specification.md docs/DTD.md
-git commit -m "[DONE] Mission 33 Verify crash and recovery boundaries"
-git push
+git add backend/app/workers/job_runner.py backend/tests/test_d33_recovery_matrix.py docs/implementation-plan-33.md docs/plan-c/work-report-33.md docs/plan-c/handoff.md
+git commit -m "fix: close final D33 recovery review gaps"
+git push bv_upgrade main
 ```
 
 Do not tag, publish, deploy, or start D34 before the D33 gate is reviewed.
