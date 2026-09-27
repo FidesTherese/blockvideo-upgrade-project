@@ -39,8 +39,9 @@ The following choices resolve implementation ambiguities:
 3. D34 uses SQLite `PRAGMA user_version`; unversioned supported databases are
    version 0 and the first explicit current schema is version 1. Compatibility is
    exact at SQLite-affinity level for every existing known column against a scratch
-   current-schema database built from registered metadata. Python's `sqlite3` backup
-   API creates the pre-migration copy. One non-blocking exclusive database lease is
+   current-schema database built from registered metadata. Known table/column matching
+   follows SQLite case-insensitivity and rejects duplicate known identifiers that collide
+   by case before DDL. Python's `sqlite3` backup API creates the pre-migration copy. One non-blocking exclusive database lease is
    acquired before migration and held for the full application lifespan. Offline
    restore acquires the same lease and fails immediately while an app is live. No
    Alembic dependency is added.
@@ -485,7 +486,11 @@ Version 0 classification is structural. The critical known tables are exactly
 `language_turns`. Unknown extra tables and unknown extra columns are preserved.
 Before accepting any non-empty supported v0 or v1 database, registered
 `Base.metadata` creates a scratch current-schema SQLite database. `PRAGMA table_info` is read from both files.
-For every existing column whose table and column name are known to current metadata,
+Table and column names are indexed by case-folded SQLite identifiers for classification
+and missing detection while SQL uses each observed identifier's actual spelling. A pair
+of known metadata table names, or known columns within one metadata table, that collide
+under this normalization fails `unsupported_legacy_schema` before scratch creation or
+legacy DDL. For every existing column whose table and column name are known to current metadata,
 the observed SQLite affinity must equal the scratch column's affinity. Affinity is
 derived from the declared type using SQLite's ordered rules: `INT` -> `INTEGER`;
 `CHAR`/`CLOB`/`TEXT` -> `TEXT`; `BLOB` or an empty declaration -> `BLOB`;
@@ -494,11 +499,17 @@ with any unequal affinity fails `unsupported_legacy_schema`; aliases, coercible
 runtime values, and SQLAlchemy type-family similarity do not relax the comparison.
 Missing tables are created from current metadata. Missing columns are added only
 when nullable or when a server default can preserve existing rows. No column is
-dropped, renamed, or retyped.
+dropped, renamed, or retyped. The upstream and D30 fixtures are frozen explicit SQL
+files; they do not call current metadata and do not derive ancestry by dropping current
+columns or tables.
 
 Before backup or DDL, the runner captures for every critical table that exists:
-(1) exact row count and (2) a canonical primary-key identity digest. The digest is
-SHA-256 over compact, sorted-key, UTF-8 JSON containing the table name, ordered PK
+(1) exact row count and (2) a canonical primary-key identity digest. The caller passes
+registered current metadata explicitly. The snapshot builds the scratch schema, derives
+its exact PK order, and requires the observed table to expose those same PK columns in
+that order. A missing expected PK column, unreadable PK query, absent current PK, or
+altered legacy PK declaration fails `unsupported_legacy_schema`; the legacy declaration
+never selects digest columns. The digest is SHA-256 over compact, sorted-key, UTF-8 JSON containing the table name, ordered PK
 column names from the scratch schema, and every PK tuple encoded as typed values
 (`integer` with canonical decimal text or `text` with the exact string), sorted by
 the canonical encoded tuple bytes. There are no locale-dependent conversions. After
@@ -524,9 +535,12 @@ turn IDs with reciprocal predecessor/successor consistency. The
 intentional non-FKs: immutable receipts survive project/job deletion and reserve
 those IDs against reuse, so existence is not required; when a referenced job still exists, its project ID
 must equal the receipt project ID. `language_requests.project_id` and
-`core_request_id` are likewise durable correlation references: when the target or
-receipt exists its ID and ownership must agree, but absence is valid for deleted
-projects or requests that never committed an operation. No relationship is validated
+`core_request_id` are likewise durable correlation references. A missing project row
+is valid after deletion. If the core receipt exists, however, the language
+`project_id` must be non-null and exactly equal `operation_requests.project_id`; a
+request that never committed a receipt may retain a null project. Parent/successor turn
+checks explicitly test reciprocal columns for `IS NULL` before inequality so SQL
+three-valued logic cannot admit a missing reciprocal link. No relationship is validated
 by row order, display text, title, or other mutable content.
 
 #### Migration interfaces
@@ -555,6 +569,10 @@ class DatabaseLease:
 
 def acquire_database_lease(database_url: str) -> DatabaseLease: ...
 
+def critical_identity_snapshot(
+    connection: sqlite3.Connection, metadata: MetaData
+) -> dict[str, TableIdentity]: ...
+
 def migrate_database(
     database_url: str, metadata: MetaData, *, lease: DatabaseLease
 ) -> MigrationResult: ...
@@ -568,9 +586,11 @@ Only file-backed `sqlite:///` URLs are migrated. In-memory test databases are
 created directly and assigned version 1. Any other dialect fails
 `unsupported_database`; D34 does not claim cross-database support.
 
-`acquire_database_lease()` resolves the configured file-backed database and attempts
-one sibling `<database>.migration.lock` creation with `os.open(...,
-O_CREAT|O_EXCL|O_WRONLY)`. Acquisition never polls, sleeps, retries, or removes an
+`acquire_database_lease()` resolves the configured file-backed database, creates its
+parent with `Path.mkdir(parents=True, exist_ok=True)`, and only then attempts one sibling
+`<database>.migration.lock` creation with `os.open(...,
+O_CREAT|O_EXCL|O_WRONLY)`. Parent/lock creation failure maps to lease unavailability.
+Acquisition never polls, sleeps, retries, or removes an
 existing file; contention raises `database_lease_unavailable` before the database is
 opened. The file contains PID and UTC time but those values are never returned
 through HTTP. The returned `DatabaseLease` retains ownership until `release()`;
@@ -598,9 +618,14 @@ and releases the lease in `finally`. If an application (including degraded start
 is live, restore fails `database_lease_unavailable` before reading the backup or
 opening/replacing the target. Reverse SQL is prohibited.
 
-`db.init_db()` becomes registration plus `Base.metadata.create_all()` only for a
-migration-approved/current database; reflective mutation moves to
-`migrations/schema.py`. `main.lifespan()` registers models, acquires the lease, calls
+`db.register_models()` is registration-only and `db.init_db()` is
+`Base.metadata.create_all()` only for a migration-approved/current database;
+reflective mutation moves to `migrations/schema.py`. Task 1 temporarily retains the
+deprecated `_add_missing_columns(engine)` solely so pre-D34 tests collect: it opens the
+engine's DBAPI connection and delegates to `apply_v0_to_v1(connection, Base.metadata)`.
+Neither `init_db()` nor startup calls it. Tasks 2/3 migrate those legacy tests to the
+runner and remove the wrapper. `main.lifespan()` wiring is intentionally Task 3, not a
+Task 1 acceptance condition. In Task 3 it registers models, acquires the lease, calls
 migration before `init_db()` and interrupted-job recovery, retains the lease while
 ready or degraded, stops dispatcher/database users at shutdown, and releases the
 lease as its final database-lifecycle action.
@@ -1418,9 +1443,13 @@ independent review gates supply the recorded trust decisions.
   history path with referenced/current artifact protection and stable replay. The
   retrieval-index manifest tests remain unchanged and continue to cover that separate
   subsystem.
-- **D34:** empty/current/upstream/D30/partial/newer/corrupt fixtures; scratch-metadata
-  affinity equality for every existing known column and rejection of each affinity
-  mismatch/name collision; preservation of unknown extra tables/columns; backup hash,
+- **D34:** empty/current/upstream/D30/partial/newer/corrupt fixtures; frozen explicit
+  upstream/D30 SQL independent of current metadata; SQLite-case-insensitive
+  classification/missing detection; pre-DDL rejection of case-colliding duplicate known
+  identifiers; scratch-metadata affinity equality for every existing known column and rejection of each affinity
+  mismatch/name collision; preservation of unknown extra tables/columns; nested-path
+  parent creation before lease; exact scratch-PK order and malformed/missing legacy PK
+  rejection; language receipt ownership and explicit-null reciprocal turn checks; backup hash,
   integrity, exact critical-table row counts, canonical pre/post PK identity digests,
   declared FK checks, every enumerated ID-reference check, and intentional receipt
   non-FK survival; missing/released/mismatched lease
@@ -1523,7 +1552,10 @@ restart is a no-op and prior artifacts remain.
 
 Create migration contracts, application-lifetime lease, backup, schema, runner,
 startup state, and startup API. Build a scratch current-schema DB from registered
-metadata; require exact affinity for every existing known column; capture and compare
+metadata; classify and detect missing known identifiers case-insensitively, reject
+case-colliding duplicate known metadata before DDL, and require exact affinity for every
+existing known column. Pass metadata into every critical snapshot, derive exact ordered
+PKs only from scratch current metadata, reject altered/missing legacy PKs, capture and compare
 critical-table row counts and canonical PK identity digests; and validate every
 enumerated ownership/reference ID while preserving intentional receipt non-FKs and
 unknown extras. Move reflective schema mutation from `db.py`; acquire the lease before

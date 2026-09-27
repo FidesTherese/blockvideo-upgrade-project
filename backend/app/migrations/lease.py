@@ -67,6 +67,7 @@ def acquire_database_lease(database_url: str) -> DatabaseLease:
     lock_path = database_path.with_name(f"{database_path.name}.migration.lock")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     try:
+        database_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(lock_path, flags, 0o600)
     except OSError as exc:
         raise MigrationError("database_lease_unavailable") from exc

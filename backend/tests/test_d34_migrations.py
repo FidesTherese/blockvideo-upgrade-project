@@ -5,15 +5,22 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 
 from app.migrations.contracts import MigrationError
 from app.migrations.lease import acquire_database_lease
-from app.migrations.schema import apply_v0_to_v1, classify_v0, sqlite_affinity
+from app.migrations.schema import (
+    apply_v0_to_v1,
+    classify_v0,
+    critical_identity_snapshot,
+    sqlite_affinity,
+    validate_critical_references,
+)
 from app.db import Base, init_db, register_models, reset_db_for_tests
 from tests.fixtures.migrations.build_fixtures import (
     FIXTURE_BUILDERS,
     build_affinity_collision,
+    build_altered_legacy_primary_key,
     build_fixture,
     build_matching_affinity_aliases,
 )
@@ -128,6 +135,62 @@ def test_classify_accepts_declared_type_aliases_with_equal_affinity(tmp_path: Pa
         classify_v0(connection, Base.metadata)
 
 
+def test_case_insensitive_known_identifiers_are_classified_and_extended(
+    tmp_path: Path,
+) -> None:
+    path = build_fixture("d30_v0", tmp_path / "mixed-case.db", Base.metadata)
+    with sqlite3.connect(path) as connection:
+        connection.execute('ALTER TABLE projects RENAME TO temporary_projects')
+        connection.execute('ALTER TABLE temporary_projects RENAME TO "Projects"')
+        connection.execute('ALTER TABLE "Projects" RENAME COLUMN id TO temporary_id')
+        connection.execute('ALTER TABLE "Projects" RENAME COLUMN temporary_id TO "ID"')
+        connection.execute('ALTER TABLE "Projects" DROP COLUMN current_artifact_id')
+        connection.execute("UPDATE \"Projects\" SET title='mixed' WHERE \"ID\"=101")
+        connection.commit()
+
+        classify_v0(connection, Base.metadata)
+        apply_v0_to_v1(connection, Base.metadata)
+        project_tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)='projects'"
+            )
+        ]
+        columns = {
+            row[1].casefold()
+            for row in connection.execute('PRAGMA table_info("Projects")')
+        }
+        assert project_tables == ["Projects"]
+        assert {column.name.casefold() for column in Base.metadata.tables["projects"].columns} <= columns
+        assert connection.execute('SELECT "ID", "Title" FROM "Projects"').fetchone() == (
+            101,
+            "mixed",
+        )
+
+
+@pytest.mark.parametrize("duplicate_kind", ("table", "column"))
+def test_case_colliding_known_metadata_identifiers_are_rejected_before_ddl(
+    duplicate_kind: str,
+) -> None:
+    metadata = MetaData()
+    if duplicate_kind == "table":
+        Table("projects", metadata, Column("id", Integer, primary_key=True))
+        Table("PROJECTS", metadata, Column("other_id", Integer, primary_key=True))
+    else:
+        Table(
+            "projects",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("ID", Integer),
+        )
+
+    with sqlite3.connect(":memory:") as connection:
+        with pytest.raises(MigrationError) as exc_info:
+            apply_v0_to_v1(connection, metadata)
+        assert not _schema(connection)
+    assert exc_info.value.reason_code == "unsupported_legacy_schema"
+
+
 @pytest.mark.parametrize("fixture_name", tuple(FIXTURE_BUILDERS))
 def test_schema_version_fixtures_are_deterministic(
     tmp_path: Path, fixture_name: str
@@ -136,6 +199,18 @@ def test_schema_version_fixtures_are_deterministic(
     second = build_fixture(fixture_name, tmp_path / "second.db", Base.metadata)
     with sqlite3.connect(first) as first_connection, sqlite3.connect(second) as second_connection:
         assert _dump(first_connection) == _dump(second_connection)
+
+
+@pytest.mark.parametrize("fixture_name", ("upstream_v0", "d30_v0"))
+def test_historical_fixture_ddl_is_independent_of_current_metadata(
+    tmp_path: Path, fixture_name: str
+) -> None:
+    path = build_fixture(fixture_name, tmp_path / f"{fixture_name}.db", MetaData())
+    with sqlite3.connect(path) as connection:
+        assert "projects" in _schema(connection)
+        assert connection.execute("SELECT title FROM projects WHERE id=101").fetchone() == (
+            "fixture-project",
+        )
 
 
 @pytest.mark.parametrize(
@@ -251,6 +326,108 @@ def test_additive_init_db_only_creates_registered_schema(
     finally:
         reset_db_for_tests()
         config.reset_settings_cache()
+
+
+def test_critical_identity_uses_current_metadata_pk_order(tmp_path: Path) -> None:
+    path = build_fixture("d30_v0", tmp_path / "identity.db", Base.metadata)
+    with sqlite3.connect(path) as connection:
+        snapshot = critical_identity_snapshot(connection, Base.metadata)
+    assert snapshot["projects"].primary_key_columns == ("id",)
+
+
+def test_critical_identity_rejects_altered_legacy_primary_key(tmp_path: Path) -> None:
+    path = tmp_path / "altered-pk.db"
+    build_altered_legacy_primary_key(path, Base.metadata)
+    with sqlite3.connect(path) as connection:
+        with pytest.raises(MigrationError) as exc_info:
+            critical_identity_snapshot(connection, Base.metadata)
+    assert exc_info.value.reason_code == "unsupported_legacy_schema"
+
+
+def test_critical_identity_rejects_missing_expected_primary_key(tmp_path: Path) -> None:
+    path = tmp_path / "missing-pk.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE projects (title TEXT PRIMARY KEY)")
+        with pytest.raises(MigrationError) as exc_info:
+            critical_identity_snapshot(connection, Base.metadata)
+    assert exc_info.value.reason_code == "unsupported_legacy_schema"
+
+
+@pytest.mark.parametrize(
+    ("language_project_id", "receipt_project_id"),
+    ((None, 1), (2, 1), (1, None)),
+)
+def test_language_request_with_core_receipt_requires_matching_project(
+    language_project_id: int | None,
+    receipt_project_id: int | None,
+) -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(
+            "CREATE TABLE operation_requests (request_id TEXT PRIMARY KEY, project_id INTEGER);"
+            "CREATE TABLE language_requests ("
+            "request_id TEXT PRIMARY KEY, core_request_id TEXT, project_id INTEGER);"
+        )
+        connection.execute(
+            "INSERT INTO operation_requests VALUES ('core', ?)",
+            (receipt_project_id,),
+        )
+        connection.execute(
+            "INSERT INTO language_requests VALUES ('language', 'core', ?)",
+            (language_project_id,),
+        )
+        with pytest.raises(MigrationError) as exc_info:
+            validate_critical_references(connection)
+    assert exc_info.value.reason_code == "migration_verification_failed"
+
+
+def test_language_request_may_reference_deleted_project_when_receipt_ownership_matches() -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(
+            "CREATE TABLE operation_requests (request_id TEXT PRIMARY KEY, project_id INTEGER);"
+            "CREATE TABLE language_requests ("
+            "request_id TEXT PRIMARY KEY, core_request_id TEXT, project_id INTEGER);"
+            "INSERT INTO operation_requests VALUES ('core', 1);"
+            "INSERT INTO language_requests VALUES ('language', 'core', 1);"
+        )
+        validate_critical_references(connection)
+
+
+@pytest.mark.parametrize(
+    ("parent_request_id", "successor_request_id"),
+    (("parent", None), (None, "successor")),
+)
+def test_language_turn_reciprocal_link_rejects_null_other_side(
+    parent_request_id: str | None, successor_request_id: str | None
+) -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(
+            "CREATE TABLE language_requests (request_id TEXT PRIMARY KEY);"
+            "CREATE TABLE language_turns (request_id TEXT PRIMARY KEY, "
+            "parent_request_id TEXT, successor_request_id TEXT);"
+            "INSERT INTO language_requests VALUES ('current');"
+            "INSERT INTO language_requests VALUES ('parent');"
+            "INSERT INTO language_requests VALUES ('successor');"
+            "INSERT INTO language_turns VALUES ('parent', NULL, NULL);"
+            "INSERT INTO language_turns VALUES ('successor', NULL, NULL);"
+        )
+        connection.execute(
+            "INSERT INTO language_turns VALUES ('current', ?, ?)",
+            (parent_request_id, successor_request_id),
+        )
+        with pytest.raises(MigrationError) as exc_info:
+            validate_critical_references(connection)
+    assert exc_info.value.reason_code == "migration_verification_failed"
+
+
+def test_schema_version_lease_creates_nested_database_parent(tmp_path: Path) -> None:
+    database = tmp_path / "nested" / "database" / "lease.db"
+    lease = acquire_database_lease(f"sqlite:///{database.as_posix()}")
+    try:
+        assert database.parent.is_dir()
+        assert lease.lock_path.exists()
+        assert not database.exists()
+    finally:
+        lease.release()
 
 
 def test_schema_version_lease_is_bound_to_one_database_and_release_is_idempotent(

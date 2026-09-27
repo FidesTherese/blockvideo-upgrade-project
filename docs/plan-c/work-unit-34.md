@@ -16,19 +16,26 @@ from historical BlockVideo databases.
 - Create and verify a database backup before applying pending migrations.
 - Apply ordered additive migrations transactionally where SQLite permits it and only
   while the application owns that lease.
-- Build a scratch current-schema SQLite database from registered metadata and require
-  every existing known column's observed SQLite affinity to equal its scratch affinity;
-  preserve unknown extra tables/columns and fail known-name affinity collisions.
+- Build a scratch current-schema SQLite database from registered metadata and match
+  known table/column names with SQLite case-insensitivity. Require every existing known
+  column's observed affinity to equal its scratch affinity; preserve unknown extras and
+  reject case-colliding duplicate known identifiers before DDL.
+- Freeze upstream and D30 ancestry fixtures as explicit historical SQL rather than
+  deriving either schema by subtracting current metadata.
 - For `projects`, `blocks`, `generation_jobs`, `operation_requests`, `external_calls`,
   `generation_artifacts`, `settings_revisions`, `language_requests`, and
   `language_turns`, compare pre/post exact row counts and canonical PK-identity
-  digests, then validate declared FKs and every DTD-enumerated ownership/reference ID.
+  digests using exact ordered PK columns from scratch current metadata; reject a missing,
+  unreadable, or altered legacy PK. Validate declared FKs and every DTD-enumerated
+  ownership/reference ID. A language request linked to an existing core receipt must
+  have the same non-null project owner, and turn links must be explicitly reciprocal.
   Preserve the intentional non-FK project/job references in immutable receipts.
 - Roll back operationally by restoring the verified pre-migration backup, not by
   destructive reverse SQL. Offline restore must acquire the same lease non-blocking
   and fail without touching the database when an application process is live.
-- Test empty, current, pre-Plan-C, interrupted, malformed, and newer-version inputs,
-  plus spawned-process app/app and app/restore exclusion.
+- Create missing database parent directories before lock creation, then test empty,
+  current, pre-Plan-C, interrupted, malformed, mixed-case, nested-path, and newer-version
+  inputs, plus spawned-process app/app and app/restore exclusion.
 
 ## Non-goals
 

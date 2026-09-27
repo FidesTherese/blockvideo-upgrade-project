@@ -11,36 +11,14 @@ from sqlalchemy import MetaData, create_engine
 FixtureBuilder = Callable[[Path, MetaData], None]
 
 
-_REMOVED_UPSTREAM_COLUMNS = {
-    "projects": (
-        "revision",
-        "visual_focus_enabled",
-        "subtitle_mode",
-        "narration_pacing_mode",
-        "pronunciation_overrides",
-        "current_artifact_id",
-    ),
-    "generation_jobs": (
-        "kind",
-        "block_index",
-        "input_revision",
-        "input_snapshot",
-        "input_fingerprint",
-        "plan_json",
-        "parent_job_id",
-        "recovery_message",
-    ),
-}
+_FIXTURE_ROOT = Path(__file__).parent
 
-_PLAN_C_TABLES = (
-    "external_calls",
-    "generation_artifacts",
-    "language_turns",
-    "language_requests",
-    "operation_requests",
-    "settings_revisions",
-    "project_identities",
-)
+
+def _create_frozen(path: Path, fixture_name: str) -> None:
+    ddl = (_FIXTURE_ROOT / f"{fixture_name}.sql").read_text(encoding="utf-8")
+    with sqlite3.connect(path) as connection:
+        connection.executescript(ddl)
+        connection.execute("PRAGMA user_version=0")
 
 
 def _create_current(path: Path, metadata: MetaData, *, version: int) -> None:
@@ -87,28 +65,13 @@ def build_empty_v0(path: Path, metadata: MetaData) -> None:
 
 
 def build_upstream_v0(path: Path, metadata: MetaData) -> None:
-    _create_current(path, metadata, version=0)
-    with sqlite3.connect(path) as connection:
-        _seed_project(connection)
-        for table in _PLAN_C_TABLES:
-            connection.execute(f'DROP TABLE "{table}"')
-        for table, columns in _REMOVED_UPSTREAM_COLUMNS.items():
-            for column in columns:
-                connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
-        connection.execute('ALTER TABLE projects ADD COLUMN "legacy_marker" TEXT')
-        connection.execute(
-            "UPDATE projects SET legacy_marker = 'keep-upstream' WHERE id = 101"
-        )
-        connection.execute(
-            "CREATE TABLE legacy_notes (id INTEGER PRIMARY KEY, note TEXT NOT NULL)"
-        )
-        connection.execute("INSERT INTO legacy_notes VALUES (1, 'keep-table')")
+    del metadata
+    _create_frozen(path, "upstream_v0")
 
 
 def build_d30_v0(path: Path, metadata: MetaData) -> None:
-    _create_current(path, metadata, version=0)
-    with sqlite3.connect(path) as connection:
-        _seed_project(connection)
+    del metadata
+    _create_frozen(path, "d30_v0")
 
 
 def build_partially_additive_v0(path: Path, metadata: MetaData) -> None:
@@ -133,6 +96,15 @@ def build_newer_v2(path: Path, metadata: MetaData) -> None:
     _create_current(path, metadata, version=2)
     with sqlite3.connect(path) as connection:
         _seed_project(connection)
+
+
+def build_altered_legacy_primary_key(path: Path, metadata: MetaData) -> None:
+    del metadata
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE projects (id INTEGER NOT NULL, title TEXT PRIMARY KEY)"
+        )
+        connection.execute("INSERT INTO projects VALUES (101, 'fixture-project')")
 
 
 def build_affinity_collision(

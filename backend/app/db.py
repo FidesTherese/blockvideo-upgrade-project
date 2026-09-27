@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
@@ -108,6 +109,17 @@ def register_models() -> None:
 def init_db() -> None:
     """Create the registered current schema after migration approval."""
     Base.metadata.create_all(bind=get_engine())
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """Deprecated test compatibility wrapper for the D34 schema operation."""
+    from app.migrations.schema import apply_v0_to_v1
+
+    connection = engine.raw_connection()
+    try:
+        apply_v0_to_v1(connection, Base.metadata)
+    finally:
+        connection.close()
 
 
 def get_db() -> Iterator[Session]:

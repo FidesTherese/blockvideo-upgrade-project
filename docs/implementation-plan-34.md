@@ -14,11 +14,20 @@
 - Supported schema versions are exactly 0 and 1; values above 1 fail `schema_too_new`.
 - Support only `sqlite:///` file URLs plus in-memory test setup; no Alembic and no cross-database claim.
 - Preserve unknown extra tables/columns; never drop, rename, or retype a column.
-- Every existing known column must have the same SQLite affinity as its counterpart
-  in a scratch current-schema DB built from registered metadata; any known-name
-  affinity mismatch fails `unsupported_legacy_schema`.
+- Match known table/column names with SQLite case-insensitivity. Every existing known
+  column must have the same SQLite affinity as its scratch counterpart; case-colliding
+  duplicate known identifiers and affinity mismatches fail
+  `unsupported_legacy_schema` before DDL.
+- Upstream and D30 fixtures are frozen explicit SQL and must not be derived from current
+  metadata by dropping current tables/columns.
 - A non-empty v0 database is backed up and verified before migration.
-- Startup calls `register_models()` before touching the database, acquires the application-lifetime database lease non-blocking, then runs `migrate_database()` and `init_db()`/`Base.metadata.create_all()` under that lease; interrupted-job recovery and dispatcher startup remain later, and the lease is released only after database users stop during lifespan shutdown.
+- Task 1 keeps a deprecated `_add_missing_columns(engine)` compatibility wrapper only
+  so legacy tests collect; it delegates to `apply_v0_to_v1()` and is never called by
+  `init_db()` or startup. Tasks 2/3 migrate those tests to the runner and remove it.
+- Startup lifecycle wiring is intentionally Task 3. At that point startup calls
+  `register_models()` before touching the database, acquires the application-lifetime
+  lease, then runs `migrate_database()` and `init_db()` under it before recovery/
+  dispatcher work, and releases it only after database users stop.
 - A degraded application retains the lease until shutdown. A second app process and offline restore fail immediately with `database_lease_unavailable`; they never wait, migrate, restore, or modify database bytes.
 - Stale lease files are never removed automatically. Operator removal is allowed only after confirming no application or restore process is live.
 - HTTP errors never expose raw database/backup/lease paths.
@@ -72,7 +81,9 @@ acquire_database_lease(database_url: str) -> DatabaseLease
 apply_v0_to_v1(connection: sqlite3.Connection, metadata: MetaData) -> None
 classify_v0(connection: sqlite3.Connection, metadata: MetaData) -> None
 sqlite_affinity(declared_type: str) -> Literal["INTEGER", "TEXT", "BLOB", "REAL", "NUMERIC"]
-critical_identity_snapshot(connection: sqlite3.Connection) -> dict[str, TableIdentity]
+critical_identity_snapshot(
+    connection: sqlite3.Connection, metadata: MetaData
+) -> dict[str, TableIdentity]
 validate_critical_references(connection: sqlite3.Connection) -> None
 register_models() -> None
 init_db() -> None
@@ -82,15 +93,18 @@ init_db() -> None
 
 - [ ] **Step 1: Write RED classification tests**
 
-Generate deterministic temporary fixtures for empty v0, upstream/pre-Plan-C, D30,
-partially additive, malformed known-column collision, current v1, and newer v2
-databases. Build the expected schema only by registering all models and applying
-`Base.metadata.create_all()` to a scratch SQLite DB. For every existing known column in any non-empty supported v0 or v1 database,
-compare observed and scratch affinities using SQLite's ordered affinity rules. Add one
-fixture per mismatching affinity family/name collision and assert
-`unsupported_legacy_schema`; assert aliases/coercible values do not pass. Assert
-missing known columns remain additive, unknown extra tables/columns survive, v1 is
-unchanged, and v2 fails `schema_too_new`. Assert migration entry points reject a
+Generate deterministic temporary fixtures for empty v0, frozen explicit-SQL
+upstream/pre-Plan-C and D30, partially additive, malformed known-column/PK collision,
+current v1, and newer v2 databases. Prove the two historical fixtures build with empty
+metadata. Build only the expected current schema through registered metadata in a
+scratch DB. Match known identifiers case-insensitively for classification and missing
+checks, and reject case-colliding duplicate known metadata identifiers before DDL. For
+every existing known column in any non-empty supported v0 or v1 database, compare
+observed and scratch affinities using SQLite's ordered rules. Assert missing known
+columns remain additive, unknown extras survive, v1 is unchanged, and v2 fails
+`schema_too_new`. Pass metadata explicitly to critical identity snapshots; prove PK
+order comes from scratch metadata and malformed/missing legacy PKs are rejected. Assert
+language/core receipt project ownership and null-safe reciprocal links. Assert migration entry points reject a
 missing, released, or different-database lease before opening or changing the
 database.
 
@@ -105,12 +119,14 @@ Expected: FAIL because `app.migrations` does not exist.
 
 - [ ] **Step 3: Implement additive schema operations**
 
-Move `_add_missing_columns()` behavior from `app.db` into `apply_v0_to_v1()`.
-Create the scratch schema from registered metadata, read both schemas with
-`PRAGMA table_info`, and compare exact derived affinities before DDL. Quote
-identifiers through SQLAlchemy's dialect preparer, create missing metadata tables,
-add only nullable/defaulted columns, preserve unknown tables/columns, and set
-`PRAGMA user_version=1` in the migration transaction. Split model import registration into side-effect-free `register_models()` and keep `init_db()` as `Base.metadata.create_all()` only; neither may inspect/alter an unapproved legacy schema.
+Move reflective behavior into `apply_v0_to_v1()`. Index known table/column names
+case-insensitively while retaining actual observed spellings for quoted SQL. Validate
+metadata name uniqueness before scratch creation or DDL. Derive critical PK columns
+only from scratch metadata and compare the observed PK declaration exactly. Create a
+missing database parent before lease lock creation. Split model registration into
+side-effect-free `register_models()` and keep `init_db()` as `create_all()` only.
+Temporarily restore deprecated `_add_missing_columns(engine)` as a direct D34 delegate;
+no production startup path calls it. Startup migration wiring remains Task 3.
 
 - [ ] **Step 4: Run Task 1 tests and lint**
 
@@ -169,15 +185,17 @@ the same project, project current artifact -> same project, and language turn re
 parent/successor existence and reciprocal linkage. Assert receipt project/job IDs are
 intentional non-FKs that may outlive deleted rows and remain unchanged, while an
 existing referenced job must agree with the receipt project; language
-request project/core IDs are correlation references that must agree when targets
-exist but may be absent after deletion/no commit. Assert the source remains current
+request project/core IDs are correlation references: a missing project remains valid,
+but an existing core receipt requires a non-null equal project ID. Reciprocal language
+turn SQL must reject explicit nulls as well as unequal IDs. Assert the source remains current
 or restorable and the verified backup remains while the caller still holds the
 application lease. Operational restore acquires the same database lease internally and non-blocking before reading the backup or opening/replacing the target, holds it through hash/integrity verification and `os.replace()`, and releases it in `finally`. Reject a modified backup. With a spawned application process holding the lease, assert restore immediately fails `database_lease_unavailable` and leaves target and backup bytes unchanged; after application shutdown, the same restore succeeds.
 
 - [ ] **Step 3: Implement the runner and backup module**
 
 Parse only file-backed SQLite URLs. `acquire_database_lease()` creates the sibling lease file exclusively and returns immediately on contention. `migrate_database()` requires and validates the caller-owned live lease and never releases it; it classifies `PRAGMA user_version`, backs up non-empty v0 databases with `sqlite3.Connection.backup()`, executes v0-to-v1, then verifies integrity, required tables/columns, exact pre/post critical-table row
-counts and canonical PK identity digests, zero `PRAGMA foreign_key_check` rows, and
+counts and canonical PK identity digests by calling
+`critical_identity_snapshot(connection, metadata)`, zero `PRAGMA foreign_key_check` rows, and
 all DTD-enumerated semantic ID references. It does not reinterpret intentional
 receipt/history non-FKs as mandatory live-row references. Empty databases may be created directly at v1 without a backup. `restore_database_backup()` owns a separately acquired lease for its entire offline operation and releases it in `finally`.
 

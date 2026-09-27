@@ -48,6 +48,26 @@ def _quote(identifier: str) -> str:
     return sqlite_dialect().identifier_preparer.quote(identifier)
 
 
+def _normalized_identifier(identifier: str) -> str:
+    return identifier.casefold()
+
+
+def _identifier_map(identifiers: Iterable[str]) -> dict[str, str]:
+    indexed: dict[str, str] = {}
+    for identifier in identifiers:
+        normalized = _normalized_identifier(identifier)
+        if normalized in indexed:
+            raise MigrationError("unsupported_legacy_schema")
+        indexed[normalized] = identifier
+    return indexed
+
+
+def _validate_metadata_identifiers(metadata: MetaData) -> None:
+    _identifier_map(table.name for table in metadata.tables.values())
+    for table in metadata.tables.values():
+        _identifier_map(column.name for column in table.columns)
+
+
 def _table_names(connection: sqlite3.Connection) -> set[str]:
     return {
         str(row[0])
@@ -58,16 +78,23 @@ def _table_names(connection: sqlite3.Connection) -> set[str]:
     }
 
 
+def _table_name_map(connection: sqlite3.Connection) -> dict[str, str]:
+    return _identifier_map(_table_names(connection))
+
+
 def _table_info(
     connection: sqlite3.Connection, table: str
 ) -> dict[str, tuple[str, int]]:
-    return {
+    info = {
         str(row[1]): (str(row[2] or ""), int(row[5]))
         for row in connection.execute(f"PRAGMA table_info({_quote(table)})")
     }
+    _identifier_map(info)
+    return info
 
 
 def _scratch_schema(metadata: MetaData) -> dict[str, dict[str, tuple[str, int]]]:
+    _validate_metadata_identifiers(metadata)
     scratch = sqlite3.connect(":memory:")
     engine = create_engine(
         "sqlite://",
@@ -80,6 +107,10 @@ def _scratch_schema(metadata: MetaData) -> dict[str, dict[str, tuple[str, int]]]
             table: _table_info(scratch, table)
             for table in _table_names(scratch)
         }
+    except MigrationError:
+        raise
+    except Exception as exc:
+        raise MigrationError("unsupported_legacy_schema") from exc
     finally:
         engine.dispose()
 
@@ -87,40 +118,49 @@ def _scratch_schema(metadata: MetaData) -> dict[str, dict[str, tuple[str, int]]]
 def classify_v0(connection: sqlite3.Connection, metadata: MetaData) -> None:
     """Reject known table/column collisions with unequal SQLite affinity."""
     expected = _scratch_schema(metadata)
-    for table in _table_names(connection) & expected.keys():
-        observed_columns = _table_info(connection, table)
-        expected_columns = expected[table]
-        for column in observed_columns.keys() & expected_columns.keys():
-            observed_affinity = sqlite_affinity(observed_columns[column][0])
-            expected_affinity = sqlite_affinity(expected_columns[column][0])
-            if observed_affinity != expected_affinity:
+    expected_tables = _identifier_map(expected)
+    observed_tables = _table_name_map(connection)
+    for normalized_table in observed_tables.keys() & expected_tables.keys():
+        observed_columns = _table_info(
+            connection, observed_tables[normalized_table]
+        )
+        expected_columns = expected[expected_tables[normalized_table]]
+        observed_names = _identifier_map(observed_columns)
+        expected_names = _identifier_map(expected_columns)
+        for normalized_column in observed_names.keys() & expected_names.keys():
+            observed = observed_columns[observed_names[normalized_column]]
+            current = expected_columns[expected_names[normalized_column]]
+            if sqlite_affinity(observed[0]) != sqlite_affinity(current[0]):
                 raise MigrationError("unsupported_legacy_schema")
 
 
 def _missing_columns(
     connection: sqlite3.Connection, metadata: MetaData
 ) -> list[tuple[str, object]]:
-    existing_tables = _table_names(connection)
+    existing_tables = _table_name_map(connection)
     missing: list[tuple[str, object]] = []
     for table in metadata.sorted_tables:
-        if table.name not in existing_tables:
+        actual_table = existing_tables.get(_normalized_identifier(table.name))
+        if actual_table is None:
             continue
-        present = _table_info(connection, table.name)
+        present = _identifier_map(_table_info(connection, actual_table))
         for column in table.columns:
-            if column.name in present:
+            if _normalized_identifier(column.name) in present:
                 continue
             if not column.nullable and column.server_default is None:
                 raise MigrationError("unsupported_legacy_schema")
-            missing.append((table.name, column))
+            missing.append((actual_table, column))
     return missing
 
 
 def _create_missing_tables(
-    connection: sqlite3.Connection, metadata: MetaData, existing_tables: set[str]
+    connection: sqlite3.Connection,
+    metadata: MetaData,
+    existing_tables: dict[str, str],
 ) -> None:
     dialect = sqlite_dialect()
     for table in metadata.sorted_tables:
-        if table.name in existing_tables:
+        if _normalized_identifier(table.name) in existing_tables:
             continue
         connection.execute(str(CreateTable(table).compile(dialect=dialect)))
         for index in sorted(table.indexes, key=lambda item: item.name or ""):
@@ -140,7 +180,7 @@ def apply_v0_to_v1(connection: sqlite3.Connection, metadata: MetaData) -> None:
         return
 
     missing_columns = _missing_columns(connection, metadata)
-    existing_tables = _table_names(connection)
+    existing_tables = _table_name_map(connection)
     dialect = sqlite_dialect()
     if connection.in_transaction:
         raise MigrationError("migration_failed")
@@ -192,38 +232,74 @@ def _identity_digest(
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _primary_key_columns(
+    info: dict[str, tuple[str, int]],
+) -> tuple[str, ...]:
+    positioned = sorted(
+        ((position, column) for column, (_, position) in info.items() if position > 0)
+    )
+    if not positioned or [position for position, _ in positioned] != list(
+        range(1, len(positioned) + 1)
+    ):
+        raise MigrationError("unsupported_legacy_schema")
+    return tuple(column for _, column in positioned)
+
+
 def critical_identity_snapshot(
     connection: sqlite3.Connection,
+    metadata: MetaData,
 ) -> dict[str, TableIdentity]:
-    """Capture canonical row counts and primary-key identities for critical tables."""
-    tables = _table_names(connection)
+    """Capture identities using exact ordered primary keys from current metadata."""
+    expected = _scratch_schema(metadata)
+    expected_tables = _identifier_map(expected)
+    observed_tables = _table_name_map(connection)
     snapshot: dict[str, TableIdentity] = {}
     for table in CRITICAL_TABLES:
-        if table not in tables:
-            continue
-        info = _table_info(connection, table)
-        primary_key_columns = tuple(
-            column
-            for column, (_, position) in sorted(
-                info.items(), key=lambda item: item[1][1]
-            )
-            if position > 0
-        )
-        if not primary_key_columns:
+        normalized_table = _normalized_identifier(table)
+        expected_table = expected_tables.get(normalized_table)
+        if expected_table is None:
             raise MigrationError("unsupported_legacy_schema")
-        quoted_columns = ", ".join(_quote(column) for column in primary_key_columns)
-        rows = connection.execute(
-            f"SELECT {quoted_columns} FROM {_quote(table)}"
-        ).fetchall()
-        row_count = int(
-            connection.execute(f"SELECT COUNT(*) FROM {_quote(table)}").fetchone()[0]
-        )
+        actual_table = observed_tables.get(normalized_table)
+        if actual_table is None:
+            continue
+
+        expected_info = expected[expected_table]
+        observed_info = _table_info(connection, actual_table)
+        expected_primary_key = _primary_key_columns(expected_info)
+        observed_primary_key = _primary_key_columns(observed_info)
+        if tuple(map(_normalized_identifier, observed_primary_key)) != tuple(
+            map(_normalized_identifier, expected_primary_key)
+        ):
+            raise MigrationError("unsupported_legacy_schema")
+
+        observed_columns = _identifier_map(observed_info)
+        try:
+            selected_columns = tuple(
+                observed_columns[_normalized_identifier(column)]
+                for column in expected_primary_key
+            )
+        except KeyError as exc:
+            raise MigrationError("unsupported_legacy_schema") from exc
+        quoted_columns = ", ".join(_quote(column) for column in selected_columns)
+        try:
+            rows = connection.execute(
+                f"SELECT {quoted_columns} FROM {_quote(actual_table)}"
+            ).fetchall()
+            row_count_row = connection.execute(
+                f"SELECT COUNT(*) FROM {_quote(actual_table)}"
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise MigrationError("unsupported_legacy_schema") from exc
+        if row_count_row is None:
+            raise MigrationError("unsupported_legacy_schema")
+        row_count = int(row_count_row[0])
+        canonical_primary_key = tuple(expected_primary_key)
         snapshot[table] = TableIdentity(
             table=table,
             row_count=row_count,
-            primary_key_columns=primary_key_columns,
+            primary_key_columns=canonical_primary_key,
             primary_key_sha256=_identity_digest(
-                table, primary_key_columns, rows
+                table, canonical_primary_key, rows
             ),
         )
     return snapshot
@@ -316,14 +392,12 @@ def validate_critical_references(connection: sqlite3.Connection) -> None:
         (
             {
                 ("language_requests", frozenset({"project_id", "core_request_id"})),
-                ("projects", frozenset({"id"})),
                 ("operation_requests", frozenset({"request_id", "project_id"})),
             },
-            "SELECT 1 FROM language_requests l LEFT JOIN projects p ON p.id=l.project_id "
-            "LEFT JOIN operation_requests r ON r.request_id=l.core_request_id "
-            "WHERE (l.project_id IS NOT NULL AND p.id IS NOT NULL AND p.id<>l.project_id) "
-            "OR (r.request_id IS NOT NULL AND l.project_id IS NOT NULL "
-            "AND r.project_id<>l.project_id) LIMIT 1",
+            "SELECT 1 FROM language_requests l LEFT JOIN operation_requests r "
+            "ON r.request_id=l.core_request_id "
+            "WHERE r.request_id IS NOT NULL AND (l.project_id IS NULL "
+            "OR r.project_id IS NULL OR r.project_id<>l.project_id) LIMIT 1",
         ),
     ]
     for requirements, query in checks:
@@ -349,8 +423,10 @@ def validate_critical_references(connection: sqlite3.Connection) -> None:
             "WHERE own.request_id IS NULL OR "
             "(t.parent_request_id IS NOT NULL AND "
             "(parent_request.request_id IS NULL OR parent_turn.request_id IS NULL "
+            "OR parent_turn.successor_request_id IS NULL "
             "OR parent_turn.successor_request_id<>t.request_id)) OR "
             "(t.successor_request_id IS NOT NULL AND "
             "(successor_request.request_id IS NULL OR successor_turn.request_id IS NULL "
+            "OR successor_turn.parent_request_id IS NULL "
             "OR successor_turn.parent_request_id<>t.request_id)) LIMIT 1",
         )

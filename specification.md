@@ -64,14 +64,17 @@ absence of arbitrary future unjournaled network code.
 
 D34 acquires one non-blocking exclusive database lease before migration and holds it
 for the application lifetime through shutdown, including degraded startup. Migration
-runs only under that lease. For every existing known column, observed SQLite affinity
-must exactly equal the corresponding affinity in a scratch current-schema database
-built from registered metadata; unknown extra tables/columns remain untouched and a
-known-name mismatch fails. The nine critical tables named in the DTD retain exact row
-counts and canonical PK identity digests, and all enumerated ID references are checked
-before/after; immutable receipt project/job IDs remain intentional non-FKs. Offline
-restore must acquire the same lease non-blocking and fails without database I/O while
-an application process is live.
+runs only under that lease. Lease acquisition creates a missing database parent before
+creating the sibling lock. Known table and column matching is SQLite-case-insensitive;
+case-colliding duplicate known identifiers and affinity mismatches fail before DDL.
+Unknown extra tables/columns remain untouched. The nine critical tables named in the
+DTD retain exact row counts and canonical PK identity digests using ordered PK columns
+from scratch current metadata, never an altered legacy declaration. Language requests
+with an existing core receipt require a non-null matching project owner, reciprocal
+turn links are null-safe, and all other enumerated ID references are checked before/
+after. Immutable receipt project/job IDs remain intentional non-FKs. Offline restore
+must acquire the same lease non-blocking and fails without database I/O while an
+application process is live.
 
 D32 keeps SQLite `BEGIN IMMEDIATE`, receipts, revisions, persisted job claims, and
 artifact publication as the correctness boundaries. A committed dialogue successor
