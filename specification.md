@@ -65,7 +65,9 @@ absence of arbitrary future unjournaled network code.
 D34 acquires one non-blocking exclusive database lease before migration and holds it
 for the application lifetime through shutdown, including degraded startup. Migration
 runs only under that lease. Lease acquisition creates a missing database parent before
-creating the sibling lock. Known table and column matching uses SQLite-compatible ASCII folding (A--Z to
+creating the sibling lock; release atomically tombstones the current path, validates
+the owned open-file identity/token, and never deletes a raced replacement owner's
+lease. Known table and column matching uses SQLite-compatible ASCII folding (A--Z to
 a--z only); non-ASCII characters remain unchanged. ASCII-case-colliding duplicate
 known identifiers and affinity mismatches fail before DDL. Unknown extra
 tables/columns retain their actual spellings and remain untouched. The nine critical tables named in the
@@ -73,9 +75,14 @@ DTD retain exact row counts and canonical PK identity digests using ordered PK c
 from scratch current metadata, never an altered legacy declaration. Language requests
 with an existing core receipt require a non-null matching project owner, reciprocal
 turn links are null-safe, and all other enumerated ID references are checked before/
-after. Immutable receipt project/job IDs remain intentional non-FKs. Offline restore
-must acquire the same lease non-blocking and fails without database I/O while an
-application process is live.
+after. Immutable receipt project/job IDs remain intentional non-FKs. Backup publication hashes, integrity/identity-checks, and fsyncs temporary bytes before
+atomic replacement, rechecks the published hash, and atomically publishes canonical
+metadata bound to the target path, source schema/critical identities, and backup hash.
+Offline restore must acquire the same lease non-blocking and fails without database I/O
+while an application process is live. It accepts only regular non-symlink files in the
+exact target `.backups` sibling, validates target binding/hash/schema/identity/references,
+then removes stale SQLite journals under the lease before atomic replacement and final
+fsync/reopen verification.
 
 D32 keeps SQLite `BEGIN IMMEDIATE`, receipts, revisions, persisted job claims, and
 artifact publication as the correctness boundaries. A committed dialogue successor

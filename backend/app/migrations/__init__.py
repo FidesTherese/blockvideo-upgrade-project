@@ -1,5 +1,5 @@
 """Dependency-isolated SQLite migration interfaces."""
-from app.migrations.backup import sha256_file
+from app.migrations.backup import BackupMetadata, backup_metadata_path, sha256_file
 from app.migrations.contracts import MigrationError, MigrationResult, TableIdentity
 from app.migrations.lease import DatabaseLease, acquire_database_lease
 from app.migrations.runner import migrate_database, restore_database_backup
@@ -12,12 +12,14 @@ from app.migrations.schema import (
 )
 
 __all__ = [
+    "BackupMetadata",
     "DatabaseLease",
     "MigrationError",
     "MigrationResult",
     "TableIdentity",
     "acquire_database_lease",
     "apply_v0_to_v1",
+    "backup_metadata_path",
     "classify_v0",
     "critical_identity_snapshot",
     "migrate_database",

@@ -1,8 +1,10 @@
 """D34 versioned SQLite migration and historical compatibility tests."""
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -13,7 +15,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 
-from app.migrations.backup import sha256_file
+from app.migrations.backup import backup_metadata_path, sha256_file
 from app.migrations.contracts import MigrationError, MigrationResult, TableIdentity
 from app.migrations.lease import acquire_database_lease
 from app.migrations.runner import migrate_database, restore_database_backup
@@ -107,6 +109,14 @@ def _dump(connection: sqlite3.Connection) -> tuple[str, ...]:
 
 def _url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
+
+
+def _published_backups(root: Path) -> tuple[Path, ...]:
+    return tuple(
+        path
+        for path in root.iterdir()
+        if not path.name.endswith(".metadata.json")
+    )
 
 
 def _migrate(path: Path) -> MigrationResult:
@@ -667,7 +677,10 @@ def test_lease_file_is_exclusive_bounded_and_never_removed_as_stale(
     lease = acquire_database_lease(url)
     try:
         payload = lease.lock_path.read_text(encoding="ascii")
-        assert re.fullmatch(r"pid=\d+\nutc=\d{4}-\d\d-\d\dT[^\n]+Z\n", payload)
+        assert re.fullmatch(
+            r"pid=\d+\nutc=\d{4}-\d\d-\d\dT[^\n]+Z\ntoken=[0-9a-f]{32}\n",
+            payload,
+        )
         with pytest.raises(MigrationError) as exc_info:
             acquire_database_lease(url)
         assert exc_info.value.reason_code == "database_lease_unavailable"
@@ -744,7 +757,7 @@ def test_runner_backs_up_and_preserves_critical_identities(tmp_path: Path) -> No
 
     result = _migrate(database)
 
-    backups = tuple((tmp_path / ".backups").iterdir())
+    backups = _published_backups(tmp_path / ".backups")
     assert result.status == "migrated"
     assert result.backup_created is True
     assert len(backups) == 1
@@ -866,7 +879,7 @@ def test_runner_retains_verified_backup_when_ddl_fails(
 
     assert exc_info.value.reason_code == "migration_failed"
     assert database.read_bytes() == before
-    backups = tuple((tmp_path / ".backups").iterdir())
+    backups = _published_backups(tmp_path / ".backups")
     assert len(backups) == 1
     assert sha256_file(backups[0])
 
@@ -909,11 +922,14 @@ def test_runner_surfaces_post_migration_verification_failures_with_backup(
         _migrate(database)
 
     assert exc_info.value.reason_code == "migration_verification_failed"
-    backups = tuple((tmp_path / ".backups").iterdir())
+    backups = _published_backups(tmp_path / ".backups")
     assert len(backups) == 1
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (1,)
-    restore_database_backup(_url(database), backups[0], sha256_file(backups[0]))
+    monkeypatch.undo()
+    restore_database_backup(
+        _url(database), backups[0], sha256_file(backups[0]), Base.metadata
+    )
     assert database.read_bytes() == backups[0].read_bytes()
 
 
@@ -942,11 +958,13 @@ def test_restore_rejects_modified_backup_and_preserves_target(tmp_path: Path) ->
     database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
     result = _migrate(database)
     migrated = database.read_bytes()
-    backup = next((tmp_path / ".backups").iterdir())
+    backup = _published_backups(tmp_path / ".backups")[0]
     backup.write_bytes(backup.read_bytes() + b"modified")
 
     with pytest.raises(MigrationError) as exc_info:
-        restore_database_backup(_url(database), backup, result.backup_sha256 or "")
+        restore_database_backup(
+            _url(database), backup, result.backup_sha256 or "", Base.metadata
+        )
 
     assert exc_info.value.reason_code == "backup_invalid"
     assert database.read_bytes() == migrated
@@ -961,7 +979,9 @@ def test_restore_rejects_hash_matching_corrupt_backup(tmp_path: Path) -> None:
     corrupt.write_bytes(b"not a sqlite database")
 
     with pytest.raises(MigrationError) as exc_info:
-        restore_database_backup(_url(database), corrupt, sha256_file(corrupt))
+        restore_database_backup(
+            _url(database), corrupt, sha256_file(corrupt), Base.metadata
+        )
 
     assert exc_info.value.reason_code == "backup_invalid"
     assert database.read_bytes() == before
@@ -973,7 +993,7 @@ def test_restore_is_excluded_by_live_process_then_succeeds_offline(
 ) -> None:
     database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
     result = _migrate(database)
-    backup = next((tmp_path / ".backups").iterdir())
+    backup = _published_backups(tmp_path / ".backups")[0]
     backup_bytes = backup.read_bytes()
     migrated_bytes = database.read_bytes()
     ready = tmp_path / "ready"
@@ -983,7 +1003,9 @@ def test_restore_is_excluded_by_live_process_then_succeeds_offline(
         _wait_for(ready, process)
         started = time.monotonic()
         with pytest.raises(MigrationError) as exc_info:
-            restore_database_backup(_url(database), backup, result.backup_sha256 or "")
+            restore_database_backup(
+                _url(database), backup, result.backup_sha256 or "", Base.metadata
+            )
         assert time.monotonic() - started < 1.0
         assert exc_info.value.reason_code == "database_lease_unavailable"
         assert database.read_bytes() == migrated_bytes
@@ -993,9 +1015,295 @@ def test_restore_is_excluded_by_live_process_then_succeeds_offline(
         stdout, stderr = process.communicate(timeout=30)
         assert process.returncode == 0, f"{stdout}\n{stderr}"
 
-    restore_database_backup(_url(database), backup, result.backup_sha256 or "")
+    restore_database_backup(
+        _url(database), backup, result.backup_sha256 or "", Base.metadata
+    )
     assert database.read_bytes() == backup_bytes
     assert backup.read_bytes() == backup_bytes
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
         assert connection.execute("PRAGMA user_version").fetchone() == (0,)
+
+
+def _canonical_metadata(metadata: dict[str, object]) -> bytes:
+    return json.dumps(
+        metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _backup_for_restore(tmp_path: Path) -> tuple[Path, Path, MigrationResult]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    result = _migrate(database)
+    backup = next(
+        path
+        for path in (tmp_path / ".backups").iterdir()
+        if not path.name.endswith(".metadata.json")
+    )
+    return database, backup, result
+
+
+def test_backup_publishes_canonical_target_bound_metadata_and_stable_hash(
+    tmp_path: Path,
+) -> None:
+    database, backup, result = _backup_for_restore(tmp_path)
+    metadata_path = backup_metadata_path(backup)
+    metadata_bytes = metadata_path.read_bytes()
+    metadata = json.loads(metadata_bytes)
+
+    assert metadata_bytes == _canonical_metadata(metadata)
+    assert metadata == {
+        "backup_sha256": result.backup_sha256,
+        "metadata_schema_version": 1,
+        "source_critical_identities": metadata["source_critical_identities"],
+        "source_schema_version": 0,
+        "target_database_path_sha256": metadata["target_database_path_sha256"],
+    }
+    assert metadata["source_critical_identities"]["projects"]["row_count"] == 1
+    assert sha256_file(backup) == result.backup_sha256
+    assert database.resolve() != backup.resolve()
+
+
+def test_backup_rejects_bytes_changed_during_atomic_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.migrations import backup as backup_module
+
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    original_replace = backup_module._atomic_replace
+
+    def replace_then_corrupt(source: Path, destination: Path) -> None:
+        original_replace(source, destination)
+        if not str(destination).endswith(".metadata.json"):
+            with Path(destination).open("ab") as stream:
+                stream.write(b"changed-after-publication")
+
+    monkeypatch.setattr(backup_module, "_atomic_replace", replace_then_corrupt)
+
+    with pytest.raises(MigrationError) as exc_info:
+        _migrate(database)
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert tuple((tmp_path / ".backups").iterdir()) == ()
+
+
+def test_restore_rejects_backup_outside_exact_target_backup_directory(
+    tmp_path: Path,
+) -> None:
+    database, backup, result = _backup_for_restore(tmp_path)
+    outside = tmp_path / "outside.sqlite3"
+    shutil.copyfile(backup, outside)
+    shutil.copyfile(backup_metadata_path(backup), backup_metadata_path(outside))
+    target_before = database.read_bytes()
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(
+            _url(database), outside, result.backup_sha256 or "", Base.metadata
+        )
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == target_before
+
+
+def test_restore_rejects_backup_bound_to_another_target(tmp_path: Path) -> None:
+    source, backup, result = _backup_for_restore(tmp_path / "source")
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    target = build_fixture("current_v1", target_root / "target.db", Base.metadata)
+    target_backup_root = target.parent / ".backups"
+    target_backup_root.mkdir()
+    copied_backup = target_backup_root / backup.name
+    shutil.copyfile(backup, copied_backup)
+    shutil.copyfile(backup_metadata_path(backup), backup_metadata_path(copied_backup))
+    target_before = target.read_bytes()
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(
+            _url(target), copied_backup, result.backup_sha256 or "", Base.metadata
+        )
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert target.read_bytes() == target_before
+    assert source.exists()
+
+
+def test_restore_rejects_symlink_and_special_backup_paths(tmp_path: Path) -> None:
+    database, backup, result = _backup_for_restore(tmp_path)
+    target_before = database.read_bytes()
+    special = backup.parent / "special.sqlite3"
+    special.mkdir()
+    backup_metadata_path(special).write_bytes(backup_metadata_path(backup).read_bytes())
+    with pytest.raises(MigrationError) as special_error:
+        restore_database_backup(
+            _url(database), special, result.backup_sha256 or "", Base.metadata
+        )
+    assert special_error.value.reason_code == "backup_invalid"
+
+    symlink = backup.parent / "linked.sqlite3"
+    try:
+        symlink.symlink_to(backup)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    shutil.copyfile(backup_metadata_path(backup), backup_metadata_path(symlink))
+    with pytest.raises(MigrationError) as symlink_error:
+        restore_database_backup(
+            _url(database), symlink, result.backup_sha256 or "", Base.metadata
+        )
+    assert symlink_error.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == target_before
+
+
+def test_restore_rejects_incompatible_metadata_schema(tmp_path: Path) -> None:
+    database, backup, result = _backup_for_restore(tmp_path)
+    metadata_path = backup_metadata_path(backup)
+    metadata = json.loads(metadata_path.read_bytes())
+    metadata["source_schema_version"] = 2
+    metadata_path.write_bytes(_canonical_metadata(metadata))
+    target_before = database.read_bytes()
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(
+            _url(database), backup, result.backup_sha256 or "", Base.metadata
+        )
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == target_before
+
+
+def test_restore_rejects_noncanonical_metadata_bytes(tmp_path: Path) -> None:
+    database, backup, result = _backup_for_restore(tmp_path)
+    metadata_path = backup_metadata_path(backup)
+    metadata_path.write_bytes(metadata_path.read_bytes() + b"\n")
+    target_before = database.read_bytes()
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(
+            _url(database), backup, result.backup_sha256 or "", Base.metadata
+        )
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == target_before
+
+
+def test_restore_rejects_metadata_identity_mismatch(tmp_path: Path) -> None:
+    database, backup, result = _backup_for_restore(tmp_path)
+    metadata_path = backup_metadata_path(backup)
+    metadata = json.loads(metadata_path.read_bytes())
+    metadata["source_critical_identities"]["projects"]["row_count"] = 99
+    metadata_path.write_bytes(_canonical_metadata(metadata))
+    target_before = database.read_bytes()
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(
+            _url(database), backup, result.backup_sha256 or "", Base.metadata
+        )
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == target_before
+
+
+def test_restore_rejects_reference_incompatible_backup(tmp_path: Path) -> None:
+    database, backup, _result = _backup_for_restore(tmp_path)
+    with sqlite3.connect(backup) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("UPDATE projects SET current_artifact_id=999")
+        connection.commit()
+    new_hash = sha256_file(backup)
+    metadata_path = backup_metadata_path(backup)
+    metadata = json.loads(metadata_path.read_bytes())
+    metadata["backup_sha256"] = new_hash
+    metadata_path.write_bytes(_canonical_metadata(metadata))
+    target_before = database.read_bytes()
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(_url(database), backup, new_hash, Base.metadata)
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == target_before
+
+
+def test_restore_removes_stale_sqlite_sidecars_before_atomic_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, backup, result = _backup_for_restore(tmp_path)
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(f"{database}{suffix}").write_bytes(b"stale")
+    from app.migrations.lease import DatabaseLease
+
+    original_assert = DatabaseLease.assert_held_for
+    held_checks: list[bool] = []
+
+    def record_assert(self: DatabaseLease, database_url: str) -> None:
+        original_assert(self, database_url)
+        held_checks.append(self.lock_path.exists())
+
+    monkeypatch.setattr(DatabaseLease, "assert_held_for", record_assert)
+    restore_database_backup(
+        _url(database), backup, result.backup_sha256 or "", Base.metadata
+    )
+
+    assert len(held_checks) >= 5
+    assert all(held_checks)
+    assert all(
+        not Path(f"{database}{suffix}").exists()
+        for suffix in ("-wal", "-shm", "-journal")
+    )
+    assert sha256_file(database) == result.backup_sha256
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+
+
+def test_lease_release_restores_replacement_moved_by_forced_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.migrations import lease as lease_module
+
+    database = tmp_path / "race.db"
+    lease = acquire_database_lease(_url(database))
+    replacement = b"pid=999\nutc=2026-01-01T00:00:00Z\ntoken=replacement\n"
+    original_replace = lease_module.os.replace
+
+    def replace_after_intruder(source: Path, destination: Path) -> None:
+        Path(source).unlink()
+        Path(source).write_bytes(replacement)
+        original_replace(source, destination)
+
+    monkeypatch.setattr(lease_module.os, "replace", replace_after_intruder)
+    lease.release()
+
+    assert lease.lock_path.read_bytes() == replacement
+    assert not tuple(tmp_path.glob("*.release-*"))
+
+
+def test_lease_release_collision_never_deletes_other_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.migrations import lease as lease_module
+
+    database = tmp_path / "collision.db"
+    lease = acquire_database_lease(_url(database))
+    replacement = b"pid=999\nutc=2026-01-01T00:00:00Z\ntoken=replacement\n"
+    intruder = b"pid=1000\nutc=2026-01-01T00:00:01Z\ntoken=intruder\n"
+    original_replace = lease_module.os.replace
+    original_link = lease_module.os.link
+
+    def replace_after_intruder(source: Path, destination: Path) -> None:
+        Path(source).unlink()
+        Path(source).write_bytes(replacement)
+        original_replace(source, destination)
+
+    def collide_restore(source: Path, destination: Path) -> None:
+        Path(destination).write_bytes(intruder)
+        original_link(source, destination)
+
+    monkeypatch.setattr(lease_module.os, "replace", replace_after_intruder)
+    monkeypatch.setattr(lease_module.os, "link", collide_restore)
+
+    with pytest.raises(MigrationError) as exc_info:
+        lease.release()
+
+    assert exc_info.value.reason_code == "database_lease_unavailable"
+    assert lease.lock_path.read_bytes() == intruder
+    tombstones = tuple(tmp_path.glob("*.release-*"))
+    assert len(tombstones) == 1
+    assert tombstones[0].read_bytes() == replacement

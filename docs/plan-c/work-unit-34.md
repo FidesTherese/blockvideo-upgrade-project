@@ -13,7 +13,9 @@ from historical BlockVideo databases.
 - Acquire one non-blocking exclusive database lease before migration and hold it for
   the full application lifetime, including degraded startup, until database users
   stop at shutdown.
-- Create and verify a database backup before applying pending migrations.
+- Create and verify a database backup before applying pending migrations. Hash,
+  integrity-check, identity-check, and fsync temporary bytes before atomic publication;
+  rehash published bytes and atomically/fsynced publish canonical target-bound metadata.
 - Apply ordered additive migrations transactionally where SQLite permits it and only
   while the application owns that lease.
 - Build a scratch current-schema SQLite database from registered metadata and match
@@ -34,7 +36,14 @@ from historical BlockVideo databases.
   Preserve the intentional non-FK project/job references in immutable receipts.
 - Roll back operationally by restoring the verified pre-migration backup, not by
   destructive reverse SQL. Offline restore must acquire the same lease non-blocking
-  and fail without touching the database when an application process is live.
+  and fail without touching the database when an application process is live. It
+  accepts only regular non-symlink backup/metadata files under the exact target sibling
+  `.backups`, validates canonical target binding, hash, schema, critical identity,
+  integrity, and references, then removes stale `-wal`, `-shm`, and `-journal` files
+  under the lease before atomic replacement and final fsync/reopen verification.
+- Release a lease through an identity/token-bound atomic owner tombstone. If a raced
+  replacement is moved, restore it without overwrite or fail while retaining it; never
+  delete another owner's lease.
 - Create missing database parent directories before lock creation, then test empty,
   current, pre-Plan-C, interrupted, malformed, mixed-case, nested-path, and newer-version
   inputs, plus spawned-process app/app and app/restore exclusion.
@@ -49,7 +58,11 @@ of private databases inside repository tests.
 Supported historical fixtures upgrade to the current schema without data loss and
 remain usable. Every existing known-column affinity exactly matches scratch current
 metadata; critical row counts and PK identity digests are unchanged; required
-references pass; unknown extras and intentional receipt non-FKs survive. A failed or unsupported migration leaves the source restorable and
-produces a bounded startup error with no secret/path leakage. Migration, live use,
-and restore are mutually excluded across processes; contention returns immediately,
-and restore succeeds only after the application lease is released.
+references pass; unknown extras and intentional receipt non-FKs survive. Every backup
+has a canonical target-bound metadata sidecar and identical pre/post-publication hash.
+A failed or unsupported migration leaves the source restorable and produces a bounded
+startup error with no secret/path leakage. Wrong-target, escaping, symlink, special,
+schema/identity/reference-incompatible restores fail before target mutation. Migration,
+live use, and restore are mutually excluded across processes; contention returns
+immediately, raced lease release preserves the other owner, and restore succeeds only
+after the application lease is released.

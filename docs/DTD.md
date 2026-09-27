@@ -10,7 +10,7 @@
 - **Specification:** `specification.md`, `docs/plan-c/work-unit-31.md` through
   `docs/plan-c/work-unit-40.md`
 - **DTD:** `docs/DTD.md`
-- **Updated:** 2026-09-24
+- **Updated:** 2026-09-27
 - **Scope:** sequential hardening, blinded evaluation, and release-readiness decision
 - **Open decisions:** none for implementation. Held-out case content and independent
   evaluator identity remain intentionally outside the implementation process.
@@ -159,7 +159,7 @@ No new third-party package is selected. Direct in-scope dependencies are:
 
 | Dependency | Version/constraint | Symbols and role |
 |---|---|---|
-| Python standard library | Python 3.12.12 verified | `unicodedata.normalize`, `re`, `hashlib.sha256`, `json`, `sqlite3.connect`, `sqlite3.Connection.backup`, `os.open`, `os.close`, `os.unlink`, `os.replace`, `shutil.disk_usage`, `subprocess.run`, `pathlib.Path` |
+| Python standard library | Python 3.12.12 verified | `unicodedata.normalize`, `re`, `hashlib.sha256`, `json`, `sqlite3.connect`, `sqlite3.Connection.backup`, `os.open`, `os.close`, `os.fstat`, `os.fsync`, `os.link`, `os.replace`, `stat.S_ISREG`, `shutil.disk_usage`, `subprocess.run`, `pathlib.Path` |
 | SQLAlchemy | locked by `uv.lock`; project `>=2.0.36` | existing `Session`, `select`, `inspect`, `text`; ORM and writer transactions |
 | Pydantic | locked by `uv.lock`; project `>=2.9.0` | `BaseModel`, `ConfigDict`, `Field`, validators; strict manifests and API DTOs |
 | FastAPI | locked by `uv.lock`; project `>=0.115.0` | `APIRouter`, `Depends`, `HTTPException`; startup status transport |
@@ -563,6 +563,13 @@ class MigrationError(RuntimeError):
         "migration_failed", "migration_verification_failed"
     ]
 
+class BackupMetadata:
+    target_database_path_sha256: str
+    source_schema_version: int
+    source_critical_identities: dict[str, TableIdentity]
+    backup_sha256: str
+    def canonical_bytes(self) -> bytes: ...
+
 class DatabaseLease:
     database_path: Path
     lock_path: Path
@@ -580,7 +587,10 @@ def migrate_database(
 ) -> MigrationResult: ...
 
 def restore_database_backup(
-    database_url: str, backup_path: Path, expected_sha256: str
+    database_url: str,
+    backup_path: Path,
+    expected_sha256: str,
+    metadata: MetaData,
 ) -> None: ...
 ```
 
@@ -595,30 +605,49 @@ O_CREAT|O_EXCL|O_WRONLY)`. Parent/lock creation failure maps to lease unavailabi
 Acquisition never polls, sleeps, retries, or removes an
 existing file; contention raises `database_lease_unavailable` before the database is
 opened. The file contains PID and UTC time but those values are never returned
-through HTTP. The returned `DatabaseLease` retains ownership until `release()`;
-release is idempotent, closes the descriptor, removes only its owned lease file, and
-occurs after all database users stop. A stale lease is not removed automatically;
-explicit operator removal is allowed only after confirming no application or restore
-process is running.
+through HTTP. The returned `DatabaseLease` retains ownership until `release()` and stores the
+open-file identity plus a random token written into the lock. Release closes the
+Windows descriptor only after capturing that identity/token, atomically renames the
+current lock path to a unique owner tombstone, and deletes the tombstone only when
+both identity and token match. If a replacement lock was moved by the race, release
+atomically hard-links it back only when the lock path is still absent, then removes
+the tombstone; a restore collision fails without deleting either other-owner file.
+Release is idempotent and occurs after all database users stop. A stale lease is not
+removed automatically; explicit operator removal is allowed only after confirming no
+application or restore process is running.
 
 For a non-empty version-0 DB, free space must exceed database size plus 16 MiB.
 `sqlite3.Connection.backup()` writes to a temporary sibling in
 `<db-parent>/.backups/`; `PRAGMA integrity_check` must return exactly `ok`; critical
-source table row counts must match. The file is flushed, atomically renamed, and
-SHA-256 recorded. The migration then uses one SQLite transaction for additive DDL
-and `PRAGMA user_version=1`. Post-verification checks integrity, required tables and
-columns, preserved pre-migration row counts, and foreign-key violations. Failure
-rolls back where SQLite permits and retains the verified backup. Every migration
-entry point requires a live caller-owned `DatabaseLease` bound to the same canonical
-database path and rejects a missing, released, or mismatched lease before database
-I/O; migration never releases the application lease.
+source identities must match. The temporary file is fsynced and hashed before
+publication, atomically replaced into its final name, directory-fsynced where the
+platform permits, then rehashed; unequal pre/post hashes fail and remove the
+incomplete publication. A canonical JSON `<backup>.metadata.json` sidecar binds
+metadata schema version 1, SHA-256 of the normalized canonical target path, source
+`user_version`, complete source critical-identity snapshot, and backup SHA-256. Its
+temporary bytes are fsynced, atomically published, directory-fsynced, and read back
+exactly. The migration then uses one SQLite transaction for additive DDL and
+`PRAGMA user_version=1`. Post-verification checks integrity, required tables and
+columns, preserved pre-migration identities, and references. Failure rolls back where
+SQLite permits and retains only a complete verified backup/metadata pair. Every
+migration entry point requires a live caller-owned `DatabaseLease` bound to the same
+canonical database path and rejects a missing, released, or mismatched lease before
+database I/O; it reasserts ownership immediately before backup publication and DDL,
+and migration never releases the application lease.
 
 Operational rollback is offline only. `restore_database_backup()` first acquires the
-same database lease non-blocking, then copies the selected verified backup to a new
-temporary file, verifies its expected hash/integrity, atomically replaces the target,
-and releases the lease in `finally`. If an application (including degraded startup)
-is live, restore fails `database_lease_unavailable` before reading the backup or
-opening/replacing the target. Reverse SQL is prohibited.
+same database lease non-blocking. It accepts only a regular, non-symlink backup and
+regular metadata sidecar directly inside the canonical target sibling `.backups`
+directory. Canonical metadata, target-path binding, caller hash, source schema,
+critical identity, SQLite integrity, structural compatibility, declared foreign keys,
+and semantic references must all validate against the copied/fsynced temporary file.
+Only after every validation passes does restore reassert lease ownership before
+removing each stale target `-wal`, `-shm`, and `-journal` sidecar and before atomically
+replacing the main database. It fsyncs the final file and parent directory where
+supported, then reopens the target and rechecks exact hash, integrity, schema,
+identity, and references. It releases the lease in `finally`. If an application
+(including degraded startup) is live, restore fails `database_lease_unavailable`
+before reading the backup or opening/replacing the target. Reverse SQL is prohibited.
 
 `db.register_models()` is registration-only and `db.init_db()` is
 `Base.metadata.create_all()` only for a migration-approved/current database;
@@ -1453,13 +1482,16 @@ independent review gates supply the recorded trust decisions.
   scratch-metadata affinity equality for every existing known column and rejection of each affinity
   mismatch/name collision; preservation of unknown extra tables/columns; nested-path
   parent creation before lease; exact scratch-PK order and malformed/missing legacy PK
-  rejection; language receipt ownership and explicit-null reciprocal turn checks; backup hash,
-  integrity, exact critical-table row counts, canonical pre/post PK identity digests,
-  declared FK checks, every enumerated ID-reference check, and intentional receipt
-  non-FK survival; missing/released/mismatched lease
-  rejection; spawned-process app-vs-app and app-vs-restore exclusion; non-blocking
-  contention with unchanged DB bytes; degraded-state lease retention; graceful
-  release/reacquisition; stale-lease refusal; and successful stopped-app restore.
+  rejection; language receipt ownership and explicit-null reciprocal turn checks;
+  pre/post-publication backup hash equality, integrity, exact critical-table row counts,
+  canonical pre/post PK identity digests, canonical target-bound metadata, declared FK
+  checks, every enumerated ID-reference check, and intentional receipt non-FK survival;
+  missing/released/mismatched lease rejection; wrong-target, escaping, symlink, special,
+  noncanonical, schema/identity/reference-incompatible restore rejection; stale
+  WAL/SHM/journal removal only after validation; final reopen verification; spawned-process
+  app-vs-app and app-vs-restore exclusion; non-blocking contention with unchanged DB
+  bytes; degraded-state lease retention; forced lease replacement/release races;
+  graceful release/reacquisition; stale-lease refusal; and successful stopped-app restore.
 - **D35:** API contract tests and Vitest interactions for every code/action, stale
   refresh, duplicate click, keyboard focus, role/status text, and 390 px layout.
 - **D36:** strict canonical candidate control plus detached digest; exact D35
@@ -1564,9 +1596,15 @@ critical-table row counts and canonical PK identity digests; and validate every
 enumerated ownership/reference ID while preserving intentional receipt non-FKs and
 unknown extras. Move reflective schema mutation from `db.py`; acquire the lease before
 migration, require it for migration operations, retain it through ready/degraded
-lifespan, and release it after database users stop. Make offline restore acquire the
-same lease non-blocking. Add historical fixtures, spawned-process exclusion tests,
-backup/restore instructions, and degraded-startup tests.
+lifespan, and release it after database users stop through an identity/token-validated
+atomic tombstone. Publish a canonical metadata sidecar only after temp backup
+integrity/identity/hash/fsync validation and verify both atomic publications. Make
+offline restore acquire the same lease non-blocking, require registered metadata and an
+exact target-bound backup under `.backups`, validate hash/schema/identity/references,
+remove stale SQLite journals under repeated ownership assertions, and fsync/reopen
+verify the final target. Add historical fixtures, spawned-process exclusion and forced
+lease-replacement tests, path/wrong-target/WAL/journal restore tests, backup/restore
+instructions, and degraded-startup tests.
 
 #### Step 5 — D35 recovery UI
 

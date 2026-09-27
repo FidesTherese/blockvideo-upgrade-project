@@ -21,7 +21,9 @@
   `unsupported_legacy_schema` before DDL.
 - Upstream and D30 fixtures are frozen explicit SQL and must not be derived from current
   metadata by dropping current tables/columns.
-- A non-empty v0 database is backed up and verified before migration.
+- A non-empty v0 database is backed up and verified before migration. Backup and canonical sidecar metadata are temp-hashed/identity-checked, fsynced, atomically published, directory-fsynced where supported, and reverified after publication.
+- Restore accepts only a regular non-symlink backup under the exact target sibling `.backups` directory and validates canonical target-bound metadata, schema, critical identities, references, integrity, and hash before removing stale SQLite sidecars and atomically replacing/reverifying the target.
+- Lease release uses an identity/token-bound atomic tombstone rename; it never deletes a replacement owner's lease and safely restores a moved replacement when the lock path remains absent.
 - Task 1 keeps a deprecated `_add_missing_columns(engine)` compatibility wrapper only
   so legacy tests collect; it delegates to `apply_v0_to_v1()` and is never called by
   `init_db()` or startup. Tasks 2/3 migrate those tests to the runner and remove it.
@@ -160,8 +162,12 @@ migrate_database(
     database_url: str, metadata: MetaData, *, lease: DatabaseLease
 ) -> MigrationResult
 restore_database_backup(
-    database_url: str, backup_path: Path, expected_sha256: str
+    database_url: str,
+    backup_path: Path,
+    expected_sha256: str,
+    metadata: MetaData,
 ) -> None
+backup_metadata_path(backup_path: Path) -> Path
 sha256_file(path: Path) -> str
 ```
 
@@ -175,8 +181,12 @@ and preserves exact row counts plus canonical PK identity digests for `projects`
 `language_turns`. Assert the digest uses scratch PK order, typed integer/text values,
 canonical sorted compact JSON, and SHA-256. Require the source, backup, and post-DDL
 snapshots to agree for pre-existing tables; newly created critical tables are empty.
-Assert backup is fsynced/atomically renamed and its SHA-256 equals
-`MigrationResult.backup_sha256`.
+Assert backup temporary bytes are integrity/identity-verified, fsynced, hashed before
+atomic publication, directory-fsynced where supported, and rehashed to the same value
+reported by `MigrationResult.backup_sha256`. Assert canonical sidecar metadata is
+atomically/fsynced published and binds metadata schema 1, canonical target path hash,
+source schema, complete critical identity snapshot, and backup hash. Force a
+post-replace byte change and require rejection with no incomplete pair retained.
 
 - [ ] **Step 2: Write RED failure/restore tests**
 
@@ -192,7 +202,7 @@ request project/core IDs are correlation references: a missing project remains v
 but an existing core receipt requires a non-null equal project ID. Reciprocal language
 turn SQL must reject explicit nulls as well as unequal IDs. Assert the source remains current
 or restorable and the verified backup remains while the caller still holds the
-application lease. Operational restore acquires the same database lease internally and non-blocking before reading the backup or opening/replacing the target, holds it through hash/integrity verification and `os.replace()`, and releases it in `finally`. Reject a modified backup. With a spawned application process holding the lease, assert restore immediately fails `database_lease_unavailable` and leaves target and backup bytes unchanged; after application shutdown, the same restore succeeds.
+application lease. Operational restore acquires the same database lease internally and non-blocking before reading the backup or opening/replacing the target, holds it through hash/integrity/schema/identity/reference verification and `os.replace()`, and releases it in `finally`. Reject modified, wrong-target, escaping, symlink, special-file, noncanonical metadata, schema-incompatible, identity-incompatible, and reference-incompatible backups. After all validation, reassert the lease before removing each stale `-wal`, `-shm`, and `-journal` and before main replacement; fsync and reopen/reverify final bytes. With a spawned application process holding the lease, assert restore immediately fails `database_lease_unavailable` and leaves target and backup bytes unchanged; after application shutdown, the same restore succeeds. Force lease-path replacement during release and prove the replacement is restored or retained as an owner tombstone without deleting another owner's lease.
 
 - [ ] **Step 3: Implement the runner and backup module**
 
@@ -200,7 +210,7 @@ Parse only file-backed SQLite URLs. `acquire_database_lease()` creates the sibli
 counts and canonical PK identity digests by calling
 `critical_identity_snapshot(connection, metadata)`, zero `PRAGMA foreign_key_check` rows, and
 all DTD-enumerated semantic ID references. It does not reinterpret intentional
-receipt/history non-FKs as mandatory live-row references. Empty databases may be created directly at v1 without a backup. `restore_database_backup()` owns a separately acquired lease for its entire offline operation and releases it in `finally`.
+receipt/history non-FKs as mandatory live-row references. Empty databases may be created directly at v1 without a backup. `restore_database_backup()` owns a separately acquired lease for its entire offline operation, requires registered metadata for compatibility verification, removes stale SQLite journals only after validation, and releases the lease in `finally`. Lease release atomically tombstones and validates the open-file identity/token before deletion; a raced replacement is restored without overwrite or retained on collision.
 
 - [ ] **Step 4: Run migration tests**
 
