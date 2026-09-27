@@ -20,6 +20,9 @@ SQLiteAffinity: TypeAlias = Literal["INTEGER", "TEXT", "BLOB", "REAL", "NUMERIC"
 _SQLITE_ASCII_FOLD = str.maketrans(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
 )
+_SQLITE_ASCII_UPPER = str.maketrans(
+    "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
 
 CRITICAL_TABLES = (
     "projects",
@@ -36,7 +39,7 @@ CRITICAL_TABLES = (
 
 def sqlite_affinity(declared_type: str) -> SQLiteAffinity:
     """Derive affinity using SQLite's ordered declared-type rules."""
-    normalized = declared_type.upper()
+    normalized = declared_type.translate(_SQLITE_ASCII_UPPER)
     if "INT" in normalized:
         return "INTEGER"
     if any(token in normalized for token in ("CHAR", "CLOB", "TEXT")):
@@ -460,6 +463,7 @@ def validate_critical_references(connection: sqlite3.Connection) -> None:
             f"SELECT 1 FROM {table('operation_requests', 'r')} "
             f"JOIN {table('generation_jobs', 'j')} ON {column('generation_jobs', 'id', 'j')}="
             f"{column('operation_requests', 'job_id', 'r')} WHERE "
+            f"{column('operation_requests', 'project_id', 'r')} IS NULL OR "
             f"{column('generation_jobs', 'project_id', 'j')}<>"
             f"{column('operation_requests', 'project_id', 'r')} LIMIT 1",
         )

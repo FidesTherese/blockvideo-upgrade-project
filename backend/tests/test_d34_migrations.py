@@ -90,6 +90,18 @@ def test_classify_sqlite_affinity_uses_ordered_sqlite_rules() -> None:
     assert sqlite_affinity("BLOBBER") == "BLOB"
 
 
+def test_sqlite_affinity_does_not_unicode_fold_dotless_i_to_ascii_int() -> None:
+    declared_type = "\u0131nt"
+    with sqlite3.connect(":memory:") as connection:
+        storage_class, value = connection.execute(
+            f'SELECT typeof(CAST(7.5 AS "{declared_type}")), '
+            f'CAST(7.5 AS "{declared_type}")'
+        ).fetchone()
+
+    assert (storage_class, value) == ("real", 7.5)
+    assert sqlite_affinity(declared_type) == "NUMERIC"
+
+
 @pytest.mark.parametrize("fixture_name", ("upstream_v0", "d30_v0", "partially_additive_v0"))
 def test_classify_supported_v0_uses_scratch_metadata(
     tmp_path: Path, fixture_name: str
@@ -472,6 +484,19 @@ def test_language_request_with_core_receipt_requires_matching_project(
         connection.execute(
             "INSERT INTO language_requests VALUES ('language', 'core', ?)",
             (language_project_id,),
+        )
+        with pytest.raises(MigrationError) as exc_info:
+            validate_critical_references(connection)
+    assert exc_info.value.reason_code == "migration_verification_failed"
+
+
+def test_receipt_with_existing_job_rejects_null_project_owner() -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(
+            "CREATE TABLE operation_requests (project_id INTEGER, job_id INTEGER);"
+            "CREATE TABLE generation_jobs (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL);"
+            "INSERT INTO operation_requests VALUES (NULL, 1);"
+            "INSERT INTO generation_jobs VALUES (1, 1);"
         )
         with pytest.raises(MigrationError) as exc_info:
             validate_critical_references(connection)
