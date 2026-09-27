@@ -14,8 +14,9 @@
 - Supported schema versions are exactly 0 and 1; values above 1 fail `schema_too_new`.
 - Support only `sqlite:///` file URLs plus in-memory test setup; no Alembic and no cross-database claim.
 - Preserve unknown extra tables/columns; never drop, rename, or retype a column.
-- Match known table/column names with SQLite case-insensitivity. Every existing known
-  column must have the same SQLite affinity as its scratch counterpart; case-colliding
+- Match known table/column names with SQLite-compatible ASCII-only folding (A--Z to
+  a--z; non-ASCII unchanged). Every existing known column must have the same SQLite
+  affinity as its scratch counterpart; ASCII-case-colliding
   duplicate known identifiers and affinity mismatches fail
   `unsupported_legacy_schema` before DDL.
 - Upstream and D30 fixtures are frozen explicit SQL and must not be derived from current
@@ -97,8 +98,9 @@ Generate deterministic temporary fixtures for empty v0, frozen explicit-SQL
 upstream/pre-Plan-C and D30, partially additive, malformed known-column/PK collision,
 current v1, and newer v2 databases. Prove the two historical fixtures build with empty
 metadata. Build only the expected current schema through registered metadata in a
-scratch DB. Match known identifiers case-insensitively for classification and missing
-checks, and reject case-colliding duplicate known metadata identifiers before DDL. For
+scratch DB. Match known identifiers with SQLite-compatible ASCII-only folding for
+classification and missing checks, preserve distinct unknown Unicode identifiers, and
+reject ASCII-case-colliding duplicate known metadata identifiers before DDL. For
 every existing known column in any non-empty supported v0 or v1 database, compare
 observed and scratch affinities using SQLite's ordered rules. Assert missing known
 columns remain additive, unknown extras survive, v1 is unchanged, and v2 fails
@@ -119,8 +121,9 @@ Expected: FAIL because `app.migrations` does not exist.
 
 - [ ] **Step 3: Implement additive schema operations**
 
-Move reflective behavior into `apply_v0_to_v1()`. Index known table/column names
-case-insensitively while retaining actual observed spellings for quoted SQL. Validate
+Move reflective behavior into `apply_v0_to_v1()`. Index known table/column names with
+SQLite-compatible ASCII-only folding while retaining actual observed spellings for
+quoted SQL. Use the same canonical keys for semantic-reference presence checks. Validate
 metadata name uniqueness before scratch creation or DDL. Derive critical PK columns
 only from scratch metadata and compare the observed PK declaration exactly. Create a
 missing database parent before lease lock creation. Split model registration into

@@ -65,9 +65,10 @@ absence of arbitrary future unjournaled network code.
 D34 acquires one non-blocking exclusive database lease before migration and holds it
 for the application lifetime through shutdown, including degraded startup. Migration
 runs only under that lease. Lease acquisition creates a missing database parent before
-creating the sibling lock. Known table and column matching is SQLite-case-insensitive;
-case-colliding duplicate known identifiers and affinity mismatches fail before DDL.
-Unknown extra tables/columns remain untouched. The nine critical tables named in the
+creating the sibling lock. Known table and column matching uses SQLite-compatible ASCII folding (A--Z to
+a--z only); non-ASCII characters remain unchanged. ASCII-case-colliding duplicate
+known identifiers and affinity mismatches fail before DDL. Unknown extra
+tables/columns retain their actual spellings and remain untouched. The nine critical tables named in the
 DTD retain exact row counts and canonical PK identity digests using ordered PK columns
 from scratch current metadata, never an altered legacy declaration. Language requests
 with an existing core receipt require a non-null matching project owner, reciprocal

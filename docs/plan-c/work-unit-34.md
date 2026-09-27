@@ -17,9 +17,11 @@ from historical BlockVideo databases.
 - Apply ordered additive migrations transactionally where SQLite permits it and only
   while the application owns that lease.
 - Build a scratch current-schema SQLite database from registered metadata and match
-  known table/column names with SQLite case-insensitivity. Require every existing known
-  column's observed affinity to equal its scratch affinity; preserve unknown extras and
-  reject case-colliding duplicate known identifiers before DDL.
+  known table/column names with SQLite-compatible ASCII-only folding (A--Z to a--z,
+  non-ASCII unchanged). Require every existing known column's observed affinity to equal
+  its scratch affinity; preserve unknown extras and their actual spellings, and reject
+  ASCII-case-colliding duplicate known identifiers before DDL. Semantic-reference
+  presence checks use the same canonical keys; SQL quotes observed spellings.
 - Freeze upstream and D30 ancestry fixtures as explicit historical SQL rather than
   deriving either schema by subtracting current metadata.
 - For `projects`, `blocks`, `generation_jobs`, `operation_requests`, `external_calls`,

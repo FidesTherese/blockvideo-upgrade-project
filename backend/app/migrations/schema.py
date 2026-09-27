@@ -17,6 +17,10 @@ from app.migrations.contracts import MigrationError, TableIdentity
 
 SQLiteAffinity: TypeAlias = Literal["INTEGER", "TEXT", "BLOB", "REAL", "NUMERIC"]
 
+_SQLITE_ASCII_FOLD = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+)
+
 CRITICAL_TABLES = (
     "projects",
     "blocks",
@@ -49,7 +53,7 @@ def _quote(identifier: str) -> str:
 
 
 def _normalized_identifier(identifier: str) -> str:
-    return identifier.casefold()
+    return identifier.translate(_SQLITE_ASCII_FOLD)
 
 
 def _identifier_map(identifiers: Iterable[str]) -> dict[str, str]:
@@ -305,10 +309,25 @@ def critical_identity_snapshot(
     return snapshot
 
 
+SchemaIdentifiers: TypeAlias = dict[str, tuple[str, dict[str, str]]]
+
+
+def _schema_identifiers(connection: sqlite3.Connection) -> SchemaIdentifiers:
+    schemas: SchemaIdentifiers = {}
+    for actual_table in _table_names(connection):
+        canonical_table = _normalized_identifier(actual_table)
+        columns = _identifier_map(_table_info(connection, actual_table))
+        schemas[canonical_table] = (actual_table, columns)
+    return schemas
+
+
 def _has_columns(
-    schemas: dict[str, set[str]], table: str, columns: set[str]
+    schemas: SchemaIdentifiers, table: str, columns: set[str]
 ) -> bool:
-    return columns <= schemas.get(table, set())
+    schema = schemas.get(_normalized_identifier(table))
+    if schema is None:
+        return False
+    return {_normalized_identifier(column) for column in columns} <= schema[1].keys()
 
 
 def _require_no_rows(connection: sqlite3.Connection, query: str) -> None:
@@ -320,113 +339,181 @@ def validate_critical_references(connection: sqlite3.Connection) -> None:
     """Validate declared and D34 semantic ownership references when present."""
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
         raise MigrationError("migration_verification_failed")
-    schemas = {
-        table: set(_table_info(connection, table))
-        for table in _table_names(connection)
+    schemas = _schema_identifiers(connection)
+
+    def table(name: str, alias: str) -> str:
+        return f"{_quote(schemas[_normalized_identifier(name)][0])} {alias}"
+
+    def column(table_name: str, name: str, alias: str) -> str:
+        columns = schemas[_normalized_identifier(table_name)][1]
+        return f"{alias}.{_quote(columns[_normalized_identifier(name)])}"
+
+    blocks_requirements = {
+        ("blocks", frozenset({"project_id"})),
+        ("projects", frozenset({"id"})),
     }
-    checks: list[tuple[set[tuple[str, frozenset[str]]], str]] = [
-        (
-            {
-                ("blocks", frozenset({"project_id"})),
-                ("projects", frozenset({"id"})),
-            },
-            "SELECT 1 FROM blocks b LEFT JOIN projects p ON p.id=b.project_id "
-            "WHERE p.id IS NULL LIMIT 1",
-        ),
-        (
-            {
-                ("generation_jobs", frozenset({"id", "project_id", "parent_job_id"})),
-                ("projects", frozenset({"id"})),
-            },
-            "SELECT 1 FROM generation_jobs j LEFT JOIN projects p ON p.id=j.project_id "
-            "LEFT JOIN generation_jobs parent ON parent.id=j.parent_job_id "
-            "WHERE p.id IS NULL OR (j.parent_job_id IS NOT NULL AND "
-            "(parent.id IS NULL OR parent.project_id<>j.project_id)) LIMIT 1",
-        ),
-        (
-            {
-                ("external_calls", frozenset({"job_id"})),
-                ("generation_jobs", frozenset({"id"})),
-            },
-            "SELECT 1 FROM external_calls c LEFT JOIN generation_jobs j ON j.id=c.job_id "
-            "WHERE j.id IS NULL LIMIT 1",
-        ),
-        (
-            {
-                ("generation_artifacts", frozenset({"project_id", "job_id"})),
-                ("projects", frozenset({"id"})),
-                ("generation_jobs", frozenset({"id", "project_id"})),
-            },
-            "SELECT 1 FROM generation_artifacts a LEFT JOIN projects p ON p.id=a.project_id "
-            "LEFT JOIN generation_jobs j ON j.id=a.job_id "
-            "WHERE p.id IS NULL OR (a.job_id IS NOT NULL AND "
-            "(j.id IS NULL OR j.project_id<>a.project_id)) LIMIT 1",
-        ),
-        (
-            {
-                ("settings_revisions", frozenset({"project_id", "revision", "restored_from_revision"})),
-                ("projects", frozenset({"id"})),
-            },
-            "SELECT 1 FROM settings_revisions s LEFT JOIN projects p ON p.id=s.project_id "
-            "LEFT JOIN settings_revisions source ON source.project_id=s.project_id "
-            "AND source.revision=s.restored_from_revision WHERE p.id IS NULL OR "
-            "(s.restored_from_revision IS NOT NULL AND source.id IS NULL) LIMIT 1",
-        ),
-        (
-            {
-                ("projects", frozenset({"id", "current_artifact_id"})),
-                ("generation_artifacts", frozenset({"id", "project_id"})),
-            },
-            "SELECT 1 FROM projects p LEFT JOIN generation_artifacts a "
-            "ON a.id=p.current_artifact_id WHERE p.current_artifact_id IS NOT NULL "
-            "AND (a.id IS NULL OR a.project_id<>p.id) LIMIT 1",
-        ),
-        (
-            {
-                ("operation_requests", frozenset({"project_id", "job_id"})),
-                ("generation_jobs", frozenset({"id", "project_id"})),
-            },
-            "SELECT 1 FROM operation_requests r JOIN generation_jobs j ON j.id=r.job_id "
-            "WHERE j.project_id<>r.project_id LIMIT 1",
-        ),
-        (
-            {
-                ("language_requests", frozenset({"project_id", "core_request_id"})),
-                ("operation_requests", frozenset({"request_id", "project_id"})),
-            },
-            "SELECT 1 FROM language_requests l LEFT JOIN operation_requests r "
-            "ON r.request_id=l.core_request_id "
-            "WHERE r.request_id IS NOT NULL AND (l.project_id IS NULL "
-            "OR r.project_id IS NULL OR r.project_id<>l.project_id) LIMIT 1",
-        ),
-    ]
-    for requirements, query in checks:
-        if all(_has_columns(schemas, table, set(columns)) for table, columns in requirements):
-            _require_no_rows(connection, query)
+    if all(_has_columns(schemas, name, set(columns)) for name, columns in blocks_requirements):
+        _require_no_rows(
+            connection,
+            f"SELECT 1 FROM {table('blocks', 'b')} LEFT JOIN {table('projects', 'p')} "
+            f"ON {column('projects', 'id', 'p')}={column('blocks', 'project_id', 'b')} "
+            f"WHERE {column('projects', 'id', 'p')} IS NULL LIMIT 1",
+        )
+
+    jobs_requirements = {
+        ("generation_jobs", frozenset({"id", "project_id", "parent_job_id"})),
+        ("projects", frozenset({"id"})),
+    }
+    if all(_has_columns(schemas, name, set(columns)) for name, columns in jobs_requirements):
+        _require_no_rows(
+            connection,
+            f"SELECT 1 FROM {table('generation_jobs', 'j')} "
+            f"LEFT JOIN {table('projects', 'p')} ON {column('projects', 'id', 'p')}="
+            f"{column('generation_jobs', 'project_id', 'j')} "
+            f"LEFT JOIN {table('generation_jobs', 'parent')} ON "
+            f"{column('generation_jobs', 'id', 'parent')}="
+            f"{column('generation_jobs', 'parent_job_id', 'j')} WHERE "
+            f"{column('projects', 'id', 'p')} IS NULL OR "
+            f"({column('generation_jobs', 'parent_job_id', 'j')} IS NOT NULL AND "
+            f"({column('generation_jobs', 'id', 'parent')} IS NULL OR "
+            f"{column('generation_jobs', 'project_id', 'parent')}<>"
+            f"{column('generation_jobs', 'project_id', 'j')})) LIMIT 1",
+        )
+
+    calls_requirements = {
+        ("external_calls", frozenset({"job_id"})),
+        ("generation_jobs", frozenset({"id"})),
+    }
+    if all(_has_columns(schemas, name, set(columns)) for name, columns in calls_requirements):
+        _require_no_rows(
+            connection,
+            f"SELECT 1 FROM {table('external_calls', 'c')} "
+            f"LEFT JOIN {table('generation_jobs', 'j')} ON "
+            f"{column('generation_jobs', 'id', 'j')}={column('external_calls', 'job_id', 'c')} "
+            f"WHERE {column('generation_jobs', 'id', 'j')} IS NULL LIMIT 1",
+        )
+
+    artifacts_requirements = {
+        ("generation_artifacts", frozenset({"project_id", "job_id"})),
+        ("projects", frozenset({"id"})),
+        ("generation_jobs", frozenset({"id", "project_id"})),
+    }
+    if all(_has_columns(schemas, name, set(columns)) for name, columns in artifacts_requirements):
+        _require_no_rows(
+            connection,
+            f"SELECT 1 FROM {table('generation_artifacts', 'a')} "
+            f"LEFT JOIN {table('projects', 'p')} ON {column('projects', 'id', 'p')}="
+            f"{column('generation_artifacts', 'project_id', 'a')} "
+            f"LEFT JOIN {table('generation_jobs', 'j')} ON {column('generation_jobs', 'id', 'j')}="
+            f"{column('generation_artifacts', 'job_id', 'a')} WHERE "
+            f"{column('projects', 'id', 'p')} IS NULL OR "
+            f"({column('generation_artifacts', 'job_id', 'a')} IS NOT NULL AND "
+            f"({column('generation_jobs', 'id', 'j')} IS NULL OR "
+            f"{column('generation_jobs', 'project_id', 'j')}<>"
+            f"{column('generation_artifacts', 'project_id', 'a')})) LIMIT 1",
+        )
+
+    revisions_requirements = {
+        ("settings_revisions", frozenset({"id", "project_id", "revision", "restored_from_revision"})),
+        ("projects", frozenset({"id"})),
+    }
+    if all(_has_columns(schemas, name, set(columns)) for name, columns in revisions_requirements):
+        _require_no_rows(
+            connection,
+            f"SELECT 1 FROM {table('settings_revisions', 's')} "
+            f"LEFT JOIN {table('projects', 'p')} ON {column('projects', 'id', 'p')}="
+            f"{column('settings_revisions', 'project_id', 's')} "
+            f"LEFT JOIN {table('settings_revisions', 'source')} ON "
+            f"{column('settings_revisions', 'project_id', 'source')}="
+            f"{column('settings_revisions', 'project_id', 's')} AND "
+            f"{column('settings_revisions', 'revision', 'source')}="
+            f"{column('settings_revisions', 'restored_from_revision', 's')} WHERE "
+            f"{column('projects', 'id', 'p')} IS NULL OR "
+            f"({column('settings_revisions', 'restored_from_revision', 's')} IS NOT NULL AND "
+            f"{column('settings_revisions', 'id', 'source')} IS NULL) LIMIT 1",
+        )
+
+    current_artifact_requirements = {
+        ("projects", frozenset({"id", "current_artifact_id"})),
+        ("generation_artifacts", frozenset({"id", "project_id"})),
+    }
+    if all(_has_columns(schemas, name, set(columns)) for name, columns in current_artifact_requirements):
+        _require_no_rows(
+            connection,
+            f"SELECT 1 FROM {table('projects', 'p')} "
+            f"LEFT JOIN {table('generation_artifacts', 'a')} ON "
+            f"{column('generation_artifacts', 'id', 'a')}="
+            f"{column('projects', 'current_artifact_id', 'p')} WHERE "
+            f"{column('projects', 'current_artifact_id', 'p')} IS NOT NULL AND "
+            f"({column('generation_artifacts', 'id', 'a')} IS NULL OR "
+            f"{column('generation_artifacts', 'project_id', 'a')}<>"
+            f"{column('projects', 'id', 'p')}) LIMIT 1",
+        )
+
+    receipt_requirements = {
+        ("operation_requests", frozenset({"project_id", "job_id"})),
+        ("generation_jobs", frozenset({"id", "project_id"})),
+    }
+    if all(_has_columns(schemas, name, set(columns)) for name, columns in receipt_requirements):
+        _require_no_rows(
+            connection,
+            f"SELECT 1 FROM {table('operation_requests', 'r')} "
+            f"JOIN {table('generation_jobs', 'j')} ON {column('generation_jobs', 'id', 'j')}="
+            f"{column('operation_requests', 'job_id', 'r')} WHERE "
+            f"{column('generation_jobs', 'project_id', 'j')}<>"
+            f"{column('operation_requests', 'project_id', 'r')} LIMIT 1",
+        )
+
+    language_requirements = {
+        ("language_requests", frozenset({"project_id", "core_request_id"})),
+        ("operation_requests", frozenset({"request_id", "project_id"})),
+    }
+    if all(_has_columns(schemas, name, set(columns)) for name, columns in language_requirements):
+        _require_no_rows(
+            connection,
+            f"SELECT 1 FROM {table('language_requests', 'l')} "
+            f"LEFT JOIN {table('operation_requests', 'r')} ON "
+            f"{column('operation_requests', 'request_id', 'r')}="
+            f"{column('language_requests', 'core_request_id', 'l')} WHERE "
+            f"{column('operation_requests', 'request_id', 'r')} IS NOT NULL AND "
+            f"({column('language_requests', 'project_id', 'l')} IS NULL OR "
+            f"{column('operation_requests', 'project_id', 'r')} IS NULL OR "
+            f"{column('operation_requests', 'project_id', 'r')}<>"
+            f"{column('language_requests', 'project_id', 'l')}) LIMIT 1",
+        )
 
     turn_columns = {"request_id", "parent_request_id", "successor_request_id"}
     if _has_columns(schemas, "language_turns", turn_columns) and _has_columns(
         schemas, "language_requests", {"request_id"}
     ):
+        def turn_request(alias: str) -> str:
+            return column("language_turns", "request_id", alias)
+
+        def request_id(alias: str) -> str:
+            return column("language_requests", "request_id", alias)
+
+        def parent(alias: str) -> str:
+            return column("language_turns", "parent_request_id", alias)
+
+        def successor(alias: str) -> str:
+            return column("language_turns", "successor_request_id", alias)
+
         _require_no_rows(
             connection,
-            "SELECT 1 FROM language_turns t "
-            "LEFT JOIN language_requests own ON own.request_id=t.request_id "
-            "LEFT JOIN language_requests parent_request "
-            "ON parent_request.request_id=t.parent_request_id "
-            "LEFT JOIN language_turns parent_turn "
-            "ON parent_turn.request_id=t.parent_request_id "
-            "LEFT JOIN language_requests successor_request "
-            "ON successor_request.request_id=t.successor_request_id "
-            "LEFT JOIN language_turns successor_turn "
-            "ON successor_turn.request_id=t.successor_request_id "
-            "WHERE own.request_id IS NULL OR "
-            "(t.parent_request_id IS NOT NULL AND "
-            "(parent_request.request_id IS NULL OR parent_turn.request_id IS NULL "
-            "OR parent_turn.successor_request_id IS NULL "
-            "OR parent_turn.successor_request_id<>t.request_id)) OR "
-            "(t.successor_request_id IS NOT NULL AND "
-            "(successor_request.request_id IS NULL OR successor_turn.request_id IS NULL "
-            "OR successor_turn.parent_request_id IS NULL "
-            "OR successor_turn.parent_request_id<>t.request_id)) LIMIT 1",
+            f"SELECT 1 FROM {table('language_turns', 't')} "
+            f"LEFT JOIN {table('language_requests', 'own')} ON {request_id('own')}={turn_request('t')} "
+            f"LEFT JOIN {table('language_requests', 'parent_request')} ON "
+            f"{request_id('parent_request')}={parent('t')} "
+            f"LEFT JOIN {table('language_turns', 'parent_turn')} ON "
+            f"{turn_request('parent_turn')}={parent('t')} "
+            f"LEFT JOIN {table('language_requests', 'successor_request')} ON "
+            f"{request_id('successor_request')}={successor('t')} "
+            f"LEFT JOIN {table('language_turns', 'successor_turn')} ON "
+            f"{turn_request('successor_turn')}={successor('t')} WHERE "
+            f"{request_id('own')} IS NULL OR ({parent('t')} IS NOT NULL AND "
+            f"({request_id('parent_request')} IS NULL OR {turn_request('parent_turn')} IS NULL OR "
+            f"{successor('parent_turn')} IS NULL OR {successor('parent_turn')}<>{turn_request('t')})) OR "
+            f"({successor('t')} IS NOT NULL AND ({request_id('successor_request')} IS NULL OR "
+            f"{turn_request('successor_turn')} IS NULL OR {parent('successor_turn')} IS NULL OR "
+            f"{parent('successor_turn')}<>{turn_request('t')})) LIMIT 1",
         )

@@ -135,6 +135,31 @@ def test_classify_accepts_declared_type_aliases_with_equal_affinity(tmp_path: Pa
         classify_v0(connection, Base.metadata)
 
 
+def test_distinct_unknown_unicode_identifiers_are_preserved(tmp_path: Path) -> None:
+    path = build_fixture("d30_v0", tmp_path / "unicode-identifiers.db", Base.metadata)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            'CREATE TABLE "Ä" ("Ö" TEXT);'
+            'CREATE TABLE "ä" ("ö" TEXT);'
+            'ALTER TABLE projects ADD COLUMN "Ü" TEXT;'
+            'ALTER TABLE projects ADD COLUMN "ü" TEXT;'
+        )
+        classify_v0(connection, Base.metadata)
+        apply_v0_to_v1(connection, Base.metadata)
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        project_columns = {
+            row[1] for row in connection.execute('PRAGMA table_info("projects")')
+        }
+
+    assert {"Ä", "ä"} <= tables
+    assert {"Ü", "ü"} <= project_columns
+
+
 def test_case_insensitive_known_identifiers_are_classified_and_extended(
     tmp_path: Path,
 ) -> None:
@@ -351,6 +376,79 @@ def test_critical_identity_rejects_missing_expected_primary_key(tmp_path: Path) 
         with pytest.raises(MigrationError) as exc_info:
             critical_identity_snapshot(connection, Base.metadata)
     assert exc_info.value.reason_code == "unsupported_legacy_schema"
+
+
+MIXED_CASE_MALFORMED_REFERENCE_SCHEMAS = (
+    (
+        'CREATE TABLE "Blocks" ("Project_ID" INTEGER);'
+        'CREATE TABLE "Projects" ("ID" INTEGER);'
+        'INSERT INTO "Blocks" VALUES (1);',
+    ),
+    (
+        'CREATE TABLE "Generation_Jobs" ('
+        '"ID" INTEGER, "Project_ID" INTEGER, "Parent_Job_ID" INTEGER);'
+        'CREATE TABLE "Projects" ("ID" INTEGER);'
+        'INSERT INTO "Generation_Jobs" VALUES (1, 1, NULL);',
+    ),
+    (
+        'CREATE TABLE "External_Calls" ("Job_ID" INTEGER);'
+        'CREATE TABLE "Generation_Jobs" ("ID" INTEGER);'
+        'INSERT INTO "External_Calls" VALUES (1);',
+    ),
+    (
+        'CREATE TABLE "Generation_Artifacts" ("Project_ID" INTEGER, "Job_ID" INTEGER);'
+        'CREATE TABLE "Projects" ("ID" INTEGER);'
+        'CREATE TABLE "Generation_Jobs" ("ID" INTEGER, "Project_ID" INTEGER);'
+        'INSERT INTO "Generation_Artifacts" VALUES (1, NULL);',
+    ),
+    (
+        'CREATE TABLE "Settings_Revisions" ('
+        '"ID" INTEGER, "Project_ID" INTEGER, "Revision" INTEGER, '
+        '"Restored_From_Revision" INTEGER);'
+        'CREATE TABLE "Projects" ("ID" INTEGER);'
+        'INSERT INTO "Projects" VALUES (1);'
+        'INSERT INTO "Settings_Revisions" VALUES (1, 1, 2, 1);',
+    ),
+    (
+        'CREATE TABLE "Projects" ("ID" INTEGER, "Current_Artifact_ID" INTEGER);'
+        'CREATE TABLE "Generation_Artifacts" ("ID" INTEGER, "Project_ID" INTEGER);'
+        'INSERT INTO "Projects" VALUES (1, 1);'
+        'INSERT INTO "Generation_Artifacts" VALUES (1, 2);',
+    ),
+    (
+        'CREATE TABLE "Operation_Requests" ("Project_ID" INTEGER, "Job_ID" INTEGER);'
+        'CREATE TABLE "Generation_Jobs" ("ID" INTEGER, "Project_ID" INTEGER);'
+        'INSERT INTO "Operation_Requests" VALUES (1, 1);'
+        'INSERT INTO "Generation_Jobs" VALUES (1, 2);',
+    ),
+    (
+        'CREATE TABLE "Language_Requests" ('
+        '"Request_ID" TEXT, "Project_ID" INTEGER, "Core_Request_ID" TEXT);'
+        'CREATE TABLE "Operation_Requests" ("Request_ID" TEXT, "Project_ID" INTEGER);'
+        "INSERT INTO \"Language_Requests\" VALUES ('language', 1, 'core');"
+        "INSERT INTO \"Operation_Requests\" VALUES ('core', 2);",
+    ),
+    (
+        'CREATE TABLE "Language_Requests" ("Request_ID" TEXT);'
+        'CREATE TABLE "Language_Turns" ('
+        '"Request_ID" TEXT, "Parent_Request_ID" TEXT, "Successor_Request_ID" TEXT);'
+        "INSERT INTO \"Language_Requests\" VALUES ('parent');"
+        "INSERT INTO \"Language_Requests\" VALUES ('child');"
+        "INSERT INTO \"Language_Turns\" VALUES ('parent', NULL, NULL);"
+        "INSERT INTO \"Language_Turns\" VALUES ('child', 'parent', NULL);",
+    ),
+)
+
+
+@pytest.mark.parametrize("schema_sql", MIXED_CASE_MALFORMED_REFERENCE_SCHEMAS)
+def test_mixed_case_known_identifiers_execute_every_semantic_reference_check(
+    schema_sql: tuple[str],
+) -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(schema_sql[0])
+        with pytest.raises(MigrationError) as exc_info:
+            validate_critical_references(connection)
+    assert exc_info.value.reason_code == "migration_verification_failed"
 
 
 @pytest.mark.parametrize(
