@@ -1,14 +1,22 @@
 """D34 versioned SQLite migration and historical compatibility tests."""
 from __future__ import annotations
 
+import os
+import re
 import sqlite3
+import subprocess
+import sys
+import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 
-from app.migrations.contracts import MigrationError
+from app.migrations.backup import sha256_file
+from app.migrations.contracts import MigrationError, MigrationResult, TableIdentity
 from app.migrations.lease import acquire_database_lease
+from app.migrations.runner import migrate_database, restore_database_backup
 from app.migrations.schema import (
     apply_v0_to_v1,
     classify_v0,
@@ -38,6 +46,25 @@ EXPECTED_TABLES = {
     "projects",
     "settings_revisions",
 }
+
+_LEASE_HOLDER = r"""
+from pathlib import Path
+import sys
+import time
+from app.migrations.lease import acquire_database_lease
+
+lease = acquire_database_lease(sys.argv[1])
+Path(sys.argv[2]).write_text("ready", encoding="ascii")
+try:
+    deadline = time.monotonic() + 30
+    while not Path(sys.argv[3]).exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit("lease holder timed out")
+        time.sleep(0.01)
+finally:
+    lease.release()
+"""
+
 
 AFFINITY_COLLISIONS = (
     ("projects", "id", "VARCHAR(32)", "101"),
@@ -76,6 +103,43 @@ def _schema(connection: sqlite3.Connection) -> dict[str, dict[str, str]]:
 
 def _dump(connection: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(connection.iterdump())
+
+
+def _url(path: Path) -> str:
+    return f"sqlite:///{path.as_posix()}"
+
+
+def _migrate(path: Path) -> MigrationResult:
+    url = _url(path)
+    lease = acquire_database_lease(url)
+    try:
+        return migrate_database(url, Base.metadata, lease=lease)
+    finally:
+        lease.release()
+
+
+def _start_lease_holder(
+    database: Path, ready: Path, release: Path
+) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [sys.executable, "-c", _LEASE_HOLDER, _url(database), str(ready), str(release)],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+
+
+def _wait_for(path: Path, process: subprocess.Popen[str]) -> None:
+    deadline = time.monotonic() + 30
+    while not path.exists():
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise AssertionError(f"lease holder exited: {stdout}\n{stderr}")
+        if time.monotonic() >= deadline:
+            raise AssertionError("lease holder did not become ready")
+        time.sleep(0.01)
 
 
 def test_classify_sqlite_affinity_uses_ordered_sqlite_rules() -> None:
@@ -372,6 +436,25 @@ def test_critical_identity_uses_current_metadata_pk_order(tmp_path: Path) -> Non
     assert snapshot["projects"].primary_key_columns == ("id",)
 
 
+def test_critical_identity_hashes_text_keys_with_canonical_byte_sorting(
+    tmp_path: Path,
+) -> None:
+    path = build_fixture("current_v1", tmp_path / "text-identities.db", Base.metadata)
+    with sqlite3.connect(path) as connection:
+        connection.executemany(
+            "INSERT INTO language_requests ("
+            "request_id, input_fingerprint, core_request_id, status, owner_token, "
+            "lease_until, created_at, response_json"
+            ") VALUES (?, 'fingerprint', ?, 'completed', 'owner', 0, 0, '{}')",
+            (("ä", "core-a"), ("z", "core-z")),
+        )
+        snapshot = critical_identity_snapshot(connection, Base.metadata)
+
+    assert snapshot["language_requests"].primary_key_sha256 == (
+        "ec2cdc2bed0f0d7b3dd202ad7808c074c495a08bd07d05d42356fa7b85c70153"
+    )
+
+
 def test_critical_identity_rejects_altered_legacy_primary_key(tmp_path: Path) -> None:
     path = tmp_path / "altered-pk.db"
     build_altered_legacy_primary_key(path, Base.metadata)
@@ -574,3 +657,345 @@ def test_schema_version_lease_is_bound_to_one_database_and_release_is_idempotent
     with pytest.raises(MigrationError) as released_error:
         lease.assert_held_for(url)
     assert released_error.value.reason_code == "database_lease_unavailable"
+
+
+def test_lease_file_is_exclusive_bounded_and_never_removed_as_stale(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "lease.db"
+    url = _url(database)
+    lease = acquire_database_lease(url)
+    try:
+        payload = lease.lock_path.read_text(encoding="ascii")
+        assert re.fullmatch(r"pid=\d+\nutc=\d{4}-\d\d-\d\dT[^\n]+Z\n", payload)
+        with pytest.raises(MigrationError) as exc_info:
+            acquire_database_lease(url)
+        assert exc_info.value.reason_code == "database_lease_unavailable"
+        assert lease.lock_path.read_text(encoding="ascii") == payload
+    finally:
+        lease.release()
+
+    lease.lock_path.write_text("stale", encoding="ascii")
+    with pytest.raises(MigrationError) as stale_error:
+        acquire_database_lease(url)
+    assert stale_error.value.reason_code == "database_lease_unavailable"
+    assert lease.lock_path.read_text(encoding="ascii") == "stale"
+
+
+def test_spawned_lease_contention_is_immediate_and_precedes_database_io(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "contended.db"
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
+    process = _start_lease_holder(database, ready, release)
+    try:
+        _wait_for(ready, process)
+        assert not database.exists()
+        started = time.monotonic()
+        with pytest.raises(MigrationError) as exc_info:
+            acquire_database_lease(_url(database))
+        assert time.monotonic() - started < 1.0
+        assert exc_info.value.reason_code == "database_lease_unavailable"
+        assert not database.exists()
+    finally:
+        release.write_text("release", encoding="ascii")
+        stdout, stderr = process.communicate(timeout=30)
+        assert process.returncode == 0, f"{stdout}\n{stderr}"
+
+    lease = acquire_database_lease(_url(database))
+    lease.release()
+
+
+def test_runner_creates_empty_database_at_v1_without_backup(tmp_path: Path) -> None:
+    database = tmp_path / "empty.db"
+    result = _migrate(database)
+
+    assert result.status == "created"
+    assert result.from_version == 0
+    assert result.to_version == 1
+    assert result.backup_created is False
+    assert result.backup_sha256 is None
+    assert not (tmp_path / ".backups").exists()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (1,)
+        assert set(_schema(connection)) == EXPECTED_TABLES
+
+
+def test_runner_keeps_current_database_bytes_and_reports_current(tmp_path: Path) -> None:
+    database = build_fixture("current_v1", tmp_path / "current.db", Base.metadata)
+    before = database.read_bytes()
+
+    result = _migrate(database)
+
+    assert result.status == "current"
+    assert result.from_version == result.to_version == 1
+    assert result.backup_created is False
+    assert database.read_bytes() == before
+
+
+def test_runner_backs_up_and_preserves_critical_identities(tmp_path: Path) -> None:
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    with sqlite3.connect(database) as connection:
+        before = critical_identity_snapshot(connection, Base.metadata)
+    assert before["projects"].primary_key_sha256 == (
+        "a4d7550358c994173c884a06d6b049e2d13b44b790a9c88a68b9883777ccb63a"
+    )
+
+    result = _migrate(database)
+
+    backups = tuple((tmp_path / ".backups").iterdir())
+    assert result.status == "migrated"
+    assert result.backup_created is True
+    assert len(backups) == 1
+    assert result.backup_sha256 == sha256_file(backups[0])
+    with sqlite3.connect(backups[0]) as backup, sqlite3.connect(database) as migrated:
+        assert backup.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert critical_identity_snapshot(backup, Base.metadata) == before
+        after = critical_identity_snapshot(migrated, Base.metadata)
+        assert migrated.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert migrated.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert migrated.execute("PRAGMA user_version").fetchone() == (1,)
+    for table, identity in before.items():
+        assert after[table] == identity
+    for table in set(after) - set(before):
+        assert after[table].row_count == 0
+
+
+def test_runner_requires_free_space_strictly_above_database_plus_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.migrations import backup
+
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    before = database.read_bytes()
+    minimum = len(before) + 16 * 1024 * 1024
+    monkeypatch.setattr(
+        backup.shutil,
+        "disk_usage",
+        lambda _path: type("Usage", (), {"total": minimum, "used": 0, "free": minimum})(),
+    )
+
+    with pytest.raises(MigrationError) as exc_info:
+        _migrate(database)
+
+    assert exc_info.value.reason_code == "backup_failed"
+    assert database.read_bytes() == before
+    assert not (tmp_path / ".backups").exists()
+
+
+def test_runner_rejects_missing_released_and_mismatched_lease_before_database_io(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "target.db"
+    other = tmp_path / "other.db"
+    url = _url(database)
+    with pytest.raises(MigrationError) as missing:
+        migrate_database(url, Base.metadata, lease=None)
+    assert missing.value.reason_code == "database_lease_unavailable"
+    assert not database.exists()
+
+    other_lease = acquire_database_lease(_url(other))
+    try:
+        with pytest.raises(MigrationError) as mismatch:
+            migrate_database(url, Base.metadata, lease=other_lease)
+        assert mismatch.value.reason_code == "database_lease_unavailable"
+        assert not database.exists()
+    finally:
+        other_lease.release()
+
+    released = acquire_database_lease(url)
+    released.release()
+    with pytest.raises(MigrationError) as released_error:
+        migrate_database(url, Base.metadata, lease=released)
+    assert released_error.value.reason_code == "database_lease_unavailable"
+    assert not database.exists()
+
+
+def test_runner_rejects_invalid_backup_integrity_without_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.migrations import backup
+
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    before = database.read_bytes()
+    monkeypatch.setattr(backup, "_integrity_is_ok", lambda _connection: False)
+
+    with pytest.raises(MigrationError) as exc_info:
+        _migrate(database)
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == before
+    assert tuple((tmp_path / ".backups").iterdir()) == ()
+
+
+def test_runner_removes_unpublished_backup_when_hashing_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.migrations import backup
+
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    before = database.read_bytes()
+
+    def fail_hash(_path: Path) -> str:
+        raise OSError("synthetic hash failure")
+
+    monkeypatch.setattr(backup, "sha256_file", fail_hash)
+    with pytest.raises(MigrationError) as exc_info:
+        _migrate(database)
+
+    assert exc_info.value.reason_code == "backup_failed"
+    assert database.read_bytes() == before
+    assert tuple((tmp_path / ".backups").iterdir()) == ()
+
+
+def test_runner_retains_verified_backup_when_ddl_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.migrations import runner
+
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    before = database.read_bytes()
+
+    def fail_ddl(*_args: object, **_kwargs: object) -> None:
+        raise MigrationError("migration_failed")
+
+    monkeypatch.setattr(runner, "apply_v0_to_v1", fail_ddl)
+    with pytest.raises(MigrationError) as exc_info:
+        _migrate(database)
+
+    assert exc_info.value.reason_code == "migration_failed"
+    assert database.read_bytes() == before
+    backups = tuple((tmp_path / ".backups").iterdir())
+    assert len(backups) == 1
+    assert sha256_file(backups[0])
+
+
+@pytest.mark.parametrize("failure", ("identity", "reference"))
+def test_runner_surfaces_post_migration_verification_failures_with_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from app.migrations import runner
+
+    database = build_fixture("d30_v0", tmp_path / f"{failure}.db", Base.metadata)
+    if failure == "identity":
+        original = runner.critical_identity_snapshot
+        calls = 0
+
+        def fail_post_identity(
+            connection: sqlite3.Connection, metadata: MetaData
+        ) -> dict[str, TableIdentity]:
+            nonlocal calls
+            calls += 1
+            if calls >= 2:
+                raise MigrationError("migration_verification_failed")
+            return original(connection, metadata)
+
+        monkeypatch.setattr(runner, "critical_identity_snapshot", fail_post_identity)
+    else:
+        original_references = runner.validate_critical_references
+        calls = 0
+
+        def fail_post_references(connection: sqlite3.Connection) -> None:
+            nonlocal calls
+            calls += 1
+            if calls >= 2:
+                raise MigrationError("migration_verification_failed")
+            original_references(connection)
+
+        monkeypatch.setattr(runner, "validate_critical_references", fail_post_references)
+
+    with pytest.raises(MigrationError) as exc_info:
+        _migrate(database)
+
+    assert exc_info.value.reason_code == "migration_verification_failed"
+    backups = tuple((tmp_path / ".backups").iterdir())
+    assert len(backups) == 1
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (1,)
+    restore_database_backup(_url(database), backups[0], sha256_file(backups[0]))
+    assert database.read_bytes() == backups[0].read_bytes()
+
+
+def test_runner_preserves_intentional_receipt_non_foreign_keys(tmp_path: Path) -> None:
+    database = build_fixture("current_v1", tmp_path / "receipts.db", Base.metadata)
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version=0")
+        connection.execute(
+            "INSERT INTO operation_requests VALUES ("
+            "'deleted-owner', '{}', 'project.status.get', 1, 999, 1, 1, '{}', "
+            "0, 999, 'receipt:deleted-owner', '{}', '2026-01-02 03:04:05'"
+            ")"
+        )
+
+    result = _migrate(database)
+
+    assert result.status == "migrated"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT project_id, job_id FROM operation_requests "
+            "WHERE request_id='deleted-owner'"
+        ).fetchone() == (999, 999)
+
+
+def test_restore_rejects_modified_backup_and_preserves_target(tmp_path: Path) -> None:
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    result = _migrate(database)
+    migrated = database.read_bytes()
+    backup = next((tmp_path / ".backups").iterdir())
+    backup.write_bytes(backup.read_bytes() + b"modified")
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(_url(database), backup, result.backup_sha256 or "")
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == migrated
+    assert backup.read_bytes().endswith(b"modified")
+    assert not database.with_name(f"{database.name}.migration.lock").exists()
+
+
+def test_restore_rejects_hash_matching_corrupt_backup(tmp_path: Path) -> None:
+    database = build_fixture("current_v1", tmp_path / "target.db", Base.metadata)
+    before = database.read_bytes()
+    corrupt = tmp_path / "corrupt.sqlite3"
+    corrupt.write_bytes(b"not a sqlite database")
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(_url(database), corrupt, sha256_file(corrupt))
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == before
+    assert corrupt.read_bytes() == b"not a sqlite database"
+
+
+def test_restore_is_excluded_by_live_process_then_succeeds_offline(
+    tmp_path: Path,
+) -> None:
+    database = build_fixture("d30_v0", tmp_path / "legacy.db", Base.metadata)
+    result = _migrate(database)
+    backup = next((tmp_path / ".backups").iterdir())
+    backup_bytes = backup.read_bytes()
+    migrated_bytes = database.read_bytes()
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
+    process = _start_lease_holder(database, ready, release)
+    try:
+        _wait_for(ready, process)
+        started = time.monotonic()
+        with pytest.raises(MigrationError) as exc_info:
+            restore_database_backup(_url(database), backup, result.backup_sha256 or "")
+        assert time.monotonic() - started < 1.0
+        assert exc_info.value.reason_code == "database_lease_unavailable"
+        assert database.read_bytes() == migrated_bytes
+        assert backup.read_bytes() == backup_bytes
+    finally:
+        release.write_text("release", encoding="ascii")
+        stdout, stderr = process.communicate(timeout=30)
+        assert process.returncode == 0, f"{stdout}\n{stderr}"
+
+    restore_database_backup(_url(database), backup, result.backup_sha256 or "")
+    assert database.read_bytes() == backup_bytes
+    assert backup.read_bytes() == backup_bytes
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert connection.execute("PRAGMA user_version").fetchone() == (0,)

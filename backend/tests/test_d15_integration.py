@@ -10,7 +10,9 @@ from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.core.security import SecretBundle, secret_store
-from app.db import get_engine, get_session_factory, init_db
+from app.db import Base, get_engine, get_session_factory
+from app.migrations.lease import acquire_database_lease
+from app.migrations.runner import migrate_database
 from app.models.job import GenerationJob, JobStatus
 from app.models.project import Project
 from app.main import create_app
@@ -74,14 +76,21 @@ def test_additive_d12_d15_migration_preserves_existing_project_and_job(temp_stor
     project_id, job_id = persisted_job()
     added = ["kind", "block_index", "input_revision", "input_snapshot", "input_fingerprint",
              "plan_json", "parent_job_id", "recovery_message"]
-    with get_engine().begin() as connection:
+    engine = get_engine()
+    with engine.begin() as connection:
         for table in ["generation_artifacts", "settings_revisions", "external_calls", "project_identities"]:
             connection.execute(text(f"DROP TABLE {table}"))
         connection.execute(text("ALTER TABLE projects DROP COLUMN current_artifact_id"))
         for name in added:
             connection.execute(text(f"ALTER TABLE generation_jobs DROP COLUMN {name}"))
-    init_db()
-    init_db()
+    engine.dispose()
+    database_url = get_settings().database_url
+    lease = acquire_database_lease(database_url)
+    try:
+        assert migrate_database(database_url, Base.metadata, lease=lease).status == "migrated"
+        assert migrate_database(database_url, Base.metadata, lease=lease).status == "current"
+    finally:
+        lease.release()
     assert {"generation_artifacts", "settings_revisions", "external_calls", "project_identities"} <= set(inspect(get_engine()).get_table_names())
     with get_session_factory()() as db:
         project, job = db.get(Project, project_id), db.get(GenerationJob, job_id)

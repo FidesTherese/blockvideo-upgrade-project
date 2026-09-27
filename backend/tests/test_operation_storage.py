@@ -4,7 +4,10 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import inspect, text
 
-from app.db import get_engine, get_session_factory, init_db
+from app.core.config import get_settings
+from app.db import Base, get_engine, get_session_factory
+from app.migrations.lease import acquire_database_lease
+from app.migrations.runner import migrate_database
 from app.models.project import Project
 from app.operations.bootstrap import build_operation_service
 from app.operations.errors import OperationError
@@ -14,11 +17,18 @@ from tests.test_operation_durability import adjustment, execute, make_project
 
 def test_upgrade_database_without_d11_preserves_existing_rows(temp_storage) -> None:
     project_id = make_project()
-    with get_engine().begin() as conn:
+    engine = get_engine()
+    with engine.begin() as conn:
         conn.execute(text("DROP TABLE operation_requests"))
         conn.execute(text("ALTER TABLE projects DROP COLUMN revision"))
-    init_db()
-    init_db()
+    engine.dispose()
+    database_url = get_settings().database_url
+    lease = acquire_database_lease(database_url)
+    try:
+        assert migrate_database(database_url, Base.metadata, lease=lease).status == "migrated"
+        assert migrate_database(database_url, Base.metadata, lease=lease).status == "current"
+    finally:
+        lease.release()
     assert "operation_requests" in inspect(get_engine()).get_table_names()
     with get_session_factory()() as db:
         project = db.get(Project, project_id)
