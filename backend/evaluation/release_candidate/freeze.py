@@ -45,7 +45,12 @@ _TOOL_SOURCE_PATHS = (
     "backend/evaluation/unlabeled_contracts.py",
 )
 _CLAIM_TOKEN_NAME = ".d36-publication-claim"
+_COMPLETED_MARKER_NAME = ".d36-publication-complete"
+_COMPLETED_MARKER_BYTES = b"d36-publication-complete-v1\n"
+_CLAIM_TOKEN_BYTES = 32
 _MAX_CLAIM_TOKEN_BYTES = 64
+_MAX_FREEZE_MANIFEST_BYTES = 16 * 1024 * 1024
+_MAX_TOOL_ATTESTATION_BYTES = 1024 * 1024
 
 
 class PublicationOwnershipLost(ValueError):
@@ -459,7 +464,7 @@ def _claim_publication_directory(path: Path) -> _PublicationClaim:
     path.mkdir(mode=0o700, exist_ok=False)
     device, inode = _directory_identity(path)
     resolved_parent = path.parent.resolve(strict=True)
-    token = secrets.token_bytes(32)
+    token = secrets.token_bytes(_CLAIM_TOKEN_BYTES)
     token_identity = _write_fsynced(path / _CLAIM_TOKEN_NAME, token)
     _fsync_directory(path)
     claim = _PublicationClaim(
@@ -499,16 +504,38 @@ def _read_owned(
 
 def _finish_claim(claim: _PublicationClaim) -> None:
     _assert_claim_owned(claim)
-    expected_names = {
+    claimed_names = {
         _CLAIM_TOKEN_NAME,
         "freeze-manifest.json",
         "d36-tool-attestation.json",
     }
+    completed_names = {
+        _COMPLETED_MARKER_NAME,
+        "freeze-manifest.json",
+        "d36-tool-attestation.json",
+    }
     try:
-        if {entry.name for entry in os.scandir(claim.path)} != expected_names:
+        if {entry.name for entry in os.scandir(claim.path)} != claimed_names:
             raise _ownership_lost()
+        completed_identity = _write_fsynced(
+            claim.path / _COMPLETED_MARKER_NAME,
+            _COMPLETED_MARKER_BYTES,
+        )
+        if (
+            _read_regular_once(
+                completed_identity.path,
+                maximum=len(_COMPLETED_MARKER_BYTES),
+                label="publication completion marker",
+            )
+            != _COMPLETED_MARKER_BYTES
+            or not _file_identity_matches(completed_identity)
+        ):
+            raise _ownership_lost()
+        _assert_claim_owned(claim)
         _unlink_recorded_file(claim.token_identity)
         if claim.token_identity.path.exists():
+            raise _ownership_lost()
+        if {entry.name for entry in os.scandir(claim.path)} != completed_names:
             raise _ownership_lost()
         if _directory_identity(claim.path) != (claim.device, claim.inode):
             raise _ownership_lost()
@@ -516,7 +543,7 @@ def _finish_claim(claim: _PublicationClaim) -> None:
             raise _ownership_lost()
     except PublicationOwnershipLost:
         raise
-    except OSError:
+    except (OSError, ValueError):
         raise _ownership_lost() from None
     _fsync_directory(claim.path)
     _fsync_directory(claim.resolved_parent)
@@ -546,6 +573,65 @@ def _verify_canonical_attestation(raw: bytes, expected: ToolAttestation) -> None
         raise ValueError("published tool attestation changed")
     if aggregate_fingerprints(parsed.files) != parsed.aggregate_sha256:
         raise ValueError("published tool attestation aggregate mismatch")
+
+
+def read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestation]:
+    expected_names = {
+        _COMPLETED_MARKER_NAME,
+        "freeze-manifest.json",
+        "d36-tool-attestation.json",
+    }
+    try:
+        publication = _require_directory(directory, "completed publication")
+        publication_identity = _directory_identity(publication)
+        if {entry.name for entry in os.scandir(publication)} != expected_names:
+            raise ValueError("completed publication entries are invalid")
+        marker_identity = _file_identity(publication / _COMPLETED_MARKER_NAME)
+        marker = _read_regular_once(
+            publication / _COMPLETED_MARKER_NAME,
+            maximum=len(_COMPLETED_MARKER_BYTES),
+            label="publication completion marker",
+        )
+        if marker != _COMPLETED_MARKER_BYTES:
+            raise ValueError("publication completion marker is invalid")
+        manifest_raw = _read_regular_once(
+            publication / "freeze-manifest.json",
+            maximum=_MAX_FREEZE_MANIFEST_BYTES,
+            label="freeze manifest",
+        )
+        manifest = FreezeManifest.model_validate_json(manifest_raw, strict=True)
+        if (
+            manifest_raw
+            != canonical_json_bytes(manifest.model_dump(mode="json")) + b"\n"
+            or publication.name != manifest.candidate_id
+        ):
+            raise ValueError("freeze manifest is not canonical")
+        attestation_raw = _read_regular_once(
+            publication / "d36-tool-attestation.json",
+            maximum=_MAX_TOOL_ATTESTATION_BYTES,
+            label="tool attestation",
+        )
+        attestation = ToolAttestation.model_validate_json(attestation_raw, strict=True)
+        _verify_canonical_attestation(attestation_raw, attestation)
+        if (
+            _directory_identity(publication) != publication_identity
+            or {entry.name for entry in os.scandir(publication)} != expected_names
+        ):
+            raise ValueError("completed publication entries changed")
+        if (
+            not _file_identity_matches(marker_identity)
+            or _read_regular_once(
+                publication / _COMPLETED_MARKER_NAME,
+                maximum=len(_COMPLETED_MARKER_BYTES),
+                label="publication completion marker",
+            )
+            != marker
+            or not _file_identity_matches(marker_identity)
+        ):
+            raise ValueError("publication completion marker changed")
+        return manifest, attestation
+    except (OSError, ValidationError, ValueError) as exc:
+        raise ValueError("completed publication is invalid") from exc
 
 
 def freeze_candidate(

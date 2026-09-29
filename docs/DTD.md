@@ -951,9 +951,11 @@ The freezer no-replace hard-links each staged file into the claim, using
 exclusive-create copy only where hard links are unsupported, fsyncs the claimed
 directory and parent, and never renames a directory over a destination. Each successfully
 created staging file, published hard link, fallback copy, and claim token records its own
-`lstat` device/inode identity. A successful readback retires the identity-matching claim
-token only after final ownership validation and after proving that the directory contains
-exactly the token plus the two expected artifacts.
+`lstat` device/inode identity. After successful artifact readback and final ownership
+validation, it exclusively creates and fsyncs `.d36-publication-complete` with the exact
+ASCII bytes `d36-publication-complete-v1\n`, reads back those bounded regular-file bytes,
+revalidates ownership, and only then retires the identity-matching claim token. The
+successful directory contains exactly the completion marker plus the two artifacts.
 
 Failure cleanup never calls directory rename, recursive deletion, or final-directory
 removal. It first proves the original final-directory identity, resolved parent, exact
@@ -963,12 +965,15 @@ regular-file device/inode identity equals the recorded identity. A missing or re
 recorded file is untouched. Ownership is revalidated before and after every unlink; if
 ownership was already lost, cleanup touches no staging, published, token, directory, or
 replacement path. Any post-claim failure intentionally retains the final directory and
-claim token as an incomplete, non-evidentiary claim requiring operator cleanup. A retry
-therefore fails the exclusive destination claim. Every reader MUST require exactly
-`freeze-manifest.json` and `d36-tool-attestation.json`, exact canonical validated bytes,
-and absence of `.d36-publication-claim` and every extra entry. Final readback uses
-bounded regular-file reads for both artifacts, requires exact canonical bytes and strict
-models, and recomputes the tool-attestation aggregate.
+claim token as an incomplete, non-evidentiary claim requiring operator cleanup; a
+completion marker created during an interrupted final transition does not override that
+claim. A retry therefore fails the exclusive destination claim.
+`read_frozen_candidate()` and every downstream reader MUST require exactly
+`freeze-manifest.json`, `d36-tool-attestation.json`, and the regular completion marker;
+require its exact bytes; reject `.d36-publication-claim` and every extra entry; parse
+bounded artifact bytes through strict models; require canonical bytes and a directory
+name equal to `candidate_id`; and recompute the tool-attestation aggregate. The reader
+rechecks the exact entry set and completion-marker bytes after reading both artifacts.
 
 `evaluation/final_protocol.json` is the canonical D36 policy template only. The
 external `evaluation_trial_host` accepts exactly one strict independent wire object:

@@ -157,6 +157,7 @@ freeze_candidate(
     *, candidate_root: Path, candidate_control_path: Path,
     expected_candidate_control_sha256: str, output_root: Path,
 ) -> FreezeManifest
+read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestation]
 ```
 
 CLI:
@@ -189,7 +190,7 @@ Validate the candidate-control detached hash, canonical strict schema, commit su
 `git_tree_clean: true`, `git rev-parse HEAD == control.git_commit`, and empty
 `git status --porcelain` before fingerprinting. Read the commit's integer committer
 timestamp with fixed Git argv, parse it as an integer, and render UTC at second
-precision; do not call `datetime.now()` or read host timezone for manifest fields. Recheck commit/cleanliness immediately before publication. Under the supplied external output root, write only `{FreezeManifest.candidate_id}/freeze-manifest.json` plus a separate canonical D36 tool attestation with atomic replace. `evaluation/tool_attestation.py` owns the reusable strict `ToolAttestation` and canonical source-file hashing used unchanged by D37-D40; the D36 attestation covers the explicit freezer, protocol, unlabeled-contract, and trial-host source allowlist; add `/release-evidence/` to `.gitignore`. Verify the manifest after writing, refuse tracked output roots, and assert the candidate tree—including ignored-path inventory—did not change. Any mismatch produces no freeze artifact.
+precision; do not call `datetime.now()` or read host timezone for manifest fields. Recheck commit/cleanliness immediately before publication. Under the supplied external output root, claim `{FreezeManifest.candidate_id}` without replacement, publish canonical `freeze-manifest.json` and the separate D36 tool attestation without replacement, and retain an exact fsynced `.d36-publication-complete` marker only after both artifacts pass bounded readback. `evaluation/tool_attestation.py` owns the reusable strict `ToolAttestation` and canonical source-file hashing used unchanged by D37-D40; the D36 attestation covers the explicit freezer, protocol, unlabeled-contract, and trial-host source allowlist; add `/release-evidence/` to `.gitignore`. `read_frozen_candidate()` requires the exact three-entry completed layout, exact marker bytes, canonical strict artifacts, matching candidate-directory identity, and a recomputed attestation aggregate. A failed post-claim publication retains its claim marker and is never accepted as evidence. Refuse tracked output roots and assert the candidate tree—including ignored-path inventory—did not change.
 
 - [ ] **Step 4: Run freeze tests**
 

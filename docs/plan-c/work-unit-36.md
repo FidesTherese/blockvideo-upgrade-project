@@ -38,7 +38,10 @@ change unnoticed.
   recorded staging/published files whose own identities still match. Ownership loss
   MUST touch nothing, including an empty replacement. Any post-claim failure MUST leave
   the claim token/final path for operator cleanup and retry MUST fail on the existing
-  destination. Readers MUST accept only the exact canonical manifest/attestation pair
+  destination. After validating both artifacts, exclusively create, fsync, and read
+  back a retained `.d36-publication-complete` marker containing exactly
+  `d36-publication-complete-v1\n`, then retire the claim marker. Readers MUST accept
+  only the exact canonical manifest/attestation pair plus that exact completion marker,
   with no claim marker or extra entry. Require exact canonical artifact bytes, fsyncs,
   and a recomputed tool-attestation aggregate.
 
@@ -55,8 +58,9 @@ or post-claim replacement final directory is never replaced or removed. Race tes
 write, readback, and cleanup boundaries preserve a replacement sentinel at the exact
 final path, preserve an empty replacement, and return the bounded ownership-lost error.
 An ordinary failed claim remains incomplete and non-evidentiary, and a retry fails
-closed until operator cleanup. The frozen candidate can be reconstructed using
-documented commands.
+closed until operator cleanup. A successful reader rejects a missing, altered, replaced,
+or non-regular completion marker, any retained claim marker, and every extra entry. The
+frozen candidate can be reconstructed using documented commands.
 
 For Task 1 trial evidence, equivalent fresh runs MUST produce identical logical-state
 and response projections: timestamps, leases, runtime durations, and generated opaque

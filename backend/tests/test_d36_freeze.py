@@ -917,6 +917,61 @@ def test_published_attestation_mismatch_leaves_incomplete_claim(
     assert {path.name for path in incomplete.iterdir()} == {freeze._CLAIM_TOKEN_NAME}
 
 
+def test_completed_publication_retains_validated_completion_marker(tmp_path: Path) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    manifest = _freeze(tmp_path, candidate, commit)
+    freeze, _, _ = _freeze_api()
+    publication = tmp_path / "output" / manifest.candidate_id
+
+    loaded_manifest, loaded_attestation = freeze.read_frozen_candidate(publication)
+
+    assert loaded_manifest == manifest
+    assert loaded_attestation.tool_name == "d36_candidate_freezer_and_trial_host"
+    assert {path.name for path in publication.iterdir()} == {
+        freeze._COMPLETED_MARKER_NAME,
+        "d36-tool-attestation.json",
+        "freeze-manifest.json",
+    }
+    assert (
+        publication / freeze._COMPLETED_MARKER_NAME
+    ).read_bytes() == freeze._COMPLETED_MARKER_BYTES
+    assert not (publication / freeze._CLAIM_TOKEN_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    "condition", ["missing", "tampered", "claim", "extra", "replaced_during_read"]
+)
+def test_frozen_candidate_reader_requires_exact_valid_completion_marker(
+    tmp_path: Path, condition: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    manifest = _freeze(tmp_path, candidate, commit)
+    freeze, _, _ = _freeze_api()
+    publication = tmp_path / "output" / manifest.candidate_id
+    marker = publication / freeze._COMPLETED_MARKER_NAME
+    if condition == "missing":
+        marker.unlink()
+    elif condition == "tampered":
+        marker.write_bytes(b"D" + marker.read_bytes()[1:])
+    elif condition == "claim":
+        marker.rename(publication / freeze._CLAIM_TOKEN_NAME)
+    elif condition == "extra":
+        (publication / "extra").write_bytes(b"extra")
+    else:
+        original_read = freeze._read_regular_once
+
+        def replace_marker(path: Path, *, maximum: int, label: str) -> bytes:
+            if label == "tool attestation":
+                marker.unlink()
+                marker.write_bytes(freeze._COMPLETED_MARKER_BYTES)
+            return original_read(path, maximum=maximum, label=label)
+
+        monkeypatch.setattr(freeze, "_read_regular_once", replace_marker)
+
+    with pytest.raises(ValueError, match="completed publication"):
+        freeze.read_frozen_candidate(publication)
+
+
 def test_d36_tool_attestation_has_exact_allowlist_and_valid_aggregate(tmp_path: Path) -> None:
     candidate, commit = _make_candidate(tmp_path)
     manifest = _freeze(tmp_path, candidate, commit)
@@ -944,7 +999,7 @@ def test_d36_tool_attestation_has_exact_allowlist_and_valid_aggregate(tmp_path: 
         attestation.ToolAttestation.model_validate({**parsed.model_dump(), "extra": True})
 
 
-def test_cli_writes_only_manifest_and_attestation(tmp_path: Path) -> None:
+def test_cli_writes_completed_publication_contract(tmp_path: Path) -> None:
     candidate, commit = _make_candidate(tmp_path)
     control_path, digest = _write_control(tmp_path, _control(commit))
     backend = Path(__file__).parents[1]
@@ -971,11 +1026,13 @@ def test_cli_writes_only_manifest_and_attestation(tmp_path: Path) -> None:
     response = json.loads(completed.stdout)
     candidate_output = output / response["candidate_id"]
     assert {path.name for path in candidate_output.iterdir()} == {
+        ".d36-publication-complete",
         "d36-tool-attestation.json",
         "freeze-manifest.json",
     }
     assert response == {
         "candidate_id": response["candidate_id"],
+        "completion_marker": f"{response['candidate_id']}/.d36-publication-complete",
         "freeze_manifest": f"{response['candidate_id']}/freeze-manifest.json",
         "tool_attestation": f"{response['candidate_id']}/d36-tool-attestation.json",
     }
