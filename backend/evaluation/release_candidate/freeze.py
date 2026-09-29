@@ -8,9 +8,9 @@ import os
 import platform
 import re
 import secrets
-import shutil
 import stat
 import subprocess
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,23 @@ _TOOL_SOURCE_PATHS = (
     "backend/evaluation/tool_attestation.py",
     "backend/evaluation/unlabeled_contracts.py",
 )
+_CLAIM_TOKEN_NAME = ".d36-publication-claim"
+_MAX_CLAIM_TOKEN_BYTES = 64
+
+
+class PublicationOwnershipLost(ValueError):
+    """The claimed publication directory is no longer owned by this invocation."""
+
+
+@dataclass(frozen=True)
+class _PublicationClaim:
+    path: Path
+    resolved_parent: Path
+    device: int
+    inode: int
+    token: bytes
+
+
 _MODE_CONFIGURATION: dict[str, object] = {
     "all_tools": {
         "retrieval_index_required": False,
@@ -349,6 +366,135 @@ def _publish_file_no_replace(source: Path, destination: Path, value: bytes) -> N
         _write_fsynced(destination, value)
 
 
+def _ownership_lost() -> PublicationOwnershipLost:
+    return PublicationOwnershipLost(
+        "publication directory ownership lost; moved partial may require operator cleanup"
+    )
+
+
+def _directory_identity(path: Path) -> tuple[int, int]:
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISDIR(
+        metadata.st_mode
+    ):
+        raise _ownership_lost()
+    return metadata.st_dev, metadata.st_ino
+
+
+def _assert_claim_owned(claim: _PublicationClaim) -> None:
+    try:
+        if claim.path.parent.resolve(strict=True) != claim.resolved_parent:
+            raise _ownership_lost()
+        if _directory_identity(claim.path) != (claim.device, claim.inode):
+            raise _ownership_lost()
+        token = _read_regular_once(
+            claim.path / _CLAIM_TOKEN_NAME,
+            maximum=_MAX_CLAIM_TOKEN_BYTES,
+            label="publication claim token",
+        )
+        if token != claim.token:
+            raise _ownership_lost()
+        if _directory_identity(claim.path) != (claim.device, claim.inode):
+            raise _ownership_lost()
+        if claim.path.parent.resolve(strict=True) != claim.resolved_parent:
+            raise _ownership_lost()
+    except PublicationOwnershipLost:
+        raise
+    except (OSError, ValueError):
+        raise _ownership_lost() from None
+
+
+def _claim_publication_directory(path: Path) -> _PublicationClaim:
+    path.mkdir(mode=0o700, exist_ok=False)
+    device, inode = _directory_identity(path)
+    resolved_parent = path.parent.resolve(strict=True)
+    token = secrets.token_bytes(32)
+    _write_fsynced(path / _CLAIM_TOKEN_NAME, token)
+    _fsync_directory(path)
+    claim = _PublicationClaim(
+        path=path,
+        resolved_parent=resolved_parent,
+        device=device,
+        inode=inode,
+        token=token,
+    )
+    _assert_claim_owned(claim)
+    return claim
+
+
+def _publish_owned(
+    claim: _PublicationClaim, source: Path, destination_name: str, value: bytes
+) -> None:
+    _assert_claim_owned(claim)
+    try:
+        _publish_file_no_replace(source, claim.path / destination_name, value)
+    finally:
+        _assert_claim_owned(claim)
+
+
+def _read_owned(
+    claim: _PublicationClaim, name: str, *, maximum: int, label: str
+) -> bytes:
+    _assert_claim_owned(claim)
+    try:
+        return _read_regular_once(claim.path / name, maximum=maximum, label=label)
+    finally:
+        _assert_claim_owned(claim)
+
+
+def _finish_claim(claim: _PublicationClaim) -> None:
+    _assert_claim_owned(claim)
+    try:
+        (claim.path / _CLAIM_TOKEN_NAME).unlink()
+        if _directory_identity(claim.path) != (claim.device, claim.inode):
+            raise _ownership_lost()
+        if claim.path.parent.resolve(strict=True) != claim.resolved_parent:
+            raise _ownership_lost()
+    except PublicationOwnershipLost:
+        raise
+    except OSError:
+        raise _ownership_lost() from None
+    _fsync_directory(claim.path)
+    _fsync_directory(claim.resolved_parent)
+
+
+def _unlink_owned_artifact(claim: _PublicationClaim, name: str) -> None:
+    _assert_claim_owned(claim)
+    try:
+        (claim.path / name).unlink()
+    except FileNotFoundError:
+        pass
+    finally:
+        _assert_claim_owned(claim)
+
+
+def _cleanup_claim(claim: _PublicationClaim) -> None:
+    _assert_claim_owned(claim)
+    tombstone = claim.resolved_parent / (
+        f".{claim.path.name}.{secrets.token_hex(16)}.cleanup"
+    )
+    try:
+        os.rename(claim.path, tombstone)
+    except OSError:
+        raise _ownership_lost() from None
+    moved = _PublicationClaim(
+        path=tombstone,
+        resolved_parent=claim.resolved_parent,
+        device=claim.device,
+        inode=claim.inode,
+        token=claim.token,
+    )
+    _assert_claim_owned(moved)
+    _unlink_owned_artifact(moved, "freeze-manifest.json")
+    _unlink_owned_artifact(moved, "d36-tool-attestation.json")
+    _finish_claim(moved)
+    try:
+        tombstone.rmdir()
+    except OSError:
+        raise _ownership_lost() from None
+    _fsync_directory(claim.resolved_parent)
+
+
 def _verify_canonical_attestation(raw: bytes, expected: ToolAttestation) -> None:
     try:
         parsed = ToolAttestation.model_validate_json(raw, strict=True)
@@ -402,7 +548,7 @@ def freeze_candidate(
     root: Path | None = None
     created_root = False
     staging: list[Path] = []
-    claimed: Path | None = None
+    claimed: _PublicationClaim | None = None
     try:
         root, created_root = _validate_output_root(output_root, candidate, tool_root)
         final = root / manifest.candidate_id
@@ -431,35 +577,38 @@ def freeze_candidate(
             raise ValueError("candidate changed during freeze")
 
         try:
-            final.mkdir(mode=0o700, exist_ok=False)
+            claimed = _claim_publication_directory(final)
         except FileExistsError as exc:
             raise ValueError("output destination already exists") from exc
-        claimed = final
         _fsync_directory(root)
-        _publish_file_no_replace(
-            staged_manifest, final / "freeze-manifest.json", manifest_bytes
+        _publish_owned(
+            claimed, staged_manifest, "freeze-manifest.json", manifest_bytes
         )
-        _publish_file_no_replace(
+        _publish_owned(
+            claimed,
             staged_attestation,
-            final / "d36-tool-attestation.json",
+            "d36-tool-attestation.json",
             attestation_bytes,
         )
-        _fsync_directory(final)
+        _fsync_directory(claimed.path)
         _fsync_directory(root)
 
-        published_manifest = _read_regular_once(
-            final / "freeze-manifest.json",
+        published_manifest = _read_owned(
+            claimed,
+            "freeze-manifest.json",
             maximum=len(manifest_bytes),
             label="freeze manifest",
         )
         if published_manifest != manifest_bytes:
             raise ValueError("published freeze manifest changed")
-        published_attestation = _read_regular_once(
-            final / "d36-tool-attestation.json",
+        published_attestation = _read_owned(
+            claimed,
+            "d36-tool-attestation.json",
             maximum=len(attestation_bytes),
             label="tool attestation",
         )
         _verify_canonical_attestation(published_attestation, attestation)
+        _finish_claim(claimed)
         claimed = None
         return manifest
     finally:
@@ -468,10 +617,8 @@ def freeze_candidate(
                 staged.unlink()
             except FileNotFoundError:
                 pass
-        if claimed is not None and claimed.exists():
-            shutil.rmtree(claimed)
-            if root is not None:
-                _fsync_directory(root)
+        if claimed is not None:
+            _cleanup_claim(claimed)
         if created_root and root is not None and root.exists():
             try:
                 root.rmdir()

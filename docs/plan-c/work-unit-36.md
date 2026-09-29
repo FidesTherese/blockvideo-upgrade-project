@@ -28,10 +28,15 @@ change unnoticed.
   `HEAD` blobs. Real output generation is valid only after the tooling commit.
 - Permit in-repository output only below resolved `<tool-repo>/release-evidence/`;
   permit external roots without treating other ignored in-repository roots as evidence.
-- Claim the final candidate directory with exclusive `mkdir`, publish each verified
-  file with no-replace hard-link/copy semantics, fsync, and remove only the claimed
-  partial directory on failure. Read back both bounded regular artifacts; require
-  exact canonical bytes and a recomputed tool-attestation aggregate.
+- Claim the final candidate directory with exclusive `mkdir`; immediately record its
+  non-reparse/non-symlink `lstat` device/inode identity and strict resolved parent, then
+  exclusively create and fsync a random claim-token file. Before and after every
+  no-replace artifact publication and bounded no-follow readback, require the same
+  directory identity, parent, and exact token. Failure cleanup MUST revalidate the same
+  ownership, MUST NOT recursively delete a renamed/replaced pathname, and MUST raise a
+  fixed ownership-lost error while preserving any replacement; a moved original partial
+  may require operator cleanup. Require exact canonical artifact bytes, fsyncs, and a
+  recomputed tool-attestation aggregate.
 
 ## Non-goals
 
@@ -42,8 +47,10 @@ No tag, publication, deployment, or final readiness claim.
 The same checkout and inputs reproduce byte-identical canonical manifest bytes,
 including deterministic `created_at`. Any relevant byte change is detected. The
 manifest fingerprints reconstruct from the declared commit. A concurrent pre-existing
-final directory is never replaced or removed. The frozen candidate can be
-reconstructed using documented commands.
+or post-claim replacement final directory is never replaced or removed. Race tests at
+write, readback, and cleanup boundaries preserve a replacement sentinel and return the
+bounded ownership-lost error. The frozen candidate can be reconstructed using
+documented commands.
 
 For Task 1 trial evidence, equivalent fresh runs MUST produce identical logical-state
 and response projections: timestamps, leases, runtime durations, and generated opaque

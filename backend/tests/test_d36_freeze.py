@@ -687,6 +687,116 @@ def test_concurrent_precreated_destination_is_retained(
     assert owners[0].read_text(encoding="utf-8") == "other owner"
 
 
+def _replace_claimed_directory(claimed: Path) -> Path:
+    moved = claimed.with_name(f"{claimed.name}.moved-partial")
+    claimed.rename(moved)
+    claimed.mkdir()
+    (claimed / "replacement-sentinel.txt").write_text(
+        "replacement owner", encoding="utf-8"
+    )
+    return moved
+
+
+def test_claim_replacement_during_write_preserves_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    original_publish = freeze._publish_file_no_replace
+    moved: Path | None = None
+
+    def replace_after_first_write(source: Path, destination: Path, value: bytes) -> None:
+        nonlocal moved
+        original_publish(source, destination, value)
+        if moved is None:
+            moved = _replace_claimed_directory(destination.parent)
+
+    monkeypatch.setattr(freeze, "_publish_file_no_replace", replace_after_first_write)
+    with pytest.raises(ValueError, match="publication directory ownership lost"):
+        freeze.freeze_candidate(
+            candidate_root=candidate,
+            candidate_control_path=control_path,
+            expected_candidate_control_sha256=digest,
+            output_root=tmp_path / "output",
+        )
+    assert moved is not None
+    assert (moved / "freeze-manifest.json").is_file()
+    sentinels = list((tmp_path / "output").glob("*/replacement-sentinel.txt"))
+    assert len(sentinels) == 1
+    assert sentinels[0].read_text(encoding="utf-8") == "replacement owner"
+
+
+def test_claim_replacement_during_readback_preserves_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    original_read = freeze._read_regular_once
+    moved: Path | None = None
+
+    def replace_before_read(path: Path, *, maximum: int, label: str) -> bytes:
+        nonlocal moved
+        if label == "freeze manifest" and moved is None:
+            moved = _replace_claimed_directory(path.parent)
+        return original_read(path, maximum=maximum, label=label)
+
+    monkeypatch.setattr(freeze, "_read_regular_once", replace_before_read)
+    with pytest.raises(ValueError, match="publication directory ownership lost"):
+        freeze.freeze_candidate(
+            candidate_root=candidate,
+            candidate_control_path=control_path,
+            expected_candidate_control_sha256=digest,
+            output_root=tmp_path / "output",
+        )
+    assert moved is not None
+    sentinels = list((tmp_path / "output").glob("*/replacement-sentinel.txt"))
+    assert len(sentinels) == 1
+    assert sentinels[0].read_text(encoding="utf-8") == "replacement owner"
+
+
+def test_claim_replacement_during_cleanup_preserves_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    original_read = freeze._read_regular_once
+    original_rename = freeze.os.rename
+    moved: Path | None = None
+
+    def fail_readback(path: Path, *, maximum: int, label: str) -> bytes:
+        value = original_read(path, maximum=maximum, label=label)
+        return b"corrupt" if label == "freeze manifest" else value
+
+    def replace_as_cleanup_starts(source: Path, destination: Path) -> None:
+        nonlocal moved
+        claimed = Path(source)
+        moved = claimed.with_name(f"{claimed.name}.moved-partial")
+        original_rename(claimed, moved)
+        claimed.mkdir()
+        (claimed / "replacement-sentinel.txt").write_text(
+            "replacement owner", encoding="utf-8"
+        )
+        original_rename(claimed, destination)
+
+    monkeypatch.setattr(freeze, "_read_regular_once", fail_readback)
+    monkeypatch.setattr(freeze.os, "rename", replace_as_cleanup_starts)
+    with pytest.raises(ValueError, match="publication directory ownership lost"):
+        freeze.freeze_candidate(
+            candidate_root=candidate,
+            candidate_control_path=control_path,
+            expected_candidate_control_sha256=digest,
+            output_root=tmp_path / "output",
+        )
+    assert moved is not None
+    assert (moved / "freeze-manifest.json").is_file()
+    sentinels = list((tmp_path / "output").glob("*/replacement-sentinel.txt"))
+    assert len(sentinels) == 1
+    assert sentinels[0].read_text(encoding="utf-8") == "replacement owner"
+
+
 def test_post_publish_verification_failure_removes_atomic_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

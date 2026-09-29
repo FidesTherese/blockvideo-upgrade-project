@@ -265,8 +265,13 @@ repository root, requires a clean committed checkout, and binds each source byte
 its declared `HEAD`; generation before the tooling commit is refused. In-repository
 output is confined to resolved `release-evidence/**`, while external roots remain
 allowed. Publication atomically claims the final candidate directory without rename,
-adds verified files with no-replace semantics, fsyncs them, and rolls back only the
-claimed directory on any canonical readback or recomputed-attestation mismatch.
+immediately records its non-reparse/non-symlink `lstat` device/inode identity and
+resolved parent, and exclusively creates and fsyncs a random claim-token file. Every
+artifact publication and bounded no-follow readback revalidates that identity and exact
+token before and after the operation. Failure cleanup proceeds only after the same
+revalidation and never recursively deletes a pathname that was renamed or replaced;
+ownership loss raises a fixed bounded error and may leave the moved partial for
+operator cleanup. Verified files retain no-replace semantics and required fsyncs.
 
 Any candidate-behavior change after D35 requires a new candidate and D36 freeze and
 invalidates affected evaluation evidence. A post-candidate tooling-only change keeps

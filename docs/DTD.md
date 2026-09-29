@@ -938,13 +938,27 @@ inside the identified tooling repository, permits only resolved
 `<tool-repo>/release-evidence/**`; `storage`, cache directories, and every other
 ignored or tracked in-repository location fail. Publication first writes and verifies
 fsynced staging files in the output root, then claims the final candidate directory
-with `mkdir(exist_ok=False)`. It no-replace hard-links each staged file into the claim,
-using exclusive-create copy only where hard links are unsupported, fsyncs the claimed
-directory and parent, and never renames a directory over a destination. Any failure
-removes only a directory successfully claimed by this invocation, so a concurrently
-created destination remains untouched. Final readback uses bounded regular-file reads
-for both artifacts, requires exact canonical bytes and strict models, recomputes the
-tool-attestation aggregate, and removes the claimed partial output on mismatch.
+with `mkdir(exist_ok=False)`. Immediately after that exclusive creation,
+`_claim_publication_directory()` records the directory's `lstat` device/inode identity
+(the inode is the Windows file index where Python exposes it), rejects symlink/reparse/
+non-directory metadata, records the strict resolved parent, and exclusively creates a
+32-byte random `.d36-publication-claim` file with no-follow where available and file
+fsync. `_assert_claim_owned()` performs a bounded no-follow token read and requires the
+same directory identity, parent, file type, and exact token before and after every
+artifact publication and artifact readback.
+
+The freezer no-replace hard-links each staged file into the claim, using
+exclusive-create copy only where hard links are unsupported, fsyncs the claimed
+directory and parent, and never renames a directory over a destination. A successful
+readback retires the claim token only after final ownership validation. Failure cleanup
+first revalidates ownership, atomically renames the owned directory to an unpredictable
+cleanup name, revalidates identity/token again, and removes only the two known artifact
+names, token, and then empty directory; it does not use recursive pathname deletion.
+A rename, replacement, reparse, parent change, missing/changed token, or cleanup rename
+race raises the fixed bounded `PublicationOwnershipLost` message without deleting the
+replacement. The moved original partial may require operator cleanup. Final readback
+uses bounded regular-file reads for both artifacts, requires exact canonical bytes and
+strict models, and recomputes the tool-attestation aggregate.
 
 `evaluation/final_protocol.json` is the canonical D36 policy template only. The
 external `evaluation_trial_host` accepts exactly one strict independent wire object:
@@ -1829,7 +1843,10 @@ independent review gates supply the recorded trust decisions.
   parent/subject/cleanliness; commit-timestamp-derived UTC `created_at`; byte-identical
   manifest generation on repeated identical inputs; changed allowlisted byte;
   excluded later tooling, secret/cache paths; separate source attestation; recursively
-  strict `UnlabeledTrialCase`; nested label/extra rejection; candidate non-mutation.
+  strict `UnlabeledTrialCase`; nested label/extra rejection; candidate non-mutation;
+  and claimed-directory replacement races after claim during artifact write, readback,
+  and failure cleanup, each requiring bounded ownership loss while the replacement
+  sentinel survives and any moved original partial remains untouched.
 - **D37:** synthetic cases only; domain-separated opaque case/category token generation
   with no raw IDs/text/labels in protocol or bundle; non-empty complete sorted protocol
   case/category sets, non-empty included set, at least one included token per declared
