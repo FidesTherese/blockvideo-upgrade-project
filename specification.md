@@ -199,11 +199,20 @@ content-hashed, artifact-approved non-safety limitation evidence; free-text or s
 limitations cannot qualify.
 
 D36 Task 1 defines only external protocol, unlabeled-contract, and candidate-host
-tooling. The host validates one recursively strict, label-free case before launching
-a subprocess with the candidate backend as its working directory and import root;
-candidate modules never import D36 tooling. Case storage is fresh and external, mode
-rules are exact (`stateful` requires an index and `all_tools` rejects one), and the
-published observation is canonical and redacted. No future D36 tooling hash is known
+tooling. The host validates one recursively strict, label-free, content-hash-bound
+case before launching fixed candidate-rooted subprocesses; candidate modules never
+import D36 tooling. Explicit event variants execute normal/resend, fresh-process
+restart replay, same-ID conflict, concurrent identity, external revision race,
+`/{request_id}/execute` confirmation, and target replacement without generic event
+payloads. Fresh external state can include bounded projects, settings history, jobs
+with derived candidate snapshots/fingerprints, artifacts, receipts, external calls,
+and dialogue turns. Canonical sorted full-content hashes detect same-count and
+in-place mutation. Public observations contain only strict enums, fixed failure/reason
+classes, counts/flags, and deterministic redacted hashes; timing and private/model
+prose are excluded. Candidate/backend/storage/output boundaries reject symlink and
+reparse paths, use exclusive fsynced atomic files, and monitor file-redirected
+subprocess output with a 2 MiB kill limit. Mode rules remain exact (`stateful`
+requires an index and `all_tools` rejects one). No future D36 tooling hash is known
 or recorded by Task 1.
 
 D36 derives `FreezeManifest.created_at` solely from the frozen candidate commit's

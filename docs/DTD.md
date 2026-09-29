@@ -925,24 +925,52 @@ class UnlabeledTrialCase(BaseModel):
 
 Neither this model nor any nested model may inherit from, import, embed, deserialize
 through, or expose D24's label-bearing `Case`; no field graph may contain `expected`,
-accepted operations/answers, scoring labels, review state, or generic extras. D37
-projects each approved `Case` through an explicit allowlist before serialization.
+accepted operations/answers, scoring labels, review state, generic extras, or generic
+action/when/then payloads. D37 projects each approved `Case` through an explicit
+allowlist before serialization. Event variants are a discriminated union: normal,
+identical resend, fresh-process restart resend, same-ID changed body, concurrent
+identical submission, revision race, one/two confirmation attempts, and target switch
+accept only their consumed fields. Confirmation uses
+`POST /api/language/requests/{request_id}/execute`. Numeric and string bounds equal
+the candidate contracts. The host recomputes `case_sha256` from compact sorted-key
+ASCII JSON of the case without `case_sha256`; all canonical hashes use the same
+no-newline bytes, while durable JSON files append one newline.
+
+Initial state explicitly permits the primary project, bounded additional projects,
+full settings/history, jobs, artifact identities, operation receipts, external-call
+records, and prior language turns. The worker derives complete generation snapshots
+and fingerprints with candidate `capture_inputs`/`fingerprint_inputs`, reconstructs
+reciprocal dialogue links and candidate language responses, and creates synthetic
+artifact bytes whose size/hash must match the wire identity. No label model or D24
+contract is imported. Before and after each event, the worker canonicalizes sorted
+records for every project and settings revision; complete job snapshot/fingerprint
+state; receipt request/result hashes; artifact manifest and file identities; external
+call response hashes; and language request/turn hashes. Collection hashes, counts,
+fixed enums/flags, and effect counts detect replacement or in-place mutation even
+when row counts do not change. Response hashing uses an allowlisted projection that
+excludes timing, diagnostics, messages, questions, model prose, paths, and private
+content.
+
 The host rejects label/review/scoring fields, multiple cases, wrong mode/index
-combinations, or non-empty output before candidate invocation. It serializes only the
-validated allowlisted wire fields into fresh external case storage, then launches an
-external worker subprocess with the D35 candidate's `backend/` directory as both
-working directory and Python import root. The worker imports only committed D35
-application modules; the candidate never imports D36 tooling and neither checkout is
-mutated. `stateful` requires one index path and `all_tools` rejects an index. The
-subprocess receives only explicit non-secret runtime settings, executes the ordinary
-D30 language/application path, and returns one bounded internal observation for host
-validation. The host atomically publishes a canonical redacted observation containing
-persisted-state/effect hashes and bounded state summaries, model-call count, fixed
-failure classes, replay/confirmation observations, and SHA-256 identities. It never
-publishes request text, model bodies, labels, expected values, source text, or private
-paths. Each invocation requires fresh storage and refuses a pre-existing non-empty
-storage directory or output file. Task 1 records no future freezer or trial-tool
-attestation hash because those bytes do not yet exist.
+combinations, or non-empty output before candidate invocation. It performs `lstat`
+before resolution and rejects symlink/reparse/non-regular candidate, backend, index,
+storage, input, output, and temporary-file surfaces as applicable; every resolved
+path is containment-checked again before publication. Temporary files use exclusive
+unpredictable names, no-follow flags where available, file fsync, atomic replacement,
+and directory fsync where supported. It serializes only validated allowlisted wire
+fields into fresh external case storage, then launches a fixed-argument `Popen` with
+the D35 candidate's regular `backend/` directory as working directory and Python
+import root. A `runpy` bootstrap avoids adding the D36 script directory to candidate
+imports. The worker imports only committed D35 application modules; candidate modules
+never import D36 tooling and neither checkout is mutated. `stateful` requires one
+regular index directory and `all_tools` rejects an index. Stdout and stderr are
+redirected to external exclusive files; the host actively monitors both, kills on
+timeout or either file exceeding 2 MiB, and never reads them. Restart resend runs the
+first submit and replay in separate candidate processes/apps against the same external
+case database. The host validates one bounded strict worker observation and atomically
+publishes canonical redacted output. Each invocation requires fresh storage and
+refuses a pre-existing non-empty storage directory or output file. Task 1 records no
+future freezer or trial-tool attestation hash because those bytes do not yet exist.
 
 ### D37 canonical protocol artifact and shared full result bundle
 
