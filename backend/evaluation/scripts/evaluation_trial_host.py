@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -61,6 +62,10 @@ FailureClass = Literal[
 ProjectStatusValue = Literal[
     "pending", "splitting", "planning", "generating", "rendering", "completed", "failed", "cancelled",
 ]
+
+
+async def _quiescent_candidate_dispatcher() -> None:
+    await asyncio.Event().wait()
 
 
 class _ModelCallBudget:
@@ -570,7 +575,6 @@ def _candidate_worker(model_call_budget: int) -> int:
         from app.interpretation.contracts import ClarificationProposal, InterpretationOutcome
         from app.interpretation.local_chat import LocalChatAdapter
         from app.language_operations.contracts import LanguageResponse
-        from app.main import create_app
         from app.models.artifact import GenerationArtifact
         from app.models.external_call import ExternalCall
         from app.models.job import GenerationJob, JobStatus
@@ -583,6 +587,10 @@ def _candidate_worker(model_call_budget: int) -> int:
         from app.schemas import ProjectCreate
         from app.services.generation_snapshots import capture_inputs, fingerprint_inputs
         from app.services.settings_history import configuration
+        from app.workers import operation_dispatcher as candidate_operation_dispatcher
+
+        candidate_operation_dispatcher.run_operation_dispatcher = _quiescent_candidate_dispatcher
+        from app.main import create_app
 
         case = json.loads(Path(os.environ["D36_WORKER_INPUT"]).read_text(encoding="ascii"))
         initial, event = case["initial"], case["event"]

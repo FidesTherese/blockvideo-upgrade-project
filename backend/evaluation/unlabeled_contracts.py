@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 MAX_IDENTIFIER = 128
 MAX_REVISION = 10**12
@@ -17,16 +17,44 @@ class StrictUnlabeledRecord(BaseModel):
 
 
 class UnlabeledPronunciation(StrictUnlabeledRecord):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, str_strip_whitespace=True)
+
     surface: str = Field(min_length=1, max_length=80)
     reading: str = Field(min_length=1, max_length=160, pattern=r"^[ァ-ヴー]+$")
     accent: int | None = Field(default=None, ge=0, le=1000)
+
+    @model_validator(mode="after")
+    def candidate_compatible(self) -> Self:
+        if any(character in self.surface for character in "。！？\n\r"):
+            raise ValueError("pronunciation surface contains a delimiter")
+        if self.reading[0] in "ァィゥェォャュョヮー":
+            raise ValueError("pronunciation reading has an invalid start")
+        mora_count = sum(character not in "ァィゥェォャュョヮ" for character in self.reading)
+        if self.accent is not None and self.accent > mora_count:
+            raise ValueError("pronunciation accent exceeds reading mora count")
+        return self
+
+
+def _unique_pronunciation_surfaces(
+    overrides: tuple[UnlabeledPronunciation, ...],
+) -> tuple[UnlabeledPronunciation, ...]:
+    surfaces = [item.surface for item in overrides]
+    if len(surfaces) != len(set(surfaces)):
+        raise ValueError("pronunciation surfaces must be unique")
+    return overrides
+
+
+UnlabeledPronunciations = Annotated[
+    tuple[UnlabeledPronunciation, ...],
+    AfterValidator(_unique_pronunciation_surfaces),
+]
 
 
 class UnlabeledSettings(StrictUnlabeledRecord):
     subtitle_font_size: int = Field(ge=16, le=120)
     voicevox_speed_scale: float = Field(ge=0.5, le=2.0)
     voicevox_speaker_id: int = Field(ge=0, le=100000)
-    pronunciation_overrides: tuple[UnlabeledPronunciation, ...] = Field(max_length=100, strict=False)
+    pronunciation_overrides: UnlabeledPronunciations = Field(max_length=100, strict=False)
     narration_pacing_mode: Literal["adaptive", "fixed"]
     narration_sentence_pause_seconds: float = Field(ge=0, le=5)
 
@@ -35,7 +63,7 @@ class UnlabeledSettingsPatch(StrictUnlabeledRecord):
     subtitle_font_size: int | None = Field(default=None, ge=16, le=120)
     voicevox_speed_scale: float | None = Field(default=None, ge=0.5, le=2.0)
     voicevox_speaker_id: int | None = Field(default=None, ge=0, le=100000)
-    pronunciation_overrides: tuple[UnlabeledPronunciation, ...] | None = Field(default=None, max_length=100, strict=False)
+    pronunciation_overrides: UnlabeledPronunciations | None = Field(default=None, max_length=100, strict=False)
     narration_pacing_mode: Literal["adaptive", "fixed"] | None = None
     narration_sentence_pause_seconds: float | None = Field(default=None, ge=0, le=5)
 
@@ -168,7 +196,7 @@ class UnlabeledOperationArguments(StrictUnlabeledRecord):
     subtitle_font_size_delta: int | None = Field(default=None, ge=-104, le=104)
     voicevox_speed_scale: float | None = Field(default=None, ge=0.5, le=2.0)
     voicevox_speaker_id: int | None = Field(default=None, ge=0, le=100000)
-    pronunciation_overrides: tuple[UnlabeledPronunciation, ...] | None = Field(default=None, max_length=100, strict=False)
+    pronunciation_overrides: UnlabeledPronunciations | None = Field(default=None, max_length=100, strict=False)
     narration_pacing_mode: Literal["adaptive", "fixed"] | None = None
     narration_sentence_pause_seconds: float | None = Field(default=None, ge=0, le=5)
     revision: int | None = Field(default=None, ge=1, le=MAX_REVISION)

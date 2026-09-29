@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, get_args, get_origin
@@ -672,6 +674,49 @@ def test_numeric_limits_match_candidate_constraints(path: tuple[str, ...], bad: 
 
 
 @pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ([{"surface": "   ", "reading": "エー", "accent": None}], "surface"),
+        ([{"surface": "API。", "reading": "エー", "accent": None}], "delimiter"),
+        ([{"surface": "API", "reading": "ァピ", "accent": None}], "reading"),
+        ([{"surface": "API", "reading": "キャ", "accent": 2}], "accent"),
+        ([
+            {"surface": "API", "reading": "エー", "accent": None},
+            {"surface": " API ", "reading": "ピー", "accent": None},
+        ], "duplicate"),
+    ],
+)
+def test_invalid_seed_pronunciations_are_rejected_before_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: list[dict[str, Any]],
+    message: str,
+) -> None:
+    value = _case()
+    value["initial"]["settings"]["pronunciation_overrides"] = overrides
+    value["case_sha256"] = canonical_case_sha256(value)
+    input_path = tmp_path / f"invalid-pronunciation-{message}.json"
+    input_path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    worker_called = False
+
+    def forbidden_worker(*args: Any, **kwargs: Any) -> None:
+        nonlocal worker_called
+        worker_called = True
+
+    monkeypatch.setattr(trial_host, "_run_candidate", forbidden_worker)
+    with pytest.raises(ValueError, match="invalid unlabeled trial case"):
+        run_trial_host(
+            candidate_root=Path(__file__).parents[2],
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / f"invalid-pronunciation-{message}-output.json",
+            storage=tmp_path / f"invalid-pronunciation-{message}-storage",
+            model="d36-test-model",
+        )
+    assert not worker_called
+
+
+@pytest.mark.parametrize(
     ("mode", "index", "message"),
     [
         ("stateful", None, "stateful mode requires an index"),
@@ -858,8 +903,12 @@ class _ModelHandler(BaseHTTPRequestHandler):
         "kind": "operation", "operation_id": "project.subtitle-font-size.set",
         "operation_version": 1, "arguments": {"value": 64}, "generate_after_save": False,
     }
+    delay_seconds = 0.0
+    calls = 0
 
     def do_POST(self) -> None:  # noqa: N802
+        type(self).calls += 1
+        time.sleep(type(self).delay_seconds)
         length = int(self.headers.get("Content-Length", "0"))
         self.rfile.read(length)
         content = json.dumps({"result": self.proposal}, ensure_ascii=False)
@@ -878,7 +927,47 @@ class _ModelHandler(BaseHTTPRequestHandler):
         return
 
 
+def test_maximum_valid_pronunciation_seed_reaches_real_worker(tmp_path: Path) -> None:
+    case = _case()
+    case["initial"]["settings"]["pronunciation_overrides"] = [
+        {"surface": "A" * 80, "reading": "カ" * 160, "accent": 160},
+        *[
+            {"surface": f"term-{index}", "reading": "カ", "accent": 1}
+            for index in range(1, 100)
+        ],
+    ]
+    case["case_sha256"] = canonical_case_sha256(case)
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
+    _ModelHandler.proposal = {"kind": "no_operation", "reason": "変更しません"}
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        input_path = tmp_path / "maximum-pronunciation.json"
+        input_path.write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+        observation = run_trial_host(
+            candidate_root=Path(__file__).parents[2],
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "maximum-pronunciation-output.json",
+            storage=tmp_path / "maximum-pronunciation-storage",
+            model="d36-test-model",
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert observation.before.project_count == 1
+    assert observation.failure_class is None
+    assert _ModelHandler.calls == 1
+
+
 def test_maximum_valid_seed_produces_valid_real_worker_observation(tmp_path: Path) -> None:
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
     _ModelHandler.proposal = {
         "kind": "operation",
         "operation_id": "project.status.get",
@@ -1101,6 +1190,8 @@ def test_one_over_seed_limit_is_rejected_before_worker(
 
 
 def test_real_worker_seeds_production_clarification_missing_fields_boundary(tmp_path: Path) -> None:
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
     case = _case()
     case["initial"]["prior_turns"] = [{
         "request_id": "prior", "project_id": 101, "base_revision": 5,
@@ -1139,7 +1230,77 @@ def test_real_worker_seeds_production_clarification_missing_fields_boundary(tmp_
     assert observation.failure_class is None
 
 
+@pytest.mark.asyncio
+async def test_quiescent_candidate_dispatcher_is_cancelled_cleanly() -> None:
+    task = asyncio.create_task(trial_host._quiescent_candidate_dispatcher())
+    await asyncio.sleep(0)
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
+def test_seeded_pending_job_stays_quiescent_during_slow_model_call(tmp_path: Path) -> None:
+    case = _case()
+    case["initial"]["project_status"] = "generating"
+    case["initial"]["jobs"] = [{
+        "id": 1,
+        "project_id": 101,
+        "status": "pending",
+        "input_revision": 5,
+        "cancel_requested": False,
+        "input_settings": case["initial"]["settings"],
+        "kind": "full",
+        "block_index": None,
+        "parent_job_id": None,
+    }]
+    case["case_sha256"] = canonical_case_sha256(case)
+    _ModelHandler.delay_seconds = 1.25
+    _ModelHandler.calls = 0
+    _ModelHandler.proposal = {
+        "kind": "operation",
+        "operation_id": "project.status.get",
+        "operation_version": 1,
+        "arguments": {},
+        "generate_after_save": False,
+    }
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        input_path = tmp_path / "pending-slow-model.json"
+        input_path.write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+        observation = run_trial_host(
+            candidate_root=Path(__file__).parents[2],
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "pending-slow-model-output.json",
+            storage=tmp_path / "pending-slow-model-storage",
+            model="d36-test-model",
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        )
+    finally:
+        _ModelHandler.delay_seconds = 0
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert _ModelHandler.calls == 1
+    assert observation.before.job_count == observation.after.job_count == 1
+    assert observation.before.jobs_sha256 == observation.after.jobs_sha256
+    assert observation.before.artifacts_sha256 == observation.after.artifacts_sha256
+    assert observation.before.external_calls_sha256 == observation.after.external_calls_sha256
+    assert observation.effects.jobs == 0
+    assert observation.effects.artifacts == 0
+    assert observation.effects.external_calls == 0
+    assert observation.effects.receipts == 1
+    assert observation.effects.language_records == 1
+
+
 def test_real_candidate_worker_executes_language_route(tmp_path: Path) -> None:
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
     _ModelHandler.proposal = {
         "kind": "operation",
         "operation_id": "project.subtitle-font-size.set",
@@ -1180,6 +1341,8 @@ def test_real_candidate_worker_executes_language_route(tmp_path: Path) -> None:
     ],
 )
 def test_real_worker_executes_every_allowed_event(tmp_path: Path, kind: str) -> None:
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
     case = _case()
     event: dict[str, Any] = {"kind": kind, "request": case["event"]["request"]}
     if kind == "same_id_different_body":
@@ -1236,6 +1399,8 @@ def test_real_worker_executes_every_allowed_event(tmp_path: Path, kind: str) -> 
 
 
 def test_revision_race_exact_next_revision_executes_real_worker(tmp_path: Path) -> None:
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
     case = _case()
     case["event"] = {
         "kind": "revision_race",
@@ -1279,6 +1444,8 @@ def test_revision_race_exact_next_revision_executes_real_worker(tmp_path: Path) 
 
 
 def test_real_worker_seeds_complete_allowed_initial_state(tmp_path: Path) -> None:
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
     case = _case()
     settings = case["initial"]["settings"]
     case["initial"].update({

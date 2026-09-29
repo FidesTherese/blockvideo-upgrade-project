@@ -227,11 +227,19 @@ the finite revision maximum and cannot exceed the primary project's current revi
 Every D36 settings patch requires at least one supplied consumed field; omitted
 fields retain patch semantics, but any explicitly supplied `null` field invalidates
 the complete case before worker launch, including when another patch field is valid.
-A seeded clarification proposal uses the production `ClarificationProposal` boundary:
+Every seeded pronunciation override is trimmed and validated before worker launch
+against the candidate's surface, delimiter, katakana-start, mora/accent, and
+post-trim duplicate-surface rules; the 100-entry and field-length maxima remain
+seedable. A seeded clarification proposal uses the production `ClarificationProposal` boundary:
 `missing_fields` contains one to three entries drawn only from `target`, `arguments`,
 and `intent`; `revision`, `job_id`, and longer lists are rejected before worker launch.
 Candidate workers run with both
-`-B` and `PYTHONDONTWRITEBYTECODE=1`. The trusted host supplies each worker an
+`-B` and `PYTHONDONTWRITEBYTECODE=1`. Before importing the candidate application
+factory, the worker installs a fixed internal quiescent dispatcher coroutine at the
+candidate dispatcher seam. Lifespan startup, migration, recovery classification,
+registry lifecycle, and shutdown still run, but periodic scans cannot submit seeded
+pending jobs; shutdown cancels and awaits the quiescent task. No case, CLI, or
+environment input can select this behavior. The trusted host supplies each worker an
 explicit internal model-call budget in the closed range 0--4: the first process
 receives four and a `restart_resend` replay receives four minus the validated first
 process count. The adapter checks that budget before every model invocation and

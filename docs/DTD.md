@@ -937,7 +937,14 @@ non-null consumed field is required, and explicit JSON `null` is invalid even be
 a valid supplied field. This validation occurs during host parsing before candidate
 path setup or `_run_candidate()`. Confirmation uses
 `POST /api/language/requests/{request_id}/execute`. Numeric and string bounds equal
-the candidate contracts. The host recomputes `case_sha256` from compact sorted-key
+the candidate contracts. `UnlabeledPronunciation` enables Pydantic whitespace
+stripping before its 1--80 surface and 1--160 reading bounds, then rejects the
+candidate delimiters `。！？\n\r`, readings beginning with
+`ァィゥェォャュョヮー`, and accents above the reading's mora count, where
+`ァィゥェォャュョヮ` do not add a mora. One `AfterValidator` on the shared tuple
+alias rejects surfaces that duplicate after trimming, so initial projects, job
+snapshots, history, revision-race patches, and seeded proposals share one rule. The
+100-entry maximum and a 160-mora reading with accent 160 are valid. The host recomputes `case_sha256` from compact sorted-key
 ASCII JSON of the case without `case_sha256`; all canonical hashes use the same
 no-newline bytes, while durable JSON files append one newline.
 
@@ -1017,8 +1024,19 @@ becomes `output must not exist`; publication never uses overwrite-capable
 external case storage, then launches a fixed-argument `Popen` with the D35 candidate's
 regular `backend/` directory as working directory and Python import root. A `runpy`
 bootstrap avoids adding the D36 script directory to candidate imports. The worker
-imports only committed D35 application modules; candidate modules never import D36
-tooling and the pre/post snapshot proves candidate bytes remain unchanged. `stateful`
+imports candidate `app.workers.operation_dispatcher`, replaces its
+`run_operation_dispatcher` attribute with the fixed D36-owned
+`_quiescent_candidate_dispatcher()`, and only then imports `app.main.create_app`.
+The replacement awaits an unset `asyncio.Event`; therefore normal lifespan startup
+still migrates, marks interrupted jobs, and starts the registry, while the periodic
+loop never scans or submits pending rows. Lifespan shutdown cancels/awaits that task
+and drains the empty registry. This seam is unconditional worker code and is not
+selectable by case data, CLI, or environment. Tests keep a seeded pending row through
+a model response delayed beyond the production one-second poll interval and require
+identical job, artifact, and external-call hashes; a focused async test proves the
+quiescent task accepts cancellation. The worker imports only committed D35 application
+modules; candidate modules never import D36 tooling and the pre/post snapshot proves
+candidate bytes remain unchanged. `stateful`
 requires one regular index directory and `all_tools` rejects an index. Stdout and
 stderr are redirected to external exclusive files; the host actively monitors both,
 kills on timeout or either file exceeding 2 MiB, and never reads them. Restart resend
