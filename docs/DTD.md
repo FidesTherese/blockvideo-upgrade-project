@@ -807,14 +807,18 @@ predicate is shared with `create_pending_job()` and matches only
 not block retry. A summary without context never queries implicitly and reports
 `refresh_required` for failed or cancelled jobs.
 
-Status mapping is ordered by durable state. Only pending or running jobs report
-`wait`, including cancellation requests. Unknown always reports
-`external_outcome_unknown`/`check_provider`, completed reports `completed`/`none`,
-and failed or cancelled reports `safe_retry`/`retry_current` only when the supplied
-project context proves that the full `create_pending_job()` path has no project-wide
-unknown job or unresolved remote side effect. Otherwise it reports the corresponding
-authoritative blocker. Existing prose fields remain compatibility display text, but
-button state uses only `retryable` and `recommended_action`.
+Status mapping is ordered by durable state. Pending or running jobs report `wait`,
+including cancellation requests. Unknown always reports
+`external_outcome_unknown`/`check_provider`, and completed reports `completed`/`none`.
+A failed or cancelled job reports `wait`/`wait` with `retryable=false` while any sibling
+job is pending or running; otherwise it reports `safe_retry`/`retry_current` only when
+the supplied project context proves that the full `create_pending_job()` path has no
+project-wide active or unknown job and no unresolved remote side effect. Uncertain work
+reports `external_outcome_unknown`/`check_provider`. Existing prose fields remain
+compatibility display text, but button state uses only `retryable` and
+`recommended_action`. Frontend cancellation controls identify active rows from typed
+`pending`/`running` status rather than treating every `wait` recommendation as a
+cancellable target.
 
 Frontend mirrors these exact unions. `RecoveryStatus.tsx` renders one status region
 and optional action description; it does not execute an action itself. Project-level

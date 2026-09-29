@@ -91,10 +91,13 @@ lease last, preventing reuse of an offline-restored SQLite inode. D35 job views 
 one typed recovery context with one aggregate query across all selected projects' jobs
 and unresolved remote-side-effect calls. `ProjectDetail.generation_recovery` exposes
 only `busy/wait`, `external_outcome_unknown/check_provider`, or `ready/generate`, so its
-authority is not constrained by the 100-row history view. The browser requires that
-contract alongside job rows, disables controls while state is unavailable, and refetches
-project plus history immediately before retry or cancellation; it never infers retry
-permission from prose.
+authority is not constrained by the 100-row history view. Failed/cancelled rows expose
+retry only when that context also proves no pending/running sibling exists; with an
+active sibling they report `wait/wait`, while cancellation controls remain tied to the
+sibling's actual pending/running status. The browser requires that contract alongside
+job rows, disables controls while state is unavailable, and refetches project plus
+history immediately before retry or cancellation; it never infers retry permission
+from prose.
 
 ## Key Decisions and Limits
 

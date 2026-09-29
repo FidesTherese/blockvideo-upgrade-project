@@ -20,7 +20,7 @@ export function GenerationHistory({
       {!jobs.length && <p className="mt-3 text-sm text-slate-500">まだ生成していません。</p>}
       <ul className="mt-3 space-y-3">
         {jobs.map((job) => {
-          const active = job.recommended_action === 'wait';
+          const active = job.status === 'pending' || job.status === 'running';
           return <li key={job.id} className="min-w-0 rounded border border-slate-200 p-3 text-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="font-medium text-slate-800">生成 {job.id}

@@ -121,12 +121,13 @@ best-effort file cleanup after commit. Startup dispatch supports an internal inj
 registry, but the database job claim remains authoritative. This is single-server
 race correctness, not a multi-server or capacity claim.
 
-D35 recovery guidance mirrors durable execution permission. Only pending/running
-jobs wait; unknown outcomes always require provider checking; completed jobs are
-complete. Failed or cancelled jobs offer current-settings retry only when one
-project-level recovery context proves there is no unknown job and no unresolved
-remote-side-effect call. The same exact active-job and remote-call predicates protect
-pending-job creation, while local unknown calls do not block. One aggregate query over
+D35 recovery guidance mirrors durable execution permission. Pending/running jobs
+wait; unknown outcomes always require provider checking; completed jobs are complete.
+A failed or cancelled job also reports `wait/wait` when a sibling job is pending or
+running, and offers current-settings retry only when one project-level recovery context
+proves there is no active or unknown job and no unresolved remote-side-effect call.
+The same exact active-job and remote-call predicates protect pending-job creation,
+while local unknown calls do not block. One aggregate query over
 all project jobs and remote calls, independent of the 100-row history window, derives
 required `ProjectDetail.generation_recovery`: `busy/wait`,
 `external_outcome_unknown/check_provider`, or `ready/generate`. List and history
@@ -146,7 +147,7 @@ defaults false and becomes true only after verified backup publication; startup
 propagates that bounded value. Migration failure mentions the documented restore
 procedure only when it is true; otherwise it instructs stop/restart and support
 contact without implying that a backup exists.
-D35 final-review evidence includes 1304 backend tests, 154 frontend tests, Ruff,
+D35 final-review evidence includes 1306 backend tests, 157 frontend tests, Ruff,
 build, lint, and the prior 18 local real-browser checks over synthetic API states at 390x844
 and 1440x900. The browser checks cover both migration-backup branches, wait, safe
 retry, unknown/no-retry, stale refetch, duplicate locking, and real Tab/Enter; they

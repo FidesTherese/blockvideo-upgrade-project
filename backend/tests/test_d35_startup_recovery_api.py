@@ -373,6 +373,50 @@ def test_project_generation_recovery_sees_blockers_older_than_history_window(
         db.rollback()
 
 
+@pytest.mark.parametrize(
+    ("terminal_status", "active_status"),
+    [
+        (JobStatus.failed, JobStatus.running),
+        (JobStatus.cancelled, JobStatus.pending),
+    ],
+)
+def test_history_blocks_terminal_retry_guidance_while_sibling_job_is_active(
+    temp_storage: Path,
+    terminal_status: JobStatus,
+    active_status: JobStatus,
+) -> None:
+    from app.api.routes_history import project_history
+
+    with get_session_factory()() as db:
+        project = Project(title="active-sibling", source_script="synthetic")
+        db.add(project)
+        db.flush()
+        terminal = GenerationJob(
+            project_id=project.id,
+            current_stage="synthetic",
+            status=terminal_status,
+        )
+        active = GenerationJob(
+            project_id=project.id,
+            current_stage="synthetic",
+            status=active_status,
+        )
+        db.add_all([terminal, active])
+        db.commit()
+
+        history = project_history(project.id, db)
+        terminal_summary = next(job for job in history["jobs"] if job["id"] == terminal.id)
+
+        assert terminal_summary["recovery_code"] == "wait"
+        assert terminal_summary["recommended_action"] == "wait"
+        assert terminal_summary["retryable"] is False
+
+        begin_write(db)
+        with pytest.raises(ProjectBusyError):
+            create_pending_job(db, project.id)
+        db.rollback()
+
+
 def test_project_generation_recovery_is_ready_without_durable_blockers(
     temp_storage: Path,
 ) -> None:

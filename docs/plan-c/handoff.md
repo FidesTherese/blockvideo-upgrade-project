@@ -8,14 +8,16 @@ codes/actions from one project-wide recovery context. Required
 `ProjectDetail.generation_recovery` exposes bounded `busy/wait`,
 `external_outcome_unknown/check_provider`, or `ready/generate` state from one aggregate
 query across all project jobs and unresolved remote-side-effect calls, independent of
-the 100-row history limit. Frontend generation controls and pre-action revalidation
-require that contract alongside job rows. Unknown external outcomes never expose retry.
+the 100-row history limit. Failed/cancelled rows require `has_active_job=false` before
+showing retry; pending/running siblings map those rows to `wait/wait` with no retry
+button, and pre-action revalidation refuses newly busy state without submission.
+Unknown external outcomes never expose retry.
 `MigrationError.backup_available` becomes true only after verified backup publication;
 startup preserves it and restore guidance depends on it. D35 adds no runtime dependency.
 The only new package is pinned dev-only `@testing-library/user-event` 14.6.7.
 
-The final-review gate passed: backend 1304 with seven existing ONNX skips and one
-existing deprecation warning; Ruff passed; frontend 17 files/154 tests passed; build
+The final-review gate passed: backend 1306 with seven existing ONNX skips and one
+existing deprecation warning; Ruff passed; frontend 17 files/157 tests passed; build
 transformed 190 modules; ESLint passed. Installed Chrome plus transient local
 Playwright passed 18/18 synthetic checks across 390x844 and 1440x900: ready, both
 migration-failure backup branches, wait, safe retry, unknown/no-retry, stale refetch,
@@ -27,9 +29,9 @@ and one result JSON are covered by manifest SHA-256
 This is synthetic automated technical evidence, not human acceptance or independent
 review. No real user database, provider, model, cloud call, release, tag, publication,
 or deployment was used. The completed D35 delivery commit is `561677c`
-(`[DONE] Mission 35 Add recovery-oriented operational UI`). The final-review correction
-is the commit containing this handoff, identified by the exact subject
-`fix: align D35 project recovery and backup guidance`. **D36 has not started and no
+(`[DONE] Mission 35 Add recovery-oriented operational UI`). The final D35 blocker
+correction is the commit containing this handoff, identified by the exact subject
+`fix: block D35 retry while sibling work is active`. **D36 has not started and no
 candidate freeze exists.**
 
 ## D34 historical result (2026-09-29 JST)

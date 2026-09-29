@@ -32,7 +32,7 @@ function ProjectMonitor({ id }: { id: number }) {
   const [revalidatingAction, setRevalidatingAction] = useState(false);
   const [actionRefreshRequired, setActionRefreshRequired] = useState(false);
   const jobs = history.data?.jobs ?? [];
-  const active = jobs.filter((job) => job.recommended_action === 'wait');
+  const active = jobs.filter((job) => job.status === 'pending' || job.status === 'running');
   const projectRecovery = project.data?.generation_recovery;
   const projectBusy = projectRecovery?.code === 'busy'
     && projectRecovery.recommended_action === 'wait';

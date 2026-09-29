@@ -122,6 +122,8 @@ def _recovery_action(
     if job.status in {JobStatus.failed, JobStatus.cancelled}:
         if context is None or context.project_id != job.project_id:
             return "refresh_required", "refresh", False, _REFRESH_MESSAGE
+        if context.has_active_job:
+            return "wait", "wait", False, None
         if context.blocks_retry:
             return "external_outcome_unknown", "check_provider", False, _PROJECT_BLOCKED_MESSAGE
         return "safe_retry", "retry_current", True, None

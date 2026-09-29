@@ -178,6 +178,31 @@ describe('project durable controls', () => {
     })));
   });
 
+  it.each([
+    ['failed', 'running'],
+    ['cancelled', 'pending'],
+  ] as const)('hides retry for a %s job while a %s sibling is active', async (terminalStatus, activeStatus) => {
+    const blockedTerminal = jobFixture({
+      id: 8,
+      status: terminalStatus,
+      recovery_code: 'wait',
+      recommended_action: 'wait',
+      retryable: false,
+    });
+    const activeSibling = jobFixture({ id: 9, status: activeStatus });
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({
+      generation_recovery: { code: 'busy', recommended_action: 'wait' },
+    }));
+    vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture({ jobs: [blockedTerminal, activeSibling] }));
+
+    page();
+
+    await screen.findByText('生成 8');
+    expect(screen.queryByRole('button', { name: '現在の設定で再実行' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'キャンセルを要求' })).toHaveLength(1);
+    expect(api.executeOperation).not.toHaveBeenCalled();
+  });
+
   it('keeps settings locked while cancellation is requested but not complete', async () => {
     vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture({ jobs: [jobFixture({ status: 'running', cancel_requested: true })] }));
     page();
@@ -245,6 +270,25 @@ describe('project durable controls', () => {
     page();
 
     fireEvent.click(await screen.findByRole('button', { name: '現在の設定で再実行' }));
+
+    expect(await screen.findByText(/最新の状態を確認してから、表示された操作を選び直してください/)).toBeInTheDocument();
+    expect(api.executeOperation).not.toHaveBeenCalled();
+  });
+
+  it('refuses retry when immediate revalidation finds an active sibling', async () => {
+    vi.mocked(api.getProjectHistory)
+      .mockResolvedValueOnce(historyFixture({ jobs: [jobFixture()] }))
+      .mockResolvedValue(historyFixture({ jobs: [
+        jobFixture({ recovery_code: 'wait', recommended_action: 'wait', retryable: false }),
+        jobFixture({ id: 9, status: 'running' }),
+      ] }));
+    page();
+    const retry = await screen.findByRole('button', { name: '現在の設定で再実行' });
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({
+      generation_recovery: { code: 'busy', recommended_action: 'wait' },
+    }));
+
+    fireEvent.click(retry);
 
     expect(await screen.findByText(/最新の状態を確認してから、表示された操作を選び直してください/)).toBeInTheDocument();
     expect(api.executeOperation).not.toHaveBeenCalled();

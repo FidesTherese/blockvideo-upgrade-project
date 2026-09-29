@@ -52,6 +52,10 @@ Project detail, job lists, and history MUST derive one typed project recovery co
 with one aggregate query across all project jobs and unresolved remote-side-effect
 calls, independent of the 100-row history limit. Project detail exposes only the
 bounded code/action pair; lists and history reuse the context across returned summaries.
-Pending-job creation enforces the same active and uncertain-work blockers. Detached
-terminal jobs without context require refresh. Regression tests include blockers older
-than 100 rows and both pre- and post-backup migration failures.
+Pending-job creation enforces the same active and uncertain-work blockers. A failed or
+cancelled job with a pending or running sibling reports `wait/wait`, is not retryable,
+and exposes no retry button; cancellation remains available only on the actually active
+sibling. Immediate retry revalidation must reject this transition without sending an
+operation. Detached terminal jobs without context require refresh. Regression tests
+include failed+running and cancelled+pending sibling combinations, blockers older than
+100 rows, and both pre- and post-backup migration failures.
