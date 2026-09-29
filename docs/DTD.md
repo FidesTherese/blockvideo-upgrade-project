@@ -723,6 +723,20 @@ class StartupStatus(BaseModel):
 exception maps to HTTP 503 with `Retry-After: 5`. The dispatcher and recovery
 reconciliation do not run in degraded state.
 
+#### D34 implementation evidence and limits
+
+D34 is implemented and its focused migration/startup gate collects 111 tests: 97 for
+schema, backup, restore, and lease behavior plus 14 for startup lifecycle/API behavior.
+The gate covers the frozen upstream/D30 fixtures, scratch affinity and ordered-PK
+contracts, the complete nine-table identity set, declared and semantic references,
+intentional receipt non-FKs, canonical target-bound metadata/hash, failure injection,
+non-blocking app/app and app/restore exclusion, stopped-app restore, fresh-pool restart,
+and all eight migration reason codes in degraded startup. `work-report-34.md` records
+the exact synthetic identity/hash evidence and repository verification history without
+temporary paths. D34 makes no real-user migration, online restore, downgrade,
+cross-database, distributed-lock, capacity, or complete row-content-hash claim. D35
+remains unstarted.
+
 ### D35 recovery UI and API design
 
 `JobSummary` adds required fields:
@@ -1638,7 +1652,7 @@ Add deterministic dependency failures and isolated process termination. Repair o
 demonstrated crash gaps while retaining unknown-remote conservatism. Verify a second
 restart is a no-op and prior artifacts remain.
 
-#### Step 4 — D34 explicit migration
+#### Step 4 — D34 explicit migration (implemented and verified)
 
 Create migration contracts, application-lifetime lease, backup, schema, runner,
 startup state, and startup API. Build a scratch current-schema DB from registered

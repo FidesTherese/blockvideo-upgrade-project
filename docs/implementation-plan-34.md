@@ -1,5 +1,7 @@
 # D34 Versioned Migration and Rollback Compatibility Implementation Plan
 
+**Status:** Complete. The 111-test focused migration/startup gate, full repository checks, artifact/privacy inventory, and D34 documentation are reconciled; D35 has not started.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace reflective startup mutation with an explicit SQLite v0-to-v1 migration that creates a verified backup, preserves supported historical data, and degrades startup safely on failure.
@@ -97,7 +99,7 @@ init_db() -> None
 
 `register_models()` imports every ORM model module exactly once and performs no DDL. `init_db()` assumes registration and migration have succeeded and performs only `Base.metadata.create_all()` for the approved/current schema.
 
-- [ ] **Step 1: Write RED classification tests**
+- [x] **Step 1: Write RED classification tests**
 
 Generate deterministic temporary fixtures for empty v0, frozen explicit-SQL
 upstream/pre-Plan-C and D30, partially additive, malformed known-column/PK collision,
@@ -115,7 +117,7 @@ language/core receipt project ownership and null-safe reciprocal links. Assert m
 missing, released, or different-database lease before opening or changing the
 database.
 
-- [ ] **Step 2: Run classification tests**
+- [x] **Step 2: Run classification tests**
 
 ```bash
 cd backend
@@ -124,7 +126,7 @@ python -m uv run pytest tests/test_d34_migrations.py -k "classify or schema_vers
 
 Expected: FAIL because `app.migrations` does not exist.
 
-- [ ] **Step 3: Implement additive schema operations**
+- [x] **Step 3: Implement additive schema operations**
 
 Move reflective behavior into `apply_v0_to_v1()`. Index known table/column names with
 SQLite-compatible ASCII-only folding while retaining actual observed spellings for
@@ -136,7 +138,7 @@ side-effect-free `register_models()` and keep `init_db()` as `create_all()` only
 Temporarily restore deprecated `_add_missing_columns(engine)` as a direct D34 delegate;
 no production startup path calls it. Startup migration wiring remains Task 3.
 
-- [ ] **Step 4: Run Task 1 tests and lint**
+- [x] **Step 4: Run Task 1 tests and lint**
 
 ```bash
 cd backend
@@ -144,7 +146,7 @@ python -m uv run pytest tests/test_d34_migrations.py -k "classify or schema_vers
 python -m uv run ruff check app/migrations app/db.py tests/test_d34_migrations.py tests/fixtures/migrations/build_fixtures.py
 ```
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```bash
 git add backend/app/migrations backend/app/db.py backend/tests/test_d34_migrations.py backend/tests/fixtures/migrations/build_fixtures.py
@@ -183,9 +185,9 @@ backup_metadata_path(backup_path: Path) -> Path
 sha256_file(path: Path) -> str
 ```
 
-- [ ] **Step 1: Write RED backup and lock tests**
+- [x] **Step 1: Write RED backup and lock tests**
 
-Assert `<database>.migration.lock` is acquired with `O_CREAT|O_EXCL` and non-blocking semantics, includes only PID/UTC in its file, remains present for the lease lifetime, and is not removed as stale automatically. Hold a lease in one spawned process and prove a second process immediately receives `database_lease_unavailable` without opening or changing the database; after graceful release, acquisition succeeds. For non-empty v0 fixtures, assert free space must exceed DB bytes plus 16 MiB; backup
+Assert `<database>.migration.lock` is acquired with `O_CREAT|O_EXCL` and non-blocking semantics, includes only the canonical PID/UTC/random-token ownership payload, remains present for the lease lifetime, and is not removed as stale automatically. Hold a lease in one spawned process and prove a second process immediately receives `database_lease_unavailable` without opening or changing the database; after graceful release, acquisition succeeds. For non-empty v0 fixtures, assert free space must exceed DB bytes plus 16 MiB; backup
 is written under `<db-parent>/.backups/`, passes `PRAGMA integrity_check == "ok"`,
 and preserves exact row counts plus canonical PK identity digests for `projects`,
 `blocks`, `generation_jobs`, `operation_requests`, `external_calls`,
@@ -200,7 +202,7 @@ atomically/fsynced published and binds metadata schema 1, canonical target path 
 source schema, complete critical identity snapshot, and backup hash. Force a
 post-replace byte change and require rejection with no incomplete pair retained.
 
-- [ ] **Step 2: Write RED failure/restore tests**
+- [x] **Step 2: Write RED failure/restore tests**
 
 Inject backup, DDL, post-identity, and post-reference verification failures. Assert
 `PRAGMA foreign_key_check` is empty and explicit checks cover blocks/jobs -> project,
@@ -216,7 +218,7 @@ turn SQL must reject explicit nulls as well as unequal IDs. Assert the source re
 or restorable and the verified backup remains while the caller still holds the
 application lease. Operational restore acquires the same database lease internally and non-blocking before reading the backup or opening/replacing the target, holds it through hash/integrity/schema/identity/reference verification and `os.replace()`, and releases it in `finally`. Reject modified, wrong-target, escaping, symlink, special-file, noncanonical metadata, schema-incompatible, identity-incompatible, and reference-incompatible backups. After all validation, reassert the lease before removing each stale `-wal`, `-shm`, and `-journal` and before main replacement; fsync and reopen/reverify final bytes. With a spawned application process holding the lease, assert restore immediately fails `database_lease_unavailable` and leaves target and backup bytes unchanged; after application shutdown, the same restore succeeds. Force lease-path replacement during release and prove the replacement is restored or retained as an owner tombstone without deleting another owner's lease.
 
-- [ ] **Step 3: Implement the runner and backup module**
+- [x] **Step 3: Implement the runner and backup module**
 
 Parse only file-backed SQLite URLs. `acquire_database_lease()` creates the sibling lease file exclusively and returns immediately on contention. `migrate_database()` requires and validates the caller-owned live lease and never releases it; it classifies `PRAGMA user_version`, backs up non-empty v0 databases with `sqlite3.Connection.backup()`, executes v0-to-v1, then verifies integrity, required tables/columns, exact pre/post critical-table row
 counts and canonical PK identity digests by calling
@@ -224,7 +226,7 @@ counts and canonical PK identity digests by calling
 all DTD-enumerated semantic ID references. It does not reinterpret intentional
 receipt/history non-FKs as mandatory live-row references. Empty databases may be created directly at v1 without a backup. `restore_database_backup()` owns a separately acquired lease for its entire offline operation, requires registered metadata for compatibility verification, removes stale SQLite journals only after validation, and releases the lease in `finally`. Lease release atomically tombstones and validates the open-file identity/token before deletion; a raced replacement is restored without overwrite or retained on collision.
 
-- [ ] **Step 4: Run migration tests**
+- [x] **Step 4: Run migration tests**
 
 ```bash
 cd backend
@@ -233,7 +235,7 @@ python -m uv run pytest tests/test_operation_storage.py tests/test_job_recovery.
 python -m uv run ruff check app/migrations tests/test_d34_migrations.py
 ```
 
-- [ ] **Step 5: Commit Task 2**
+- [x] **Step 5: Commit Task 2**
 
 ```bash
 git add backend/app/migrations backend/tests/test_d34_migrations.py
@@ -274,15 +276,15 @@ HTTP contracts:
 - `GET /api/health` returns existing fields with `status="degraded"` after migration failure.
 - Database dependencies return 503 with `{"detail":{"reason_code":"startup_unavailable","message":"データベースを利用できません。起動状態を確認してください。"}}` and `Retry-After: 5`.
 
-- [ ] **Step 1: Write RED lifecycle/API tests**
+- [x] **Step 1: Write RED lifecycle/API tests**
 
 Assert lifespan sets `starting` and calls, in exact order, `register_models()`, `acquire_database_lease(database_url)`, `migrate_database(database_url, Base.metadata, lease=lease)`, and `init_db()` before reaching `ready`, recovery, or dispatcher startup. Assert migration receives metadata containing every registered model table and the exact live lease. Keep the lease held while ready or migration-degraded, stop dispatcher/database users before releasing it in lifespan `finally`, and release it exactly once at normal/degraded shutdown. A later post-acquisition startup exception that aborts lifespan releases it in `finally`; lease-acquisition failure aborts startup without migration/recovery/dispatcher calls or a release attempt. After ready or degraded shutdown, assert status is `starting` with a bounded shutdown message, `get_db()` rejects, `shutdown_db()` runs after dispatcher/registry drain and before release, and no cached engine/sessionmaker survives the lease. Restore the verified backup between two real lifespans and prove the second lifespan reads restored bytes/state through a fresh pool rather than the replaced inode. While one spawned app lifespan holds the lease, assert a second app startup fails immediately. On each migration `MigrationError`, assert `init_db()`, `mark_interrupted_operation_jobs()`, and `run_operation_dispatcher()` are not called. Assert startup/health remain readable during migration-degraded operation while `/api/projects` returns the fixed 503.
 
-- [ ] **Step 2: Implement startup state and routing**
+- [x] **Step 2: Implement startup state and routing**
 
 Add `routes_startup.router`, map `StartupUnavailableError` in `create_app()`, and gate `get_db()` before session creation. Add production `shutdown_db()` that disposes the cached engine and clears the engine/sessionmaker without DDL. In lifespan `finally`, drain dispatcher/registry, publish the non-ready shutdown snapshot, call `shutdown_db()`, and release the lease last; use the same order for degraded startup and post-acquisition failure. Keep internal cause chaining in logs by exception class/reason only; expose no path.
 
-- [ ] **Step 3: Run startup and migration regressions**
+- [x] **Step 3: Run startup and migration regressions**
 
 ```bash
 cd backend
@@ -290,7 +292,7 @@ python -m uv run pytest tests/test_d35_startup_recovery_api.py tests/test_d34_mi
 python -m uv run ruff check app/core/startup_status.py app/api/routes_startup.py app/api/routes_health.py app/main.py app/db.py tests/test_d35_startup_recovery_api.py
 ```
 
-- [ ] **Step 4: Commit Task 3**
+- [x] **Step 4: Commit Task 3**
 
 ```bash
 git add backend/app/core/startup_status.py backend/app/api/routes_startup.py backend/app/api/routes_health.py backend/app/main.py backend/app/db.py backend/tests/test_d35_startup_recovery_api.py
@@ -308,7 +310,7 @@ git commit -m "feat: degrade startup safely on migration failure"
 **Interfaces:**
 - Document backup location derivation, application-lifetime lease handling, supported ancestry, reason codes, the non-blocking stopped-application restore requirement, stale-lease operator procedure, and verification evidence without private paths.
 
-- [ ] **Step 1: Run full verification sequentially**
+- [x] **Step 1: Run full verification sequentially**
 
 ```bash
 cd backend && python -m uv run pytest tests/test_d34_migrations.py tests/test_d35_startup_recovery_api.py -q
@@ -319,7 +321,7 @@ cd frontend && npx -y pnpm@10.18.3 build
 cd frontend && npx -y pnpm@10.18.3 lint
 ```
 
-- [ ] **Step 2: Inspect and reconcile documentation**
+- [x] **Step 2: Inspect and reconcile documentation**
 
 ```bash
 git status --short
@@ -332,7 +334,7 @@ backup hashes, the nine critical tables' pre/post row-count and PK-digest equali
 declared and semantic reference checks, intentional receipt non-FK survival,
 injected failures, restore checks, and exact test counts. State D35 has not started.
 
-- [ ] **Step 3: Commit and push the implementation task**
+- [x] **Step 3: Commit and push the implementation task**
 
 ```bash
 git add backend docs/plan-c/work-report-34.md docs/plan-c/handoff.md docs/modules/operation-core.md specification.md docs/DTD.md

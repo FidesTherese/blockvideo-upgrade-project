@@ -5,17 +5,20 @@
 Provide one typed, state-aware execution boundary for UI/API and natural-language
 entry points. It owns durable replay, revisions, settings and generation intent,
 input-bound history, recovery, cancellation, negative-intent vetoes, and registered
-operation dispatch. D32–D33 retain the database-authoritative single-server model
+operation dispatch. D32–D34 retain the database-authoritative single-server model
 while hardening dialogue/deletion races, lifespan cancellation, resumed completion,
-and rename-before-commit recovery.
+rename-before-commit recovery, and lease-gated database startup.
 
 ## Project Position
 
-The package sits between structured HTTP routes and existing BlockVideo domain services. It owns operation lookup, strict arguments, target resolution, readiness, stale observations, and registered dispatch. BlockVideo handlers reuse existing ORM state and the shared project-settings service.
+The package sits between HTTP routes and domain services. It owns operation lookup, arguments, target resolution, readiness, stale observations, and dispatch. Handlers reuse ORM state and project settings. D34's separate `app.migrations` package verifies SQLite before operation-core database users start; operation modules do not import it.
 
 ```mermaid
 flowchart LR
   API[Operation API] --> Core[OperationService]
+  Startup[Startup lifecycle] --> Lease[DB lease]
+  Lease --> Migration[SQLite migration]
+  Migration --> ORM
   Core --> Catalog[JSON definitions]
   Core --> Receipt[Durable receipts]
   Core --> Txn[SQLite writer transaction]
@@ -81,6 +84,11 @@ The complete artifact manifest exists only in transactional
 subtitle mutation/deletion or database flush/commit failure rolls back database
 publication and can leave only the permitted unreferenced same-job video orphan.
 
+Startup registers models, acquires the lease, migrates/verifies, then initializes and
+recovers jobs. Degraded state starts no recovery or dispatcher; database dependencies
+return the fixed 503. Shutdown drains users, clears database caches, and releases the
+lease last, preventing reuse of an offline-restored SQLite inode.
+
 ## Key Decisions and Limits
 
 - JSON is the Git-managed operation source of truth.
@@ -117,8 +125,13 @@ publication and can leave only the permitted unreferenced same-job video orphan.
   text, request/model bodies, prompts, private paths, and credentials.
 - D31 adversarial checks compare exact persisted effects with zero journal changes;
   see its report for the bounded dependency and network claims.
-- See `docs/plan-c/work-unit-12-15.md` for migration, retention and restart behavior,
-  and `docs/plan-c/work-report-31.md` for D31 evidence and limits.
+- D34 supports SQLite schema versions 0 and 1 only. Backup/restore and the application
+  mutually exclude through one non-blocking sibling lease; restore requires a stopped
+  application, and stale lease removal is an operator action only after confirming no
+  live application or restore.
+- See `docs/plan-c/work-unit-12-15.md` for historical retention/restart behavior,
+  `docs/plan-c/work-report-31.md` for D31 evidence, and
+  `docs/plan-c/work-report-34.md` for migration/restore evidence and limits.
 
 ## Relevant Verification
 
@@ -132,5 +145,7 @@ publication and can leave only the permitted unreferenced same-job video orphan.
 - `backend/tests/test_d31_adversarial_safety.py`
 - `backend/tests/test_d32_concurrency_matrix.py`
 - `backend/tests/test_d33_recovery_matrix.py`
+- `backend/tests/test_d34_migrations.py`
+- `backend/tests/test_d35_startup_recovery_api.py` (D34 startup contract only)
 - `cd backend && python -m uv run pytest`
 - `cd backend && python -m uv run ruff check .`

@@ -98,7 +98,13 @@ Offline restore must acquire the same lease non-blocking and fails without datab
 while an application process is live. It accepts only regular non-symlink files in the
 exact target `.backups` sibling, validates target binding/hash/version-aware schema compatibility/identity/references,
 then removes stale SQLite journals under the lease before atomic replacement and final
-fsync/reopen verification.
+fsync/reopen verification. D34 implementation evidence now covers frozen upstream/D30
+ancestry, scratch affinity and PK contracts, all nine critical identities, declared and
+semantic references, canonical target-bound backup metadata/hash, injected failures,
+non-blocking app/app and app/restore exclusion, stopped-app restore, fresh-pool restart,
+and degraded API behavior. This evidence uses temporary synthetic databases only; it
+does not claim real-user migration, online restore, cross-database support, downgrade
+SQL, distributed locking, or full-row content hashing.
 
 D32 keeps SQLite `BEGIN IMMEDIATE`, receipts, revisions, persisted job claims, and
 artifact publication as the correctness boundaries. A committed dialogue successor

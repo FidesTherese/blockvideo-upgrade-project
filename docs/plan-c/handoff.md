@@ -1,6 +1,33 @@
-# Plan C Handoff — D33 automated gate verified; D34 has not started
+# Plan C Handoff — D34 automated migration/rollback gate verified; D35 has not started
 
-## D33 current result (2026-09-24 JST)
+## D34 current result (2026-09-29 JST)
+
+Read `work-unit-34.md`, `work-report-34.md`, the D34 section of `docs/DTD.md`, and
+`docs/modules/operation-core.md` first. D34 now owns explicit SQLite schema v0-to-v1
+classification, verified pre-migration backup, additive migration, offline restore,
+and one non-blocking application-lifetime database lease. Supported ancestry is empty,
+frozen upstream/pre-Plan-C, D30, partial additive v0, and current v1; newer, malformed,
+affinity-incompatible, or PK-incompatible schemas fail closed. Unknown extras survive.
+
+The 111-test focused gate covers scratch-schema affinity, frozen fixture ancestry,
+canonical backup metadata/hash, exact row count and PK digest equality for all nine
+critical tables, declared and semantic references, intentional receipt non-FKs,
+injected failures, stopped-app restore, lease tamper/replacement/contention, fresh-pool
+restart, and all eight degraded startup reason codes. Backup files live only in the
+canonical database-parent `.backups` sibling. Restore never waits and must run with the
+application stopped. A stale `<database>.migration.lock` is never removed automatically;
+an operator may remove it only after confirming no application or restore process is
+live.
+
+Focused backend passed 111/111; Ruff passed; frontend passed 16 files/123 tests,
+TypeScript/Vite built 188 modules, and ESLint passed. The final full-backend result and
+the two earlier unrelated D22 timing/load failures are recorded exactly in
+`work-report-34.md`; seven existing ONNX tests remain skipped and the existing
+Starlette/httpx deprecation warning remains. Tests used temporary synthetic databases
+and fake/local providers. No real user database, real provider, paid API, release, tag,
+publication, or deployment was touched. **D35 has not started.**
+
+## D33 historical result (2026-09-24 JST)
 
 Read `work-unit-33.md`, `work-report-33.md`, the D33 section of `docs/DTD.md`, and
 `docs/modules/operation-core.md` first. D33 verifies exactly 38 canonical request,
@@ -37,8 +64,8 @@ server, load, throughput, latency, or capacity claim. Tests used fake/synthetic
 providers and no real user data. An atomic rename cannot be rolled back, so failure
 may leave only the documented exact unreferenced same-job video orphan; database
 references and prior history remain unchanged. Human operation and independent
-acceptance were not performed. **D34 has not started.** No release, tag, publication,
-or deployment occurred.
+acceptance were not performed. **At the D33 checkpoint, D34 had not started.** No
+release, tag, publication, or deployment occurred.
 
 ## Historical D30 result (2026-09-21 JST)
 
