@@ -664,15 +664,16 @@ def test_concurrent_precreated_destination_is_retained(
     original_write = freeze._write_fsynced
     raced = False
 
-    def race_after_staging(path: Path, value: bytes) -> None:
+    def race_after_staging(path: Path, value: bytes) -> Any:
         nonlocal raced
-        original_write(path, value)
+        identity = original_write(path, value)
         if not raced and path.name.endswith(".freeze-manifest.tmp"):
             candidate_id = json.loads(value)["candidate_id"]
             destination = tmp_path / "output" / candidate_id
             destination.mkdir()
             (destination / "owner.txt").write_text("other owner", encoding="utf-8")
             raced = True
+        return identity
 
     monkeypatch.setattr(freeze, "_write_fsynced", race_after_staging)
     with pytest.raises((FileExistsError, ValueError)):
@@ -687,13 +688,14 @@ def test_concurrent_precreated_destination_is_retained(
     assert owners[0].read_text(encoding="utf-8") == "other owner"
 
 
-def _replace_claimed_directory(claimed: Path) -> Path:
+def _replace_claimed_directory(claimed: Path, *, with_sentinel: bool = True) -> Path:
     moved = claimed.with_name(f"{claimed.name}.moved-partial")
     claimed.rename(moved)
     claimed.mkdir()
-    (claimed / "replacement-sentinel.txt").write_text(
-        "replacement owner", encoding="utf-8"
-    )
+    if with_sentinel:
+        (claimed / "replacement-sentinel.txt").write_text(
+            "replacement owner", encoding="utf-8"
+        )
     return moved
 
 
@@ -722,9 +724,9 @@ def test_claim_replacement_during_write_preserves_replacement(
         )
     assert moved is not None
     assert (moved / "freeze-manifest.json").is_file()
-    sentinels = list((tmp_path / "output").glob("*/replacement-sentinel.txt"))
-    assert len(sentinels) == 1
-    assert sentinels[0].read_text(encoding="utf-8") == "replacement owner"
+    final = moved.with_name(moved.name.removesuffix(".moved-partial"))
+    sentinel = final / "replacement-sentinel.txt"
+    assert sentinel.read_text(encoding="utf-8") == "replacement owner"
 
 
 def test_claim_replacement_during_readback_preserves_replacement(
@@ -751,38 +753,32 @@ def test_claim_replacement_during_readback_preserves_replacement(
             output_root=tmp_path / "output",
         )
     assert moved is not None
-    sentinels = list((tmp_path / "output").glob("*/replacement-sentinel.txt"))
-    assert len(sentinels) == 1
-    assert sentinels[0].read_text(encoding="utf-8") == "replacement owner"
+    final = moved.with_name(moved.name.removesuffix(".moved-partial"))
+    sentinel = final / "replacement-sentinel.txt"
+    assert sentinel.read_text(encoding="utf-8") == "replacement owner"
 
 
-def test_claim_replacement_during_cleanup_preserves_replacement(
+def test_cleanup_ownership_loss_preserves_empty_replacement_at_final_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, commit = _make_candidate(tmp_path)
     freeze, _, _ = _freeze_api()
     control_path, digest = _write_control(tmp_path / "control", _control(commit))
     original_read = freeze._read_regular_once
-    original_rename = freeze.os.rename
+    original_cleanup = freeze._cleanup_claim
     moved: Path | None = None
 
     def fail_readback(path: Path, *, maximum: int, label: str) -> bytes:
         value = original_read(path, maximum=maximum, label=label)
         return b"corrupt" if label == "freeze manifest" else value
 
-    def replace_as_cleanup_starts(source: Path, destination: Path) -> None:
+    def replace_before_cleanup(claim: Any, *args: Any) -> None:
         nonlocal moved
-        claimed = Path(source)
-        moved = claimed.with_name(f"{claimed.name}.moved-partial")
-        original_rename(claimed, moved)
-        claimed.mkdir()
-        (claimed / "replacement-sentinel.txt").write_text(
-            "replacement owner", encoding="utf-8"
-        )
-        original_rename(claimed, destination)
+        moved = _replace_claimed_directory(claim.path, with_sentinel=False)
+        original_cleanup(claim, *args)
 
     monkeypatch.setattr(freeze, "_read_regular_once", fail_readback)
-    monkeypatch.setattr(freeze.os, "rename", replace_as_cleanup_starts)
+    monkeypatch.setattr(freeze, "_cleanup_claim", replace_before_cleanup)
     with pytest.raises(ValueError, match="publication directory ownership lost"):
         freeze.freeze_candidate(
             candidate_root=candidate,
@@ -791,13 +787,79 @@ def test_claim_replacement_during_cleanup_preserves_replacement(
             output_root=tmp_path / "output",
         )
     assert moved is not None
-    assert (moved / "freeze-manifest.json").is_file()
-    sentinels = list((tmp_path / "output").glob("*/replacement-sentinel.txt"))
-    assert len(sentinels) == 1
-    assert sentinels[0].read_text(encoding="utf-8") == "replacement owner"
+    final = moved.with_name(moved.name.removesuffix(".moved-partial"))
+    assert final.is_dir()
+    assert list(final.iterdir()) == []
 
 
-def test_post_publish_verification_failure_removes_atomic_output(
+def test_failure_cleanup_never_renames_or_removes_claimed_final_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    original_read = freeze._read_regular_once
+    candidate_id = ""
+
+    def fail_readback(path: Path, *, maximum: int, label: str) -> bytes:
+        nonlocal candidate_id
+        value = original_read(path, maximum=maximum, label=label)
+        if label == "freeze manifest":
+            candidate_id = json.loads(value)["candidate_id"]
+            return b"corrupt"
+        return value
+
+    def forbidden_rename(*_: object) -> None:
+        raise AssertionError("cleanup must not rename the final directory")
+
+    monkeypatch.setattr(freeze, "_read_regular_once", fail_readback)
+    monkeypatch.setattr(freeze.os, "rename", forbidden_rename)
+    with pytest.raises(ValueError, match="published freeze manifest changed"):
+        freeze.freeze_candidate(
+            candidate_root=candidate,
+            candidate_control_path=control_path,
+            expected_candidate_control_sha256=digest,
+            output_root=tmp_path / "output",
+        )
+    final = tmp_path / "output" / candidate_id
+    assert final.is_dir()
+    assert {path.name for path in final.iterdir()} == {freeze._CLAIM_TOKEN_NAME}
+
+
+def test_failure_cleanup_preserves_replaced_published_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    original_read = freeze._read_regular_once
+    original_cleanup = freeze._cleanup_claim
+    replacement = b"replacement owner"
+
+    def fail_readback(path: Path, *, maximum: int, label: str) -> bytes:
+        value = original_read(path, maximum=maximum, label=label)
+        return b"corrupt" if label == "freeze manifest" else value
+
+    def replace_file_before_cleanup(claim: Any, *args: Any) -> None:
+        path = claim.path / "freeze-manifest.json"
+        path.unlink()
+        path.write_bytes(replacement)
+        original_cleanup(claim, *args)
+
+    monkeypatch.setattr(freeze, "_read_regular_once", fail_readback)
+    monkeypatch.setattr(freeze, "_cleanup_claim", replace_file_before_cleanup)
+    with pytest.raises(ValueError, match="published freeze manifest changed"):
+        freeze.freeze_candidate(
+            candidate_root=candidate,
+            candidate_control_path=control_path,
+            expected_candidate_control_sha256=digest,
+            output_root=tmp_path / "output",
+        )
+    published = next((tmp_path / "output").glob("*/freeze-manifest.json"))
+    assert published.read_bytes() == replacement
+
+
+def test_post_publish_verification_failure_leaves_incomplete_claim_and_retry_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, commit = _make_candidate(tmp_path)
@@ -817,10 +879,21 @@ def test_post_publish_verification_failure_removes_atomic_output(
             expected_candidate_control_sha256=digest,
             output_root=tmp_path / "output",
         )
-    assert not (tmp_path / "output").exists()
+    candidates = list((tmp_path / "output").iterdir())
+    assert len(candidates) == 1
+    incomplete = candidates[0]
+    assert {path.name for path in incomplete.iterdir()} == {freeze._CLAIM_TOKEN_NAME}
+    with pytest.raises(ValueError, match="output destination already exists"):
+        freeze.freeze_candidate(
+            candidate_root=candidate,
+            candidate_control_path=control_path,
+            expected_candidate_control_sha256=digest,
+            output_root=tmp_path / "output",
+        )
+    assert {path.name for path in incomplete.iterdir()} == {freeze._CLAIM_TOKEN_NAME}
 
 
-def test_published_attestation_mismatch_rolls_back_output(
+def test_published_attestation_mismatch_leaves_incomplete_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, commit = _make_candidate(tmp_path)
@@ -840,7 +913,8 @@ def test_published_attestation_mismatch_rolls_back_output(
             expected_candidate_control_sha256=digest,
             output_root=tmp_path / "output",
         )
-    assert not (tmp_path / "output").exists()
+    incomplete = next((tmp_path / "output").iterdir())
+    assert {path.name for path in incomplete.iterdir()} == {freeze._CLAIM_TOKEN_NAME}
 
 
 def test_d36_tool_attestation_has_exact_allowlist_and_valid_aggregate(tmp_path: Path) -> None:

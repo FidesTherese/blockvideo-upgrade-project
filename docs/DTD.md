@@ -949,16 +949,26 @@ artifact publication and artifact readback.
 
 The freezer no-replace hard-links each staged file into the claim, using
 exclusive-create copy only where hard links are unsupported, fsyncs the claimed
-directory and parent, and never renames a directory over a destination. A successful
-readback retires the claim token only after final ownership validation. Failure cleanup
-first revalidates ownership, atomically renames the owned directory to an unpredictable
-cleanup name, revalidates identity/token again, and removes only the two known artifact
-names, token, and then empty directory; it does not use recursive pathname deletion.
-A rename, replacement, reparse, parent change, missing/changed token, or cleanup rename
-race raises the fixed bounded `PublicationOwnershipLost` message without deleting the
-replacement. The moved original partial may require operator cleanup. Final readback
-uses bounded regular-file reads for both artifacts, requires exact canonical bytes and
-strict models, and recomputes the tool-attestation aggregate.
+directory and parent, and never renames a directory over a destination. Each successfully
+created staging file, published hard link, fallback copy, and claim token records its own
+`lstat` device/inode identity. A successful readback retires the identity-matching claim
+token only after final ownership validation and after proving that the directory contains
+exactly the token plus the two expected artifacts.
+
+Failure cleanup never calls directory rename, recursive deletion, or final-directory
+removal. It first proves the original final-directory identity, resolved parent, exact
+token bytes, and token-file identity. While those remain valid, it considers only the
+recorded staging and published file records and unlinks a path only when its current
+regular-file device/inode identity equals the recorded identity. A missing or replaced
+recorded file is untouched. Ownership is revalidated before and after every unlink; if
+ownership was already lost, cleanup touches no staging, published, token, directory, or
+replacement path. Any post-claim failure intentionally retains the final directory and
+claim token as an incomplete, non-evidentiary claim requiring operator cleanup. A retry
+therefore fails the exclusive destination claim. Every reader MUST require exactly
+`freeze-manifest.json` and `d36-tool-attestation.json`, exact canonical validated bytes,
+and absence of `.d36-publication-claim` and every extra entry. Final readback uses
+bounded regular-file reads for both artifacts, requires exact canonical bytes and strict
+models, and recomputes the tool-attestation aggregate.
 
 `evaluation/final_protocol.json` is the canonical D36 policy template only. The
 external `evaluation_trial_host` accepts exactly one strict independent wire object:
@@ -1845,8 +1855,9 @@ independent review gates supply the recorded trust decisions.
   excluded later tooling, secret/cache paths; separate source attestation; recursively
   strict `UnlabeledTrialCase`; nested label/extra rejection; candidate non-mutation;
   and claimed-directory replacement races after claim during artifact write, readback,
-  and failure cleanup, each requiring bounded ownership loss while the replacement
-  sentinel survives and any moved original partial remains untouched.
+  and failure cleanup. The replacement sentinel or empty replacement remains at the
+  exact final path, ownership loss performs no cleanup, identity-replaced files survive,
+  ordinary failure leaves a token-marked incomplete directory, and retry fails closed.
 - **D37:** synthetic cases only; domain-separated opaque case/category token generation
   with no raw IDs/text/labels in protocol or bundle; non-empty complete sorted protocol
   case/category sets, non-empty included set, at least one included token per declared

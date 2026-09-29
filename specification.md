@@ -268,10 +268,15 @@ allowed. Publication atomically claims the final candidate directory without ren
 immediately records its non-reparse/non-symlink `lstat` device/inode identity and
 resolved parent, and exclusively creates and fsyncs a random claim-token file. Every
 artifact publication and bounded no-follow readback revalidates that identity and exact
-token before and after the operation. Failure cleanup proceeds only after the same
-revalidation and never recursively deletes a pathname that was renamed or replaced;
-ownership loss raises a fixed bounded error and may leave the moved partial for
-operator cleanup. Verified files retain no-replace semantics and required fsyncs.
+token before and after the operation. Failure cleanup never renames, removes, or
+recursively deletes the claimed final directory. It proceeds only while directory and
+token ownership remain valid and unlinks only recorded staging or published files whose
+individual device/inode identities still match. Ownership loss touches nothing. Every
+failed post-claim publication leaves the claim marker and final path for operator
+cleanup; retries fail because that destination exists. Readers accept only the exact
+canonical manifest/attestation pair with no claim marker or extra entry, so an
+incomplete claim is never evidence. Verified files retain no-replace semantics and
+required fsyncs.
 
 Any candidate-behavior change after D35 requires a new candidate and D36 freeze and
 invalidates affected evaluation evidence. A post-candidate tooling-only change keeps

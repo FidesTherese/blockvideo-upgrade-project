@@ -32,11 +32,15 @@ change unnoticed.
   non-reparse/non-symlink `lstat` device/inode identity and strict resolved parent, then
   exclusively create and fsync a random claim-token file. Before and after every
   no-replace artifact publication and bounded no-follow readback, require the same
-  directory identity, parent, and exact token. Failure cleanup MUST revalidate the same
-  ownership, MUST NOT recursively delete a renamed/replaced pathname, and MUST raise a
-  fixed ownership-lost error while preserving any replacement; a moved original partial
-  may require operator cleanup. Require exact canonical artifact bytes, fsyncs, and a
-  recomputed tool-attestation aggregate.
+  directory identity, parent, and exact token. Failure cleanup MUST NOT rename,
+  recursively delete, or remove the final directory. It MUST proceed only while the
+  directory identity and token still prove ownership and MUST unlink only individually
+  recorded staging/published files whose own identities still match. Ownership loss
+  MUST touch nothing, including an empty replacement. Any post-claim failure MUST leave
+  the claim token/final path for operator cleanup and retry MUST fail on the existing
+  destination. Readers MUST accept only the exact canonical manifest/attestation pair
+  with no claim marker or extra entry. Require exact canonical artifact bytes, fsyncs,
+  and a recomputed tool-attestation aggregate.
 
 ## Non-goals
 
@@ -48,8 +52,10 @@ The same checkout and inputs reproduce byte-identical canonical manifest bytes,
 including deterministic `created_at`. Any relevant byte change is detected. The
 manifest fingerprints reconstruct from the declared commit. A concurrent pre-existing
 or post-claim replacement final directory is never replaced or removed. Race tests at
-write, readback, and cleanup boundaries preserve a replacement sentinel and return the
-bounded ownership-lost error. The frozen candidate can be reconstructed using
+write, readback, and cleanup boundaries preserve a replacement sentinel at the exact
+final path, preserve an empty replacement, and return the bounded ownership-lost error.
+An ordinary failed claim remains incomplete and non-evidentiary, and a retry fails
+closed until operator cleanup. The frozen candidate can be reconstructed using
 documented commands.
 
 For Task 1 trial evidence, equivalent fresh runs MUST produce identical logical-state
