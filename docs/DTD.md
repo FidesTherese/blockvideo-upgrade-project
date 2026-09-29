@@ -943,7 +943,12 @@ no-newline bytes, while durable JSON files append one newline.
 
 Initial state explicitly permits the primary project, bounded additional projects,
 full settings/history, jobs, artifact identities, operation receipts, external-call
-records, and prior language turns. Strict seed maxima are 16 additional projects,
+records, and prior language turns. A prior clarification proposal mirrors production
+`ClarificationProposal`: `missing_fields` has one to three entries and each entry is
+`target`, `arguments`, or `intent`. Production does not require entry uniqueness, so
+the unlabeled contract does not add it. The host rejects `revision`, `job_id`, empty
+lists, and lists longer than three before worker launch; a real-worker test seeds all
+three valid values through `InterpretationOutcome` validation. Strict seed maxima are 16 additional projects,
 32 history rows, 32 jobs, 32 explicit artifacts, 32 revision-derived artifacts,
 32 receipts, 32 external calls, and 8 prior turns. `RedactedState` bounds each count
 by its complete seed maximum plus the protocol-wide maximum of four event/model

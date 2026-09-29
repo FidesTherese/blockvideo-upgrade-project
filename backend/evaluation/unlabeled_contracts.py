@@ -212,7 +212,9 @@ class UnlabeledOperationProposal(StrictUnlabeledRecord):
 class UnlabeledClarificationProposal(StrictUnlabeledRecord):
     kind: Literal["clarification"]
     question: str = Field(min_length=1, max_length=240)
-    missing_fields: tuple[Literal["target", "arguments", "revision", "job_id"], ...] = Field(max_length=16, strict=False)
+    missing_fields: tuple[Literal["target", "arguments", "intent"], ...] = Field(
+        min_length=1, max_length=3, strict=False,
+    )
 
 
 UnlabeledPriorProposal = Annotated[

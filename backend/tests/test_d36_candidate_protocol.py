@@ -609,6 +609,50 @@ def test_prior_proposal_rejects_cross_branch_fields() -> None:
 
 
 @pytest.mark.parametrize(
+    "missing_fields",
+    [
+        ["revision"],
+        ["job_id"],
+        ["target", "arguments", "intent", "target"],
+    ],
+)
+def test_prior_clarification_rejects_nonproduction_missing_fields_before_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_fields: list[str],
+) -> None:
+    value = _case()
+    value["initial"]["prior_turns"] = [{
+        "request_id": "prior", "project_id": 101, "base_revision": 5,
+        "status": "needs_input", "question": "値は？", "result_revision": None,
+        "settings_saved": False, "text": "字幕を変更", "relation": None,
+        "proposal": {
+            "kind": "clarification", "question": "値は？", "missing_fields": missing_fields,
+        },
+    }]
+    value["case_sha256"] = canonical_case_sha256(value)
+    input_path = tmp_path / "invalid-prior-clarification.json"
+    input_path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    worker_called = False
+
+    def forbidden_worker(*args: Any, **kwargs: Any) -> None:
+        nonlocal worker_called
+        worker_called = True
+
+    monkeypatch.setattr(trial_host, "_run_candidate", forbidden_worker)
+    with pytest.raises(ValueError, match="invalid unlabeled trial case"):
+        run_trial_host(
+            candidate_root=Path(__file__).parents[2],
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "invalid-prior-clarification-output.json",
+            storage=tmp_path / "invalid-prior-clarification-storage",
+            model="d36-test-model",
+        )
+    assert not worker_called
+
+
+@pytest.mark.parametrize(
     ("path", "bad"),
     [
         (("initial", "settings", "subtitle_font_size"), 121),
@@ -1054,6 +1098,45 @@ def test_one_over_seed_limit_is_rejected_before_worker(
             model="d36-test-model",
         )
     assert not worker_called
+
+
+def test_real_worker_seeds_production_clarification_missing_fields_boundary(tmp_path: Path) -> None:
+    case = _case()
+    case["initial"]["prior_turns"] = [{
+        "request_id": "prior", "project_id": 101, "base_revision": 5,
+        "status": "needs_input", "question": "不足は？", "result_revision": None,
+        "settings_saved": False, "text": "操作したい", "relation": None,
+        "proposal": {
+            "kind": "clarification",
+            "question": "不足は？",
+            "missing_fields": ["target", "arguments", "intent"],
+        },
+    }]
+    case["case_sha256"] = canonical_case_sha256(case)
+    _ModelHandler.proposal = {"kind": "no_operation", "reason": "変更しません"}
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        input_path = tmp_path / "production-clarification-boundary.json"
+        input_path.write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+        observation = run_trial_host(
+            candidate_root=Path(__file__).parents[2],
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "production-clarification-boundary-output.json",
+            storage=tmp_path / "production-clarification-boundary-storage",
+            model="d36-test-model",
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert observation.before.language_request_count == 1
+    assert observation.before.language_turn_count == 1
+    assert observation.failure_class is None
 
 
 def test_real_candidate_worker_executes_language_route(tmp_path: Path) -> None:
