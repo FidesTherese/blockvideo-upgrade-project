@@ -79,6 +79,129 @@ def _bound_case() -> dict[str, Any]:
     return value
 
 
+def _maximum_seed_case() -> dict[str, Any]:
+    value = _case()
+    settings = value["initial"]["settings"]
+    value["initial"].update({
+        "revision": 100,
+        "additional_projects": [
+            {
+                "project_id": project_id,
+                "revision": 100,
+                "settings": settings,
+                "project_status": "completed",
+            }
+            for project_id in range(200, 216)
+        ],
+        "jobs": [
+            {
+                "id": item_id,
+                "project_id": 101,
+                "status": "failed",
+                "input_revision": 100,
+                "cancel_requested": False,
+                "input_settings": settings,
+                "kind": "full",
+                "block_index": None,
+                "parent_job_id": None,
+            }
+            for item_id in range(1, 33)
+        ],
+        "history": [
+            {
+                "project_id": 101,
+                "revision": revision,
+                "settings": settings,
+                "changed_fields": [],
+                "restored_from_revision": None,
+            }
+            for revision in range(1, 33)
+        ],
+        "artifact_revisions": list(range(1, 33)),
+        "artifacts": [
+            {
+                "id": item_id,
+                "project_id": 101,
+                "job_id": None,
+                "revision": item_id,
+                "file_content_hex": "78",
+                "file_size": 1,
+                "file_sha256": hashlib.sha256(b"x").hexdigest(),
+            }
+            for item_id in range(100, 132)
+        ],
+        "external_calls": [
+            {
+                "id": item_id,
+                "job_id": item_id,
+                "fingerprint": f"seed-call-{item_id}",
+                "provider": "synthetic",
+                "endpoint": "https://synthetic.invalid/d36",
+                "remote_side_effect": False,
+                "status": "failed",
+                "attempts": 1,
+                "response_status": None,
+                "response_body_hex": None,
+                "response_body_sha256": None,
+                "response_content_type": None,
+                "provider_response_id": None,
+                "error_code": "synthetic_failure",
+            }
+            for item_id in range(1, 33)
+        ],
+        "prior_turns": [
+            {
+                "request_id": f"prior-{item_id}",
+                "project_id": 101,
+                "base_revision": 100,
+                "status": "needs_input",
+                "question": "値は？",
+                "result_revision": None,
+                "settings_saved": False,
+                "proposal": None,
+                "text": "字幕を変更",
+                "relation": None if item_id == 1 else "answer",
+            }
+            for item_id in range(1, 9)
+        ],
+    })
+    receipts = []
+    for item_id in range(1, 33):
+        canonical_request = json.dumps(
+            {
+                "operation_id": "project.status.get",
+                "operation_version": 1,
+                "project_id": 101,
+                "base_revision": 100,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        result = {
+            "operation_id": "project.status.get",
+            "project_id": 101,
+            "revision": 100,
+            "changed": False,
+        }
+        receipts.append({
+            "request_id": f"seed-receipt-{item_id}",
+            "operation_id": "project.status.get",
+            "operation_version": 1,
+            "project_id": 101,
+            "base_revision": 100,
+            "result_revision": 100,
+            "generation_requested": False,
+            "job_id": None,
+            "canonical_request_sha256": hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+            "result_sha256": trial_host._hash(result),
+        })
+    value["initial"]["receipts"] = receipts
+    value["event"]["request"]["base_revision"] = 100
+    value["case_sha256"] = canonical_case_sha256(value)
+    return value
+
+
 def _worker_observation() -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -528,7 +651,107 @@ class _ModelHandler(BaseHTTPRequestHandler):
         return
 
 
+def test_maximum_valid_seed_produces_valid_real_worker_observation(tmp_path: Path) -> None:
+    _ModelHandler.proposal = {
+        "kind": "operation",
+        "operation_id": "project.status.get",
+        "operation_version": 1,
+        "arguments": {},
+        "generate_after_save": False,
+    }
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        case = _maximum_seed_case()
+        input_path = tmp_path / "maximum-seed.json"
+        input_path.write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+        observation = run_trial_host(
+            candidate_root=Path(__file__).parents[2],
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "maximum-observation.json",
+            storage=tmp_path / "maximum-storage",
+            model="d36-test-model",
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert observation.before.project_count == 17
+    assert observation.before.history_count == observation.before.job_count == 32
+    assert observation.before.artifact_count == 64
+    assert observation.before.receipt_count == observation.before.external_call_count == 32
+    assert observation.before.language_request_count == observation.before.language_turn_count == 8
+    assert observation.after.receipt_count == 33
+    assert observation.after.language_request_count == observation.after.language_turn_count == 9
+
+
+def test_derived_artifact_ids_must_fit_database_range() -> None:
+    case = _bound_case()
+    case["initial"]["artifacts"] = [{
+        "id": 2**63 - 1,
+        "project_id": 101,
+        "job_id": None,
+        "revision": 5,
+        "file_content_hex": "78",
+        "file_size": 1,
+        "file_sha256": hashlib.sha256(b"x").hexdigest(),
+    }]
+    case["initial"]["artifact_revisions"] = [5]
+    case["case_sha256"] = canonical_case_sha256(case)
+
+    with pytest.raises(ValidationError, match="derived artifact IDs exceed database range"):
+        UnlabeledTrialCase.model_validate(case)
+
+
+def test_one_over_seed_limit_is_rejected_before_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _maximum_seed_case()
+    case["initial"]["jobs"].append({
+        "id": 33,
+        "project_id": 101,
+        "status": "failed",
+        "input_revision": 100,
+        "cancel_requested": False,
+        "input_settings": case["initial"]["settings"],
+        "kind": "full",
+        "block_index": None,
+        "parent_job_id": None,
+    })
+    case["case_sha256"] = canonical_case_sha256(case)
+    input_path = tmp_path / "one-over.json"
+    input_path.write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+    worker_called = False
+
+    def forbidden_worker(*args: Any, **kwargs: Any) -> None:
+        nonlocal worker_called
+        worker_called = True
+
+    monkeypatch.setattr(trial_host, "_run_candidate", forbidden_worker)
+    with pytest.raises(ValueError, match="invalid unlabeled trial case"):
+        run_trial_host(
+            candidate_root=Path(__file__).parents[2],
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "one-over-observation.json",
+            storage=tmp_path / "one-over-storage",
+            model="d36-test-model",
+        )
+    assert not worker_called
+
+
 def test_real_candidate_worker_executes_language_route(tmp_path: Path) -> None:
+    _ModelHandler.proposal = {
+        "kind": "operation",
+        "operation_id": "project.subtitle-font-size.set",
+        "operation_version": 1,
+        "arguments": {"value": 64},
+        "generate_after_save": False,
+    }
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

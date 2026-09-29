@@ -254,6 +254,9 @@ class UnlabeledInitialState(StrictUnlabeledRecord):
             raise ValueError("external call references unknown job")
         if any(item.job_id is not None and item.job_id not in jobs for item in self.artifacts):
             raise ValueError("artifact references unknown job")
+        next_artifact_id = max((item.id for item in self.artifacts), default=0) + len(self.artifact_revisions)
+        if next_artifact_id > MAX_DATABASE_ID:
+            raise ValueError("derived artifact IDs exceed database range")
         for item in self.jobs:
             owner_revision = self.revision if item.project_id == self.project_id else next(
                 project.revision for project in self.additional_projects if project.project_id == item.project_id

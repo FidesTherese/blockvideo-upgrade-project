@@ -212,7 +212,12 @@ runtime durations, and normalize generated core-request and confirmation identif
 while preserving their equality relationships. Public observations contain only strict
 enums, actual per-event HTTP/status/reason projections, fixed failure classes,
 counts/flags, deterministic redacted hashes, and the pre/post-equal candidate snapshot
-hash; timing and private/model prose are excluded. Candidate workers run with both
+hash; timing and private/model prose are excluded. Observation counts remain finite
+while accepting every valid seed and up to four event/model effects: projects 17,
+history 36, jobs 36, artifacts 68 (32 explicit plus 32 revision-derived plus four),
+receipts 36, external calls 36, language requests 12, and language turns 12. Derived
+artifact IDs must remain within the database integer range, so impossible combinations
+are rejected before worker launch. Candidate workers run with both
 `-B` and `PYTHONDONTWRITEBYTECODE=1`. The trusted host supplies each worker an
 explicit internal model-call budget in the closed range 0--4: the first process
 receives four and a `restart_resend` replay receives four minus the validated first

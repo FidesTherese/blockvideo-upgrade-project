@@ -22,6 +22,14 @@ MAX_WORKER_OUTPUT_BYTES = 512 * 1024
 MAX_SUBPROCESS_LOG_BYTES = 2 * 1024 * 1024
 PROTOCOL_DEADLINE_SECONDS = 180
 MODEL_CALL_LIMIT = 4
+MAX_OBSERVED_PROJECTS = 1 + 16
+MAX_OBSERVED_HISTORY = 32 + MODEL_CALL_LIMIT
+MAX_OBSERVED_JOBS = 32 + MODEL_CALL_LIMIT
+MAX_OBSERVED_ARTIFACTS = 32 + 32 + MODEL_CALL_LIMIT
+MAX_OBSERVED_RECEIPTS = 32 + MODEL_CALL_LIMIT
+MAX_OBSERVED_EXTERNAL_CALLS = 32 + MODEL_CALL_LIMIT
+MAX_OBSERVED_LANGUAGE_REQUESTS = 8 + MODEL_CALL_LIMIT
+MAX_OBSERVED_LANGUAGE_TURNS = 8 + MODEL_CALL_LIMIT
 SUBPROCESS_TIMEOUT_SECONDS = PROTOCOL_DEADLINE_SECONDS * MODEL_CALL_LIMIT + 30
 _REPARSE_POINT = 0x400
 
@@ -96,14 +104,14 @@ class RedactedState(_StrictRecord):
     external_calls_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     language_requests_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     language_turns_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    project_count: int = Field(ge=1, le=17)
-    history_count: int = Field(ge=0, le=32)
-    job_count: int = Field(ge=0, le=32)
-    artifact_count: int = Field(ge=0, le=32)
-    receipt_count: int = Field(ge=0, le=64)
-    external_call_count: int = Field(ge=0, le=32)
-    language_request_count: int = Field(ge=0, le=16)
-    language_turn_count: int = Field(ge=0, le=16)
+    project_count: int = Field(ge=1, le=MAX_OBSERVED_PROJECTS)
+    history_count: int = Field(ge=0, le=MAX_OBSERVED_HISTORY)
+    job_count: int = Field(ge=0, le=MAX_OBSERVED_JOBS)
+    artifact_count: int = Field(ge=0, le=MAX_OBSERVED_ARTIFACTS)
+    receipt_count: int = Field(ge=0, le=MAX_OBSERVED_RECEIPTS)
+    external_call_count: int = Field(ge=0, le=MAX_OBSERVED_EXTERNAL_CALLS)
+    language_request_count: int = Field(ge=0, le=MAX_OBSERVED_LANGUAGE_REQUESTS)
+    language_turn_count: int = Field(ge=0, le=MAX_OBSERVED_LANGUAGE_TURNS)
 
 
 class ObservedEffects(_StrictRecord):
@@ -694,6 +702,7 @@ def _candidate_worker(model_call_budget: int) -> int:
                         response_body=body, response_content_type=item.get("response_content_type"),
                         provider_response_id=item.get("provider_response_id"), error_code=item.get("error_code")))
                 parent: str | None = None
+                previous_turn: LanguageTurn | None = None
                 for turn in initial["prior_turns"]:
                     proposal = turn.get("proposal")
                     outcome = InterpretationOutcome.model_validate({
@@ -720,12 +729,13 @@ def _candidate_worker(model_call_budget: int) -> int:
                         input_fingerprint="0" * 64, project_id=response.project_id, base_revision=response.base_revision,
                         status=response.status, owner_token="seed", lease_until=0, created_at=0,
                         request_json=None, response_json=response.model_dump(mode="json")))
-                    db.add(LanguageTurn(request_id=response.request_id, text=turn["text"],
-                        parent_request_id=parent, relation=turn.get("relation")))
-                    if parent is not None:
-                        previous = db.get(LanguageTurn, parent)
-                        previous.successor_request_id = response.request_id
+                    current_turn = LanguageTurn(request_id=response.request_id, text=turn["text"],
+                        parent_request_id=parent, relation=turn.get("relation"))
+                    db.add(current_turn)
+                    if previous_turn is not None:
+                        previous_turn.successor_request_id = response.request_id
                     parent = response.request_id
+                    previous_turn = current_turn
                 db.commit()
 
         def file_identity(relative: str | None) -> dict[str, Any] | None:

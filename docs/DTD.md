@@ -938,10 +938,21 @@ no-newline bytes, while durable JSON files append one newline.
 
 Initial state explicitly permits the primary project, bounded additional projects,
 full settings/history, jobs, artifact identities, operation receipts, external-call
-records, and prior language turns. The worker derives complete generation snapshots
+records, and prior language turns. Strict seed maxima are 16 additional projects,
+32 history rows, 32 jobs, 32 explicit artifacts, 32 revision-derived artifacts,
+32 receipts, 32 external calls, and 8 prior turns. `RedactedState` bounds each count
+by its complete seed maximum plus the protocol-wide maximum of four event/model
+effects: `project_count <= 17`, `history_count <= 36`, `job_count <= 36`,
+`artifact_count <= 68`, `receipt_count <= 36`, `external_call_count <= 36`,
+`language_request_count <= 12`, and `language_turn_count <= 12`. Projects receive no
+event allowance because events cannot create projects. These are finite acceptance
+bounds rather than expected-effect assertions; actual effects remain separately
+reported. The input validator requires the largest explicit artifact ID plus the
+revision-derived artifact count to fit `2**63 - 1`, preventing a schema-accepted seed
+from failing when the worker assigns derived IDs. The worker derives complete generation snapshots
 and fingerprints with candidate `capture_inputs`/`fingerprint_inputs`, reconstructs
-reciprocal dialogue links and candidate language responses, and creates synthetic
-artifact bytes whose size/hash must match the wire identity. No label model or D24
+reciprocal dialogue links in memory before commit and candidate language responses,
+and creates synthetic artifact bytes whose size/hash must match the wire identity. No label model or D24
 contract is imported. Before and after each event, the worker canonicalizes sorted
 records for every project and settings revision; complete job snapshot/fingerprint
 state; receipt request/result values; artifact manifest and file identities; external
