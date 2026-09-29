@@ -944,35 +944,49 @@ ignored or tracked in-repository location fail. Publication claims the final can
 directory with `mkdir(exist_ok=False)`. Immediately after that exclusive creation,
 `_claim_publication_directory()` records the directory's `lstat` device/inode identity
 (the inode is the Windows file index where Python exposes it), rejects symlink/reparse/
-non-directory metadata, records the strict resolved parent, and exclusively opens one
-`.d36-publication-state` regular file with no-follow where available. `_PublicationClaim`
-retains the read/write descriptor, state-file identity, and random 32-byte token for its
-entire lifetime. The freezer writes and fsyncs the token through that descriptor.
-`_assert_claim_owned()` compares descriptor and path identities and reads the exact
-bounded token through the retained descriptor before and after every artifact write and
-artifact readback.
+non-directory metadata, records the strict resolved parent, and opens all three fixed
+regular files with `O_RDWR|O_CREAT|O_EXCL` and no-follow where available:
+`.d36-publication-state`, `freeze-manifest.json`, and
+`d36-tool-attestation.json`. `_PublicationClaim` retains every descriptor and its
+path/device/inode identity for the complete claimed-I/O lifetime. Only after all three
+opens succeed does the freezer write and fsync the random 32-byte token through the
+state descriptor. Partial open failure closes each opened descriptor once and leaves
+all created entries for operator cleanup.
 
-The freezer exclusively creates and fsyncs `freeze-manifest.json` and
-`d36-tool-attestation.json` directly inside the claimed directory; it creates no staging
-names and never uses overwrite-capable publication. After bounded artifact readback and
-final ownership validation, `_finish_claim()` truncates and seeks the retained state
-descriptor, writes and fsyncs canonical newline-terminated `CompletionMarker` bytes,
-and reads those bytes back through that same descriptor. The strict version-1 record
-contains exactly two sorted `FileFingerprint` entries, for
-`d36-tool-attestation.json` and `freeze-manifest.json`, whose sizes and SHA-256 values
-cover the exact canonical newline-terminated artifact bytes. It then revalidates the
-state-file path identity, directory identity, parent, and exact three-entry layout. The
-successful directory contains exactly the two artifacts plus
-`.d36-publication-state`; no random claim-token bytes remain.
+`_write_owned()` and `_read_owned()` validate ownership immediately before and after
+one operation, but the operation itself uses only the retained target descriptor.
+`_write_retained()` performs descriptor-based truncate, seek, complete write, fsync,
+and identity/size verification. `_read_retained()` performs descriptor-based seek,
+bounded read, and before/after identity/size verification. Neither helper reopens a
+fixed path, calls `os.link`, nor invokes a path-based write/read helper. Ownership
+validation checks the claimed directory, resolved parent, exact three-entry set, all
+three descriptor/path identities, and expected state bytes. Therefore a directory
+rename or replacement after the pre-operation check can receive no artifact bytes:
+the operation remains anchored to the original open file object, the post-operation
+check raises `PublicationOwnershipLost`, and the replacement remains untouched.
 
-There is no cleanup deletion path. `_unlink_recorded_file`, staging cleanup, artifact
-cleanup, state-file retirement, root removal, and final-directory removal do not exist.
-On any failure or ownership loss, `freeze_candidate()` closes the retained descriptor
-and performs no rename, unlink, recursive deletion, replacement, or other publication-
-path mutation. Every partial remains for explicit operator cleanup, including an empty
-output root created before a pre-claim failure and any files written before a post-claim
-failure. A retry therefore fails the exclusive destination claim. A path replaced at a
-former check/unlink boundary remains untouched.
+The freezer writes and reads back the canonical manifest and attestation through their
+retained descriptors. After both validate, `_finish_claim()` writes the canonical
+newline-terminated `CompletionMarker` last through the retained state descriptor and
+then reads it back through that descriptor, with separate ownership checks around the
+write and read. The strict version-1 record contains exactly two sorted
+`FileFingerprint` entries, for `d36-tool-attestation.json` and
+`freeze-manifest.json`, whose sizes and SHA-256 values cover the exact canonical
+newline-terminated artifact bytes. `freeze_candidate()` closes each of the three
+retained descriptors exactly once in `finally`. Only successful completion proceeds to
+an identity-guarded directory fsync and the independent path-based
+`read_frozen_candidate()` validation. The successful directory contains exactly the
+two artifacts plus `.d36-publication-state`; no random claim-token bytes remain.
+
+There is no cleanup deletion path. `_write_fsynced`, `_publish_owned`,
+`_unlink_recorded_file`, staging cleanup, artifact cleanup, state-file retirement, root
+removal, and final-directory removal do not exist. On any failure or ownership loss,
+`freeze_candidate()` closes retained descriptors and performs no rename, unlink,
+recursive deletion, replacement, or other publication-path mutation. Every partial
+remains for explicit operator cleanup, including an empty output root created before a
+pre-claim failure and the incomplete original directory wherever an external actor
+moved it. A replacement at the final path stays empty and untouched. A retry therefore
+fails the exclusive destination claim when the original final path remains.
 
 `read_frozen_candidate()` and every downstream reader MUST require exactly
 `freeze-manifest.json`, `d36-tool-attestation.json`, and the regular
@@ -2001,9 +2015,11 @@ freezes with identical inputs produce byte-identical manifest bytes. In a later
 tooling commit add
 `evaluation/final_protocol.json`, recursive strict unlabeled contracts, the external
 single-case host, and `evaluation/release_candidate` freezer. Test label exclusion and
-candidate non-mutation. The freezer MUST retain one `.d36-publication-state` descriptor,
-transition its fsynced random claim token to canonical completion bytes through that
-same descriptor, perform no path unlink or failure cleanup deletion, and leave partials
+candidate non-mutation. The freezer MUST exclusively open and retain descriptors for all three fixed
+publication files at claim creation, perform every claimed write/readback through those
+descriptors, transition the fsynced random claim token to canonical completion bytes
+last through the state descriptor, close each descriptor exactly once, perform no path
+unlink or failure cleanup deletion, and leave partials
 for operator cleanup. Freeze only an isolated detached D35 checkout; emit the ignored
 manifest and separate D36 tool attestation. Never name the D36 tooling commit as
 candidate behavior.

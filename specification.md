@@ -266,17 +266,20 @@ its declared `HEAD`; generation before the tooling commit is refused. In-reposit
 output is confined to resolved `release-evidence/**`, while external roots remain
 allowed. Publication atomically claims the final candidate directory without rename,
 immediately records its non-reparse/non-symlink `lstat` device/inode identity and
-resolved parent, and exclusively opens one `.d36-publication-state` file. The freezer
-retains that descriptor for the claim lifetime, writes and fsyncs a random 32-byte claim
-token through it, and revalidates the directory, state-file identity, descriptor, and
-exact token before and after each exclusive artifact write and bounded no-follow
-readback. After successful artifact validation, it truncates, seeks, writes, and fsyncs
-canonical `CompletionMarker` bytes through the same retained descriptor. It never
-renames or unlinks the state file, artifacts, staging files, or publication directory.
-Artifacts are written directly with exclusive creation, so no staging names exist. On
-any failure or ownership loss, the freezer only closes retained descriptors and leaves
-all incomplete partials for explicit operator cleanup; retries fail because the claimed
-destination remains. Readers require exactly `.d36-publication-state`,
+resolved parent, and exclusively opens and retains all three fixed files:
+`.d36-publication-state`, `freeze-manifest.json`, and
+`d36-tool-attestation.json`. Their descriptor identities remain in the claim. The
+freezer writes and fsyncs a random 32-byte claim token through the state descriptor,
+then performs every artifact write, truncate, seek, fsync, and bounded readback only
+through the retained descriptors. Ownership is revalidated before and after each such
+operation; a renamed or replaced directory causes ownership loss without touching the
+replacement. After successful artifact validation, canonical `CompletionMarker` bytes
+are written and read back last through the retained state descriptor. All descriptors
+close exactly once in `finally`; failure leaves the incomplete original wherever it was
+moved. Success closes the descriptors, fsyncs the directory only while its identity is
+still owned, and invokes the independent reader. No staging helper, path reopen, hard
+link, rename, or unlink participates in claimed publication. Readers require exactly
+`.d36-publication-state`,
 `freeze-manifest.json`, and `d36-tool-attestation.json`; the state bytes must be the
 canonical completion record, not a claim token, and its exact sizes and SHA-256 values
 must bind both stable canonical artifacts. The reader recomputes the manifest file

@@ -697,32 +697,59 @@ def test_concurrent_precreated_destination_is_retained(
     assert owners[0].read_text(encoding="utf-8") == "other owner"
 
 
-def test_replaced_published_path_is_never_deleted_on_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "ownership_check",
+    [2, 4, 6, 8, 10, 12],
+    ids=[
+        "manifest-write",
+        "attestation-write",
+        "manifest-readback",
+        "attestation-readback",
+        "completion-write",
+        "completion-readback",
+    ],
+)
+def test_directory_swap_between_ownership_check_and_descriptor_io_leaves_replacement_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ownership_check: int
 ) -> None:
     candidate, commit = _make_candidate(tmp_path)
     freeze, _, _ = _freeze_api()
     control_path, digest = _write_control(tmp_path / "control", _control(commit))
-    original_write = freeze._write_fsynced
-    replacement = b"replacement owner"
+    original_assert = freeze._assert_claim_owned
+    checks = 0
+    moved: Path | None = None
+    replacement: Path | None = None
 
-    def replace_after_write(path: Path, value: bytes) -> Any:
-        identity = original_write(path, value)
-        if path.name == "freeze-manifest.json":
-            path.unlink()
-            path.write_bytes(replacement)
-        return identity
+    def swap_after_check(
+        claim: Any, expected_state: bytes | None = None
+    ) -> None:
+        nonlocal checks, moved, replacement
+        original_assert(claim, expected_state)
+        checks += 1
+        if checks != ownership_check:
+            return
+        moved = claim.path
+        replacement = claim.path.with_name(f"{claim.path.name}.replacement")
+        replacement.mkdir()
+        object.__setattr__(claim, "path", replacement)
 
-    monkeypatch.setattr(freeze, "_write_fsynced", replace_after_write)
-    with pytest.raises(ValueError, match="published freeze manifest changed"):
+    monkeypatch.setattr(freeze, "_assert_claim_owned", swap_after_check)
+    with pytest.raises(freeze.PublicationOwnershipLost):
         freeze.freeze_candidate(
             candidate_root=candidate,
             candidate_control_path=control_path,
             expected_candidate_control_sha256=digest,
             output_root=tmp_path / "output",
         )
-    published = next((tmp_path / "output").glob("*/freeze-manifest.json"))
-    assert published.read_bytes() == replacement
+
+    assert moved is not None
+    assert replacement is not None
+    assert list(replacement.iterdir()) == []
+    assert {path.name for path in moved.iterdir()} == {
+        freeze._PUBLICATION_STATE_NAME,
+        "d36-tool-attestation.json",
+        "freeze-manifest.json",
+    }
 
 
 def test_state_path_replacement_at_former_unlink_boundary_is_untouched(
@@ -776,13 +803,13 @@ def test_failure_leaves_incomplete_partials_and_closes_state_descriptor(
     candidate, commit = _make_candidate(tmp_path)
     freeze, _, _ = _freeze_api()
     control_path, digest = _write_control(tmp_path / "control", _control(commit))
-    original_read = freeze._read_regular_once
+    original_read = freeze._read_retained
 
-    def fail_readback(path: Path, *, maximum: int, label: str) -> bytes:
-        value = original_read(path, maximum=maximum, label=label)
+    def fail_readback(file: Any, maximum: int, *, label: str) -> bytes:
+        value = original_read(file, maximum, label=label)
         return b"corrupt" if label == "freeze manifest" else value
 
-    monkeypatch.setattr(freeze, "_read_regular_once", fail_readback)
+    monkeypatch.setattr(freeze, "_read_retained", fail_readback)
     with pytest.raises(ValueError, match="published freeze manifest changed"):
         freeze.freeze_candidate(
             candidate_root=candidate,
@@ -804,19 +831,62 @@ def test_failure_leaves_incomplete_partials_and_closes_state_descriptor(
         freeze.read_frozen_candidate(incomplete)
 
 
+def test_failure_closes_all_three_retained_descriptors_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    original_claim = freeze._claim_publication_directory
+    original_close = freeze.os.close
+    original_read = freeze._read_retained
+    retained: set[int] = set()
+    close_counts: dict[int, int] = {}
+
+    def capture_claim(path: Path) -> Any:
+        claim = original_claim(path)
+        retained.update(file.descriptor for file in claim.files)
+        return claim
+
+    def count_close(descriptor: int) -> None:
+        if descriptor in retained:
+            close_counts[descriptor] = close_counts.get(descriptor, 0) + 1
+        original_close(descriptor)
+
+    def fail_manifest_readback(file: Any, maximum: int, *, label: str) -> bytes:
+        if label == "freeze manifest":
+            raise ValueError("injected readback failure")
+        return original_read(file, maximum, label=label)
+
+    monkeypatch.setattr(freeze, "_claim_publication_directory", capture_claim)
+    monkeypatch.setattr(freeze.os, "close", count_close)
+    monkeypatch.setattr(freeze, "_read_retained", fail_manifest_readback)
+
+    with pytest.raises(ValueError, match="injected readback failure"):
+        freeze.freeze_candidate(
+            candidate_root=candidate,
+            candidate_control_path=control_path,
+            expected_candidate_control_sha256=digest,
+            output_root=tmp_path / "output",
+        )
+
+    assert len(retained) == 3
+    assert close_counts == {descriptor: 1 for descriptor in retained}
+
+
 def test_post_publish_verification_failure_leaves_incomplete_claim_and_retry_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, commit = _make_candidate(tmp_path)
     freeze, _, _ = _freeze_api()
     control_path, digest = _write_control(tmp_path, _control(commit))
-    original = freeze._read_regular_once
+    original = freeze._read_retained
 
-    def corrupt_published(path: Path, *, maximum: int, label: str) -> bytes:
-        value = original(path, maximum=maximum, label=label)
+    def corrupt_published(file: Any, maximum: int, *, label: str) -> bytes:
+        value = original(file, maximum, label=label)
         return b"corrupt" if label == "freeze manifest" else value
 
-    monkeypatch.setattr(freeze, "_read_regular_once", corrupt_published)
+    monkeypatch.setattr(freeze, "_read_retained", corrupt_published)
     with pytest.raises(ValueError, match="published freeze manifest changed"):
         freeze.freeze_candidate(
             candidate_root=candidate,
@@ -852,13 +922,13 @@ def test_published_attestation_mismatch_leaves_incomplete_claim(
     candidate, commit = _make_candidate(tmp_path)
     freeze, _, _ = _freeze_api()
     control_path, digest = _write_control(tmp_path / "control", _control(commit))
-    original = freeze._read_regular_once
+    original = freeze._read_retained
 
-    def corrupt_attestation(path: Path, *, maximum: int, label: str) -> bytes:
-        value = original(path, maximum=maximum, label=label)
+    def corrupt_attestation(file: Any, maximum: int, *, label: str) -> bytes:
+        value = original(file, maximum, label=label)
         return b"{}\n" if label == "tool attestation" else value
 
-    monkeypatch.setattr(freeze, "_read_regular_once", corrupt_attestation)
+    monkeypatch.setattr(freeze, "_read_retained", corrupt_attestation)
     with pytest.raises(ValueError, match="published tool attestation"):
         freeze.freeze_candidate(
             candidate_root=candidate,

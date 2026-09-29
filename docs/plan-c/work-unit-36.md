@@ -30,16 +30,21 @@ change unnoticed.
   permit external roots without treating other ignored in-repository roots as evidence.
 - Claim the final candidate directory with exclusive `mkdir`; immediately record its
   non-reparse/non-symlink `lstat` device/inode identity and strict resolved parent, then
-  exclusively open one `.d36-publication-state` file and retain its descriptor. Write
-  and fsync a random 32-byte claim token through that descriptor. Before and after every
-  exclusive artifact write and bounded no-follow readback, require the same directory,
-  state-file, descriptor, parent, and exact token identity. Write artifacts directly
-  with exclusive creation; create no staging names. After validating both artifacts,
-  truncate, seek, write, fsync, and read back canonical `CompletionMarker` bytes through
-  the same retained descriptor. Never rename or unlink any state, publication, staging,
-  or artifact path. On failure or ownership loss, close retained descriptors and touch
-  no publication paths; leave every incomplete partial for operator cleanup and make a
-  retry fail on the existing destination. Readers MUST require exactly the canonical
+  exclusively open and retain descriptors for `.d36-publication-state`,
+  `freeze-manifest.json`, and `d36-tool-attestation.json`. Store all three descriptor
+  identities in the claim and write/fsync a random 32-byte token through the state
+  descriptor. Before and after every artifact write/readback and completion-state
+  write/readback, require the same directory, fixed-file paths, descriptors, parent,
+  and expected state bytes. Every write, truncate, seek, fsync, and pre-completion
+  readback MUST use only those retained descriptors; never reopen a claimed fixed file,
+  hard-link it, or perform a path-based file write. After validating both artifacts,
+  write and read back canonical `CompletionMarker` bytes last through the retained
+  state descriptor. Close each descriptor exactly once in `finally`. On failure or
+  ownership loss, touch no publication path; leave the incomplete original wherever
+  moved and leave any replacement empty. On success, close descriptors, fsync the
+  directory only if its identity is still owned, then validate through the independent
+  reader. No staging publication helper or staging name remains. Readers MUST require
+  exactly the canonical
   artifact pair plus `.d36-publication-state`, and MUST accept that state only when its
   bytes are the exact canonical completion record with the artifact sizes and SHA-256
   values. Require exact canonical artifact bytes, fsyncs, a recomputed tool-attestation
