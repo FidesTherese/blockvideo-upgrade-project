@@ -99,13 +99,13 @@ export interface StartupState {
 }
 ```
 
-- `api.startup(): Promise<StartupState>` calls `GET /api/startup`.
+- `api.startup(signal?: AbortSignal): Promise<StartupState>` calls `GET /api/startup`.
 - `RecoveryStatus({ job }: { job: JobSummary })` renders one status region and action guidance only.
-- `StartupStatus()` fetches startup state, renders `role="alert"` on migration failure, and directs the operator to stop/restart and documented backup restoration; it executes no migration/restore.
+- `StartupStatus()` polls only startup status every two seconds while `starting`, aborts and clears timers on cleanup, and stops on terminal/network outcomes. It renders restore guidance only when `backup_available` is true, otherwise stop/restart/support guidance, and provides a native status-refetch button after network failure. It executes no operation, migration, or restore.
 
 - [ ] **Step 1: Write RED component tests**
 
-For every recovery/action enum pair, assert exact Japanese label/guidance, one status region, and no retry button inside `RecoveryStatus`. Test startup starting/ready/migration-failed/network-failure states and ensure no private path is rendered.
+For every recovery/action enum pair, assert exact Japanese label/guidance, one status region, and no retry button inside `RecoveryStatus`. Test both migration backup branches, fixed-interval starting-to-ready polling, terminal stop, network refetch, operation non-invocation, abort/timer cleanup, stale completion after unmount, and ensure no private path is rendered.
 
 - [ ] **Step 2: Run frontend RED tests**
 

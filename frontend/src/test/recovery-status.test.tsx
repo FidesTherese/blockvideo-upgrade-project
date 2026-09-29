@@ -1,5 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '@/api/client';
 import { GenerationHistory } from '@/components/GenerationHistory';
 import { RecoveryStatus } from '@/components/RecoveryStatus';
@@ -9,7 +9,16 @@ import { jobFixture } from '@/test/project-fixtures';
 
 vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof import('@/api/client')>();
-  return { ...actual, api: { ...actual.api, startup: vi.fn() } };
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      startup: vi.fn(),
+      executeOperation: vi.fn(),
+      submitLanguage: vi.fn(),
+      confirmLanguage: vi.fn(),
+    },
+  };
 });
 
 const recoveryCases: Array<{
@@ -126,19 +135,38 @@ describe('StartupStatus', () => {
     vi.clearAllMocks();
   });
 
-  it('shows the exact starting guidance', async () => {
-    vi.mocked(api.startup).mockResolvedValue(startup({
-      status: 'starting',
-      message: '起動処理中です。',
-      schema_version: null,
-    }));
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('polls startup status at a fixed interval until ready and then stops', async () => {
+    vi.useFakeTimers();
+    vi.mocked(api.startup)
+      .mockResolvedValueOnce(startup({
+        status: 'starting',
+        message: '起動処理中です。',
+        schema_version: null,
+      }))
+      .mockResolvedValueOnce(startup());
 
     render(<StartupStatus />);
 
-    await screen.findByText('起動処理中です。起動が完了するまでお待ちください。');
+    await act(async () => Promise.resolve());
     expect(screen.getByRole('status')).toHaveTextContent(
       '起動処理中です。起動が完了するまでお待ちください。',
     );
+    expect(api.startup).toHaveBeenCalledTimes(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+
+    expect(screen.getByRole('status')).toHaveTextContent('起動が完了しました。');
+    expect(api.startup).toHaveBeenCalledTimes(2);
+
+    await act(async () => vi.advanceTimersByTimeAsync(10000));
+    expect(api.startup).toHaveBeenCalledTimes(2);
+    expect(api.executeOperation).not.toHaveBeenCalled();
+    expect(api.submitLanguage).not.toHaveBeenCalled();
+    expect(api.confirmLanguage).not.toHaveBeenCalled();
   });
 
   it('shows the exact ready status', async () => {
@@ -151,7 +179,7 @@ describe('StartupStatus', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('shows bounded migration recovery guidance without performing recovery', async () => {
+  it('shows backup restore guidance only when a verified backup is available', async () => {
     vi.mocked(api.startup).mockResolvedValue(startup({
       status: 'migration_failed',
       reason_code: 'migration_failed',
@@ -168,29 +196,65 @@ describe('StartupStatus', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
-  it('uses fixed network guidance and never exposes private error details', async () => {
-    vi.mocked(api.startup).mockRejectedValue(
-      new Error('C:\\Users\\private-user\\database.sqlite'),
+  it('shows stop, restart, and support guidance without implying a backup exists', async () => {
+    vi.mocked(api.startup).mockResolvedValue(startup({
+      status: 'migration_failed',
+      reason_code: 'backup_failed',
+      message: 'データベースを準備できませんでした。',
+      schema_version: null,
+      backup_available: false,
+    }));
+
+    render(<StartupStatus />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      'データベースを準備できませんでした。アプリを停止して再起動してください。解決しない場合はサポートに連絡してください。',
     );
+    expect(alert).not.toHaveTextContent(/バックアップ|復元/);
+  });
+
+  it('uses fixed network guidance, hides private details, and explicitly refetches', async () => {
+    vi.mocked(api.startup)
+      .mockRejectedValueOnce(new Error('C:\\Users\\private-user\\database.sqlite'))
+      .mockResolvedValueOnce(startup());
 
     render(<StartupStatus />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      '起動状態を確認できません。通信を確認してから再読み込みしてください。',
+      '起動状態を確認できません。通信を確認してから再度確認してください。',
     );
     expect(screen.queryByText(/private-user|database\.sqlite/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '起動状態を再確認' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('起動が完了しました。');
+    expect(api.startup).toHaveBeenCalledTimes(2);
   });
 
-  it('does not replace a newer state after unmount', async () => {
-    let resolveStartup!: (state: StartupState) => void;
-    vi.mocked(api.startup).mockReturnValue(new Promise((resolve) => {
-      resolveStartup = resolve;
-    }));
+  it('aborts in-flight polling and clears timers on unmount without stale updates', async () => {
+    vi.useFakeTimers();
+    let resolvePolling!: (state: StartupState) => void;
+    vi.mocked(api.startup)
+      .mockResolvedValueOnce(startup({ status: 'starting', message: '起動処理中です。' }))
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolvePolling = resolve;
+      }));
 
     const mounted = render(<StartupStatus />);
-    mounted.unmount();
-    resolveStartup(startup());
+    await act(async () => Promise.resolve());
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
 
-    await waitFor(() => expect(screen.queryByText('起動が完了しました。')).not.toBeInTheDocument());
+    const calls = (api.startup as unknown as { mock: { calls: Array<[AbortSignal?]> } }).mock.calls;
+    const signal = calls[1][0];
+    expect(signal).toBeDefined();
+
+    mounted.unmount();
+    expect(signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+
+    resolvePolling(startup());
+    await act(async () => Promise.resolve());
+    expect(screen.queryByText('起動が完了しました。')).not.toBeInTheDocument();
   });
 });

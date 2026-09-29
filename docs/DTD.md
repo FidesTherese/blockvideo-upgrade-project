@@ -786,9 +786,15 @@ button state uses only `retryable` and `recommended_action`.
 
 Frontend mirrors these exact unions. `RecoveryStatus.tsx` renders one status region
 and optional action description; it does not execute an action itself.
-`StartupStatus.tsx` fetches `/api/startup`, displays the bounded reason, and directs
-the user to the documented backup/restart procedure. `GenerationHistory` uses the
-new fields for labels and control visibility. All buttons remain native buttons,
+`StartupStatus.tsx` performs only `GET /api/startup` while status is `starting`, with
+one request in flight, a fixed two-second interval, and an `AbortController` plus
+timer cleanup on effect replacement or unmount. Polling stops on `ready`,
+`migration_failed`, or network failure and never calls an operation endpoint. A
+network failure displays fixed text without exception details and a native button
+that starts a fresh status request. Migration-failure guidance names documented
+backup restoration only when `backup_available` is true; the false branch instead
+directs the operator to stop, restart, and contact support. `GenerationHistory` uses
+the new fields for labels and control visibility. All buttons remain native buttons,
 status text uses `role="status"` or `role="alert"`, and focus order follows DOM order.
 
 ### D36 frozen D35 candidate and external trial boundary

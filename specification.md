@@ -129,6 +129,12 @@ remote-side-effect call. The same exact remote-call predicate protects pending-j
 creation, while local unknown calls do not block. List and history responses build
 that typed context once with one bulk aggregate query and reuse it for every job;
 a detached terminal job without context requires refresh rather than guessing.
+Startup status polling performs only bounded, non-overlapping `GET /api/startup`
+requests at a fixed interval while status is `starting`, aborts and clears its timer
+on cleanup, and stops on ready, migration failure, or network failure. Network
+failure exposes an explicit status-refetch button. Migration failure mentions the
+documented restore procedure only when `backup_available` is true; otherwise it
+instructs stop/restart and support contact without implying that a backup exists.
 
 D33 recovery evidence includes the complete persisted project progress/stage/output/
 error view. `JobRegistry` has explicit accepting/closing lifecycle state. FastAPI

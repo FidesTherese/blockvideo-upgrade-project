@@ -53,7 +53,7 @@ async function request<T>(
 }
 
 export const api = {
-  startup: () => request<StartupState>('/startup'),
+  startup: (signal?: AbortSignal) => request<StartupState>('/startup', undefined, signal),
   languageConnection: (check = false) =>
     request<LanguageConnection>(`/language/connection${check ? '?check=true' : ''}`),
   submitLanguage: (input: LanguageRequest, signal?: AbortSignal) =>

@@ -18,14 +18,19 @@ moving recovery authority into the browser.
 
 ## Non-goals
 
-No browser-side recovery engine, automatic retry loop, schema administration UI,
-or claim that UI status replaces persisted evidence.
+No browser-side recovery engine, automatic operation retry loop, schema
+administration UI, or claim that UI status replaces persisted evidence. Status-only
+startup polling is permitted while the backend explicitly reports `starting`.
 
 ## Acceptance
 
 Component and browser tests cover every state and stale-view transition. Suggested
 actions match backend permissions, duplicate clicks remain safe, and narrow-screen
-and keyboard operation remain usable.
+and keyboard operation remain usable. Startup migration guidance mentions restore
+only when the backend reports a backup. While startup remains `starting`, the client
+polls only the startup status endpoint at a fixed interval with no overlap, aborts and
+cleans up on unmount, stops on terminal or network failure, and offers an explicit
+native status-refetch button after a network failure.
 
 Backend retry guidance MUST use the same project-wide blockers as durable job
 creation: any unknown job or any `remote_side_effect IS TRUE` call in `in_flight` or
