@@ -11,6 +11,7 @@ import type {
   OperationRequest,
   OperationResult,
   ProjectHistory,
+  StartupState,
 } from '@/lib/types';
 
 const API_BASE = '/api';
@@ -52,6 +53,7 @@ async function request<T>(
 }
 
 export const api = {
+  startup: () => request<StartupState>('/startup'),
   languageConnection: (check = false) =>
     request<LanguageConnection>(`/language/connection${check ? '?check=true' : ''}`),
   submitLanguage: (input: LanguageRequest, signal?: AbortSignal) =>

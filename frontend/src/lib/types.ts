@@ -101,6 +101,25 @@ export interface BlockSummary {
   error_message: string | null;
 }
 
+export type RecoveryCode =
+  | 'wait'
+  | 'safe_retry'
+  | 'external_outcome_unknown'
+  | 'refresh_required'
+  | 'cancelled'
+  | 'completed'
+  | 'failed';
+
+export type RecommendedAction = 'wait' | 'retry_current' | 'check_provider' | 'refresh' | 'none';
+
+export interface StartupState {
+  status: 'starting' | 'ready' | 'migration_failed';
+  reason_code: string | null;
+  message: string;
+  schema_version: number | null;
+  backup_available: boolean;
+}
+
 /** Progress and error state for an asynchronous generation job. */
 export interface JobSummary {
   id: number;
@@ -118,6 +137,8 @@ export interface JobSummary {
   recovery_message?: string | null;
   retryable?: boolean;
   retry_blocked_reason?: string | null;
+  recovery_code: RecoveryCode;
+  recommended_action: RecommendedAction;
   plan?: { stages: string[] } | null;
 }
 

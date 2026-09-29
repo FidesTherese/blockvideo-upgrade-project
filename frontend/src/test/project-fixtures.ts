@@ -1,4 +1,4 @@
-import type { BlockSummary, JobSummary, ProjectDetail, ProjectHistory } from '@/lib/types';
+import type { BlockSummary, JobSummary, ProjectDetail, ProjectHistory, RecoveryCode, RecommendedAction } from '@/lib/types';
 import { DEFAULT_QUALITY } from '@/lib/validation';
 
 export function projectFixture(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
@@ -29,11 +29,22 @@ export function historyFixture(overrides: Partial<ProjectHistory> = {}): Project
 }
 
 export function jobFixture(overrides: Partial<JobSummary> = {}): JobSummary {
+  const status = overrides.status ?? 'failed';
+  const recoveryByStatus: Record<string, [RecoveryCode, RecommendedAction, boolean]> = {
+    pending: ['wait', 'wait', false],
+    running: ['wait', 'wait', false],
+    unknown: ['external_outcome_unknown', 'check_provider', false],
+    completed: ['completed', 'none', false],
+    cancelled: ['safe_retry', 'retry_current', true],
+    failed: ['safe_retry', 'retry_current', true],
+  };
+  const [recovery_code, recommended_action, retryable] = recoveryByStatus[status] ?? ['failed', 'none', false];
   return {
-    id: 8, project_id: 4, current_stage: 'audio', status: 'failed', progress: 0.5, stage_progress: 0,
+    id: 8, project_id: 4, current_stage: 'audio', status, progress: 0.5, stage_progress: 0,
     started_at: '2026-09-19T00:03:00Z', finished_at: null, error_message: null,
     cancel_requested: false, input_revision: 2, parent_job_id: null, recovery_message: null,
-    retryable: true, retry_blocked_reason: null, plan: { stages: ['audio', 'render'] }, ...overrides,
+    retryable, retry_blocked_reason: null, recovery_code, recommended_action,
+    plan: { stages: ['audio', 'render'] }, ...overrides,
   };
 }
 

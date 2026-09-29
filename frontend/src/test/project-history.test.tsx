@@ -188,7 +188,7 @@ describe('project durable controls', () => {
     })] }));
     page();
     expect(await screen.findByText(/自動で再送しません/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '現在の設定で再実行' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: '現在の設定で再実行' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '現在の設定で新しく生成' })).toBeDisabled();
     expect(screen.getByText('外部処理の結果を確認してください。')).toBeInTheDocument();
     expect(api.executeOperation).not.toHaveBeenCalled();
