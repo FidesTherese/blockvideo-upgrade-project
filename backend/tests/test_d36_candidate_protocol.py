@@ -83,6 +83,7 @@ def _worker_observation() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "response": {
+            "http_status": 200,
             "status": "completed",
             "mode": "all_tools",
             "executed": True,
@@ -151,6 +152,16 @@ def _worker_observation() -> dict[str, Any]:
             "model_calls": 0,
             "state_unchanged": True,
             "same_response": True,
+            "response": {
+                "http_status": 200,
+                "status": "completed",
+                "mode": "all_tools",
+                "executed": True,
+                "requires_confirmation": False,
+                "operation_id": "project.subtitle-font-size.set",
+                "reason_code": None,
+                "response_sha256": "b" * 64,
+            },
             "failure_class": None,
         },
         "confirmation": {
@@ -158,6 +169,8 @@ def _worker_observation() -> dict[str, Any]:
             "duplicate_attempted": False,
             "state_sha256": None,
             "duplicate_same_response": None,
+            "response": None,
+            "duplicate_response": None,
             "failure_class": None,
         },
     }
@@ -377,11 +390,14 @@ def test_host_uses_candidate_rooted_subprocess_and_writes_redacted_observation(
 
     assert captured["cwd"] == backend
     assert captured["env"]["PYTHONPATH"] == str(backend.resolve())
+    assert captured["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert captured["argv"][1] == "-B"
     assert "D36_WORKER_INPUT" in captured["env"]
     assert captured["env"]["D36_STORAGE_ROOT"] == str(storage.resolve())
     assert observation.case_sha256 == _bound_case()["case_sha256"]
     assert observation.input_sha256 == hashlib.sha256(input_path.read_bytes()).hexdigest()
     assert observation.mode == "all_tools"
+    assert observation.candidate_snapshot_sha256 == trial_host._candidate_snapshot(candidate)
     assert output_path.read_bytes() == (
         json.dumps(observation.model_dump(mode="json"), ensure_ascii=True, allow_nan=False,
                    sort_keys=True, separators=(",", ":")) + "\n"
@@ -439,6 +455,7 @@ def test_real_candidate_worker_executes_language_route(tmp_path: Path) -> None:
     assert observation.effects.settings == observation.effects.revision == 1
     assert observation.effects.receipts == 1
     assert observation.before.settings_sha256 != observation.after.settings_sha256
+    assert observation.response.http_status == 200
 
 
 @pytest.mark.parametrize(
@@ -492,8 +509,16 @@ def test_real_worker_executes_every_allowed_event(tmp_path: Path, kind: str) -> 
         server.server_close()
     if kind in {"resend_identical", "restart_resend", "same_id_different_body", "concurrent_identical", "switch_target"}:
         assert observation.replay.attempted
+        assert observation.replay.response is not None
     if kind in {"confirm_generation", "confirm_twice"}:
         assert observation.confirmation.attempted
+        assert observation.confirmation.response is not None
+        assert observation.confirmation.response.http_status == 200
+    if kind == "same_id_different_body":
+        assert observation.replay.response is not None
+        assert observation.replay.response.http_status == 409
+        assert observation.replay.response.status == "http_error"
+        assert observation.replay.response.reason_code == "request_id_conflict"
     assert observation.confirmation.duplicate_attempted == (kind == "confirm_twice")
 
 
@@ -565,6 +590,24 @@ def test_observation_contract_rejects_worker_exfiltration_strings() -> None:
         trial_host._WorkerObservation.model_validate(value)
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda value: value["replay"].update(response=None),
+        lambda value: value["confirmation"].update(attempted=True, state_sha256=None),
+        lambda value: value["confirmation"].update(duplicate_attempted=True),
+        lambda value: value["confirmation"].update(duplicate_same_response=True),
+    ],
+)
+def test_event_projection_contract_rejects_inconsistent_attempt_evidence(
+    change: Any,
+) -> None:
+    value = _worker_observation()
+    change(value)
+    with pytest.raises(ValidationError):
+        trial_host._WorkerObservation.model_validate(value)
+
+
 def test_subprocess_output_flood_is_killed_without_reading_logs(tmp_path: Path) -> None:
     storage = tmp_path / "logs"
     storage.mkdir()
@@ -618,6 +661,84 @@ def test_same_count_project_mutation_changes_full_state_hash(tmp_path: Path) -> 
     assert observation.before.project_count == observation.after.project_count == 1
     assert observation.before.projects_sha256 != observation.after.projects_sha256
     assert observation.effects.settings == 1
+
+
+def test_logical_state_hashes_are_deterministic_across_fresh_runs(tmp_path: Path) -> None:
+    _ModelHandler.proposal = {
+        "kind": "operation", "operation_id": "project.subtitle-font-size.set",
+        "operation_version": 1, "arguments": {"value": 64}, "generate_after_save": False,
+    }
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    observations = []
+    try:
+        payload = json.dumps(_bound_case(), ensure_ascii=False)
+        for sequence in range(2):
+            input_path = tmp_path / f"deterministic-{sequence}.json"
+            input_path.write_text(payload, encoding="utf-8")
+            observations.append(run_trial_host(
+                candidate_root=Path(__file__).parents[2], mode="all_tools", input_path=input_path,
+                output_path=tmp_path / f"deterministic-{sequence}-output.json",
+                storage=tmp_path / f"deterministic-{sequence}-storage", model="d36-test-model",
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            ))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+    first, second = observations
+    assert first.before == second.before
+    assert first.after == second.after
+    assert first.response == second.response
+    assert first.effects == second.effects
+
+
+def test_candidate_snapshot_detects_worker_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "candidate"
+    backend = candidate / "backend"
+    backend.mkdir(parents=True)
+    source = backend / "candidate.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    input_path = tmp_path / "case.json"
+    input_path.write_text(json.dumps(_bound_case()), encoding="utf-8")
+
+    def mutating_worker(argv: list[str], **kwargs: Any) -> None:
+        source.write_text("VALUE = 2\n", encoding="utf-8")
+        Path(kwargs["env"]["D36_WORKER_OUTPUT"]).write_text(
+            json.dumps(_worker_observation()), encoding="ascii"
+        )
+
+    monkeypatch.setattr("evaluation.scripts.evaluation_trial_host._run_candidate", mutating_worker)
+    with pytest.raises(ValueError, match="candidate changed during trial"):
+        run_trial_host(candidate_root=candidate, mode="all_tools", input_path=input_path,
+            output_path=tmp_path / "output.json", storage=tmp_path / "storage", model="test-model")
+    assert not (tmp_path / "output.json").exists()
+
+
+def test_atomic_publish_uses_no_replace_hard_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    output = tmp_path / "published.json"
+    real_link = os.link
+    linked = False
+
+    def competing_link(source: Path, destination: Path, *args: Any, **kwargs: Any) -> None:
+        nonlocal linked
+        linked = True
+        output.write_bytes(b"competitor\n")
+        real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", competing_link)
+    with pytest.raises(ValueError, match="output must not exist"):
+        trial_host._atomic_publish(output, b"ours\n", candidate_root=candidate)
+    assert linked
+    assert output.read_bytes() == b"competitor\n"
+    assert not list(tmp_path.glob(".published.json.*.tmp"))
 
 
 def test_host_rejects_symlink_candidate_backend_when_supported(tmp_path: Path) -> None:

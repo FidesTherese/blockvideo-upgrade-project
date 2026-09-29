@@ -27,3 +27,10 @@ No tag, publication, deployment, or final readiness claim.
 
 The same checkout and inputs reproduce byte-identical canonical manifest bytes,
 including deterministic `created_at`. Any relevant byte change is detected. The frozen candidate can be reconstructed using documented commands.
+
+For Task 1 trial evidence, equivalent fresh runs MUST produce identical logical-state
+and response projections: timestamps, leases, runtime durations, and generated opaque
+IDs cannot perturb hashes. Every primary, replay, confirmation, and duplicate event
+MUST retain its actual strict HTTP/status/reason projection. The host MUST disable
+bytecode writes, prove a pre/post-equal candidate snapshot, and publish evidence with
+an atomic no-replace hard link so a competing destination is never overwritten.

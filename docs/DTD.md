@@ -944,33 +944,52 @@ reciprocal dialogue links and candidate language responses, and creates syntheti
 artifact bytes whose size/hash must match the wire identity. No label model or D24
 contract is imported. Before and after each event, the worker canonicalizes sorted
 records for every project and settings revision; complete job snapshot/fingerprint
-state; receipt request/result hashes; artifact manifest and file identities; external
-call response hashes; and language request/turn hashes. Collection hashes, counts,
-fixed enums/flags, and effect counts detect replacement or in-place mutation even
-when row counts do not change. Response hashing uses an allowlisted projection that
-excludes timing, diagnostics, messages, questions, model prose, paths, and private
-content.
+state; receipt request/result values; artifact manifest and file identities; external
+call response hashes; and language request/turn values. `_logical_state()` recursively
+removes `created_at`, `updated_at`, `started_at`, `finished_at`, `lease_until`,
+`owner_token`, and every `*_ms` field. It discovers generated `core_request_id` and
+`confirmation_token` values, assigns deterministic ordinal placeholders ordered by
+field and stable caller request ID, and replaces those values wherever they occur, including inside
+request references. Stable caller IDs and database IDs are retained. Collection
+hashes, counts, fixed enums/flags, and effect counts therefore detect replacement or
+in-place mutation without changing across fresh equivalent runs. Response hashing uses
+an allowlisted projection that excludes diagnostics, messages, questions, model prose,
+paths, and private content. `RedactedResponse` includes the actual bounded HTTP status,
+strict language status/mode/operation/reason enums, execution/confirmation flags, and
+a hash of the remaining allowlisted revision/job projection. Primary, replay,
+confirmation, and duplicate-confirmation requests each retain their own actual
+projection; no secondary event is projected with an assumed HTTP 200.
 
 The host rejects label/review/scoring fields, multiple cases, wrong mode/index
 combinations, or non-empty output before candidate invocation. It performs `lstat`
 before resolution and rejects symlink/reparse/non-regular candidate, backend, index,
 storage, input, output, and temporary-file surfaces as applicable; every resolved
-path is containment-checked again before publication. Temporary files use exclusive
-unpredictable names, no-follow flags where available, file fsync, atomic replacement,
-and directory fsync where supported. It serializes only validated allowlisted wire
-fields into fresh external case storage, then launches a fixed-argument `Popen` with
-the D35 candidate's regular `backend/` directory as working directory and Python
-import root. A `runpy` bootstrap avoids adding the D36 script directory to candidate
-imports. The worker imports only committed D35 application modules; candidate modules
-never import D36 tooling and neither checkout is mutated. `stateful` requires one
-regular index directory and `all_tools` rejects an index. Stdout and stderr are
-redirected to external exclusive files; the host actively monitors both, kills on
-timeout or either file exceeding 2 MiB, and never reads them. Restart resend runs the
-first submit and replay in separate candidate processes/apps against the same external
-case database. The host validates one bounded strict worker observation and atomically
-publishes canonical redacted output. Each invocation requires fresh storage and
-refuses a pre-existing non-empty storage directory or output file. Task 1 records no
-future freezer or trial-tool attestation hash because those bytes do not yet exist.
+path is containment-checked again before publication. `_candidate_snapshot()` walks
+candidate files in sorted relative-path order, excludes only repository/runtime cache
+and generated-output directories, rejects special/symlink/reparse entries, hashes each
+regular file with a descriptor identity/size check, and hashes the canonical entry
+list. The host records this snapshot before worker launch, requires exact equality
+after the final worker, and publishes the hash in `TrialObservation`. Candidate Python
+starts with both `-B` and `PYTHONDONTWRITEBYTECODE=1`; user-site imports remain disabled.
+Temporary files use exclusive unpredictable names, no-follow flags where available,
+and file fsync. Final publication calls `os.link(temporary, output)` on the same parent
+filesystem, validates that both paths identify the same regular inode, fsyncs the
+directory where supported, and then unlinks the temporary name. `FileExistsError`
+becomes `output must not exist`; publication never uses overwrite-capable
+`os.replace`. The host serializes only validated allowlisted wire fields into fresh
+external case storage, then launches a fixed-argument `Popen` with the D35 candidate's
+regular `backend/` directory as working directory and Python import root. A `runpy`
+bootstrap avoids adding the D36 script directory to candidate imports. The worker
+imports only committed D35 application modules; candidate modules never import D36
+tooling and the pre/post snapshot proves candidate bytes remain unchanged. `stateful`
+requires one regular index directory and `all_tools` rejects an index. Stdout and
+stderr are redirected to external exclusive files; the host actively monitors both,
+kills on timeout or either file exceeding 2 MiB, and never reads them. Restart resend
+runs the first submit and replay in separate candidate processes/apps against the same
+external case database. The host validates one bounded strict worker observation and
+atomically publishes canonical redacted output. Each invocation requires fresh storage
+and refuses a pre-existing non-empty storage directory or output file. Task 1 records
+no future freezer or trial-tool attestation hash because those bytes do not yet exist.
 
 ### D37 canonical protocol artifact and shared full result bundle
 

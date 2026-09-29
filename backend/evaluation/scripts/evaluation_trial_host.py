@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 MAX_INPUT_BYTES = 2 * 1024 * 1024
 MAX_WORKER_OUTPUT_BYTES = 512 * 1024
@@ -24,7 +24,7 @@ MODEL_CALL_LIMIT = 4
 SUBPROCESS_TIMEOUT_SECONDS = PROTOCOL_DEADLINE_SECONDS * MODEL_CALL_LIMIT + 30
 _REPARSE_POINT = 0x400
 
-ResponseStatus = Literal["ready", "needs_input", "unsupported", "blocked", "error", "completed", "dismissed", "http_error"]
+ResponseStatus = Literal["interpreting", "ready", "needs_input", "unsupported", "blocked", "error", "completed", "dismissed", "http_error"]
 ResponseMode = Literal["all_tools", "semantic", "stateful"]
 OperationId = Literal[
     "project.subtitle-font-size.set", "project.subtitle-font-size.adjust", "project.settings.update",
@@ -59,6 +59,7 @@ class _StrictRecord(BaseModel):
 
 
 class RedactedResponse(_StrictRecord):
+    http_status: int = Field(ge=100, le=599)
     status: ResponseStatus
     mode: ResponseMode
     executed: bool
@@ -107,7 +108,14 @@ class ReplayObservation(_StrictRecord):
     model_calls: int = Field(ge=0, le=MODEL_CALL_LIMIT)
     state_unchanged: bool
     same_response: bool
+    response: RedactedResponse | None = None
     failure_class: FailureClass | None = None
+
+    @model_validator(mode="after")
+    def response_matches_attempt(self) -> ReplayObservation:
+        if self.attempted != (self.response is not None):
+            raise ValueError("replay response must match attempted state")
+        return self
 
 
 class ConfirmationObservation(_StrictRecord):
@@ -115,7 +123,21 @@ class ConfirmationObservation(_StrictRecord):
     duplicate_attempted: bool
     state_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     duplicate_same_response: bool | None = None
+    response: RedactedResponse | None = None
+    duplicate_response: RedactedResponse | None = None
     failure_class: FailureClass | None = None
+
+    @model_validator(mode="after")
+    def responses_match_attempts(self) -> ConfirmationObservation:
+        if self.attempted != (self.response is not None) or self.attempted != (self.state_sha256 is not None):
+            raise ValueError("confirmation evidence must match attempted state")
+        if self.duplicate_attempted and not self.attempted:
+            raise ValueError("duplicate confirmation requires an initial attempt")
+        if self.duplicate_attempted != (self.duplicate_response is not None):
+            raise ValueError("duplicate confirmation response must match attempted state")
+        if self.duplicate_attempted != (self.duplicate_same_response is not None):
+            raise ValueError("duplicate comparison must match attempted state")
+        return self
 
 
 class _WorkerObservation(_StrictRecord):
@@ -132,6 +154,7 @@ class _WorkerObservation(_StrictRecord):
 
 class TrialObservation(_WorkerObservation):
     case_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     mode: Literal["all_tools", "stateful"]
 
@@ -142,6 +165,55 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 def _hash(value: object) -> str:
     return hashlib.sha256(_canonical_json_bytes(value).rstrip(b"\n")).hexdigest()
+
+
+_VOLATILE_LOGICAL_FIELDS = frozenset({
+    "created_at", "updated_at", "started_at", "finished_at", "lease_until", "owner_token",
+})
+_OPAQUE_LOGICAL_FIELDS = frozenset({"confirmation_token", "core_request_id"})
+
+
+def _logical_state(value: object) -> object:
+    opaque_bindings: dict[str, tuple[str, str]] = {}
+    unbound_values: list[str] = []
+
+    def collect(item: object, owner: str | None = None) -> None:
+        if isinstance(item, dict):
+            request_id = item.get("request_id")
+            current_owner = request_id if isinstance(request_id, str) and "core_request_id" in item else owner
+            for key, child in item.items():
+                if key in _OPAQUE_LOGICAL_FIELDS and isinstance(child, str):
+                    if current_owner is None:
+                        if child not in unbound_values:
+                            unbound_values.append(child)
+                    else:
+                        opaque_bindings[child] = (key, current_owner)
+                collect(child, current_owner)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                collect(child, owner)
+
+    collect(value)
+    ordered = sorted(opaque_bindings, key=lambda item: opaque_bindings[item])
+    ordered.extend(item for item in unbound_values if item not in opaque_bindings)
+    normalized_ids = {item: f"opaque-{index}" for index, item in enumerate(ordered, start=1)}
+
+    def normalize(item: object) -> object:
+        if isinstance(item, dict):
+            return {
+                key: normalize(child)
+                for key, child in item.items()
+                if key not in _VOLATILE_LOGICAL_FIELDS and not key.endswith("_ms")
+            }
+        if isinstance(item, (list, tuple)):
+            return [normalize(child) for child in item]
+        if isinstance(item, str):
+            for opaque, replacement in normalized_ids.items():
+                item = item.replace(opaque, replacement)
+            return item
+        return item
+
+    return normalize(value)
 
 
 def _is_reparse(metadata: os.stat_result) -> bool:
@@ -188,6 +260,45 @@ def _contained(path: Path, root: Path) -> bool:
 
 def _outside_candidate(path: Path, candidate_root: Path) -> bool:
     return not _contained(path, candidate_root)
+
+
+_SNAPSHOT_IGNORED_DIRECTORIES = frozenset({
+    ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__",
+    "dist", "node_modules", "release-evidence",
+})
+
+
+def _candidate_snapshot(candidate_root: Path) -> str:
+    entries: list[dict[str, object]] = []
+    pending = [candidate_root]
+    while pending:
+        directory = pending.pop()
+        for path in sorted(directory.iterdir(), key=lambda item: item.name):
+            relative = path.relative_to(candidate_root).as_posix()
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
+                raise ValueError("candidate snapshot contains an invalid path")
+            if stat.S_ISDIR(metadata.st_mode):
+                if path.name not in _SNAPSHOT_IGNORED_DIRECTORIES:
+                    pending.append(path)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("candidate snapshot contains an invalid path")
+            digest = hashlib.sha256()
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino, opened.st_size) != (
+                    metadata.st_dev, metadata.st_ino, metadata.st_size
+                ):
+                    raise ValueError("candidate changed during snapshot")
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    digest.update(chunk)
+            finally:
+                os.close(descriptor)
+            entries.append({"path": relative, "sha256": digest.hexdigest(), "size": metadata.st_size})
+    return _hash(sorted(entries, key=lambda item: str(item["path"])))
 
 
 def _secure_directory(path: Path, *, create: bool, empty: bool, error: str) -> Path:
@@ -238,6 +349,7 @@ def _clean_environment(candidate_backend: Path, storage: Path, case_path: Path, 
     env = {name: os.environ[name] for name in retained if name in os.environ}
     env.update({
         "PYTHONIOENCODING": "utf-8", "PYTHONHASHSEED": "0", "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONPATH": str(candidate_backend), "D36_WORKER_INPUT": str(case_path),
         "D36_WORKER_OUTPUT": str(worker_output), "D36_STORAGE_ROOT": str(storage),
         "D36_WORKER_PHASE": phase, "D36_MODE": mode, "D36_MODEL": model,
@@ -313,13 +425,18 @@ def _atomic_publish(output_path: Path, payload: bytes, *, candidate_root: Path) 
     temporary = parent / f".{output_path.name}.{secrets.token_hex(16)}.tmp"
     try:
         _write_exclusive(temporary, payload)
-        _lstat_regular(temporary, "output temporary file is invalid")
+        temporary_metadata = _lstat_regular(temporary, "output temporary file is invalid")
         if not _contained(temporary, parent):
             raise ValueError("output temporary file escaped output directory")
-        if output_path.exists() or output_path.is_symlink():
-            raise ValueError("output must not exist")
-        os.replace(temporary, output_path)
-        _lstat_regular(output_path, "published output is invalid")
+        try:
+            os.link(temporary, output_path, follow_symlinks=False)
+        except FileExistsError:
+            raise ValueError("output must not exist") from None
+        published_metadata = _lstat_regular(output_path, "published output is invalid")
+        if (temporary_metadata.st_dev, temporary_metadata.st_ino) != (
+            published_metadata.st_dev, published_metadata.st_ino
+        ):
+            raise ValueError("published output identity mismatch")
         _fsync_directory(parent)
     finally:
         temporary.unlink(missing_ok=True)
@@ -350,6 +467,7 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
     _lstat_directory(candidate_backend, "candidate root is invalid")
     if not _contained(candidate_backend, candidate_root):
         raise ValueError("candidate root is invalid")
+    candidate_snapshot_sha256 = _candidate_snapshot(candidate_root)
     if not _outside_candidate(storage, candidate_root) or not _outside_candidate(output_path, candidate_root):
         raise ValueError("trial storage and output must be external to candidate")
     if output_path.exists() or output_path.is_symlink():
@@ -368,7 +486,7 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
         f"sys.argv=[{worker_script!r},'--candidate-worker'];"
         f"runpy.run_path({worker_script!r},run_name='__main__')"
     )
-    command = [sys.executable, "-c", bootstrap]
+    command = [sys.executable, "-B", "-c", bootstrap]
     event_kind = trial.event.kind
     if event_kind == "restart_resend":
         first_output = storage / f"worker-phase1-{secrets.token_hex(16)}.json"
@@ -386,12 +504,15 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
                                  phase="single")
         _run_candidate(command, cwd=candidate_backend, env=env, storage=storage)
 
+    if _candidate_snapshot(candidate_root) != candidate_snapshot_sha256:
+        raise ValueError("candidate changed during trial")
     raw_observation = _bounded_bytes(worker_output, MAX_WORKER_OUTPUT_BYTES, "invalid candidate observation")
     try:
         worker = _WorkerObservation.model_validate_json(raw_observation)
     except (ValidationError, ValueError):
         raise ValueError("invalid candidate observation") from None
     observation = TrialObservation(**worker.model_dump(mode="python"), case_sha256=trial.case_sha256,
+                                   candidate_snapshot_sha256=candidate_snapshot_sha256,
                                    input_sha256=hashlib.sha256(raw_input).hexdigest(), mode=mode)
     _atomic_publish(output_path, _canonical_json_bytes(observation.model_dump(mode="json")), candidate_root=candidate_root)
     return observation
@@ -595,7 +716,7 @@ def _candidate_worker() -> int:
                 requests = list(db.scalars(select(LanguageRequestRecord).order_by(LanguageRequestRecord.request_id)))
                 turns = list(db.scalars(select(LanguageTurn).order_by(LanguageTurn.request_id)))
                 primary = db.get(Project, initial["project_id"])
-                return {
+                state = {
                     "primary": {"revision": primary.revision, "status": primary.status.value,
                                 "settings": configuration(primary)},
                     "projects": [{"id": row.id, "revision": row.revision, "status": row.status.value,
@@ -624,12 +745,12 @@ def _candidate_worker() -> int:
                         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
                         "created_at": row.created_at.isoformat()} for row in jobs],
                     "receipts": [{"request_id": row.request_id,
-                        "canonical_request_sha256": hashlib.sha256(row.canonical_request.encode("utf-8")).hexdigest(),
+                        "canonical_request": json.loads(row.canonical_request),
                         "operation_id": row.operation_id, "operation_version": row.operation_version,
                         "project_id": row.project_id, "base_revision": row.base_revision,
-                        "result_revision": row.result_revision, "resolved_arguments_sha256": _hash(row.resolved_arguments),
+                        "result_revision": row.result_revision, "resolved_arguments": row.resolved_arguments,
                         "generation_requested": row.generation_requested, "job_id": row.job_id,
-                        "result_ref_sha256": _hash(row.result_ref), "result_sha256": _hash(row.result_json),
+                        "result_ref": row.result_ref, "result": row.result_json,
                         "created_at": row.created_at.isoformat()} for row in receipts],
                     "artifacts": [{"id": row.id, "project_id": row.project_id, "job_id": row.job_id,
                         "revision": row.revision, "input_fingerprint": row.input_fingerprint,
@@ -648,13 +769,16 @@ def _candidate_worker() -> int:
                     "language_requests": [{"request_id": row.request_id, "input_fingerprint": row.input_fingerprint,
                         "core_request_id": row.core_request_id, "project_id": row.project_id,
                         "base_revision": row.base_revision, "status": row.status,
-                        "owner_token_sha256": _hash(row.owner_token), "lease_until": row.lease_until,
-                        "created_at": row.created_at, "request_sha256": _hash(row.request_json),
-                        "response_sha256": _hash(row.response_json)} for row in requests],
+                        "created_at": row.created_at, "request": row.request_json,
+                        "response": row.response_json} for row in requests],
                     "language_turns": [{"request_id": row.request_id, "parent_request_id": row.parent_request_id,
                         "relation": row.relation, "text_sha256": _hash(row.text),
                         "successor_request_id": row.successor_request_id} for row in turns],
                 }
+                normalized = _logical_state(state)
+                if not isinstance(normalized, dict):
+                    raise ValueError("logical state normalization failed")
+                return normalized
 
         def redact_state(value: dict[str, Any]) -> dict[str, Any]:
             primary = value["primary"]
@@ -676,13 +800,14 @@ def _candidate_worker() -> int:
                 mode = "stateful" if os.environ["D36_MODE"] == "stateful" else "semantic"
             status = response.get("status", "http_error" if status_code >= 400 else "error")
             reason = failure.get("reason_code") if isinstance(failure, dict) else None
-            public = {"status": status, "mode": mode, "executed": bool(response.get("executed")),
+            public = {"http_status": status_code, "status": status, "mode": mode,
+                      "executed": bool(response.get("executed")),
                       "requires_confirmation": bool(response.get("requires_confirmation")),
                       "operation_id": operation.get("operation_id"), "reason_code": reason,
                       "project_id": response.get("project_id"), "base_revision": response.get("base_revision"),
                       "result_revision": (response.get("result") or {}).get("revision"),
                       "job_id": (response.get("generation_result") or response.get("result") or {}).get("job_id")}
-            return {**{key: public[key] for key in ("status", "mode", "executed", "requires_confirmation", "operation_id", "reason_code")},
+            return {**{key: public[key] for key in ("http_status", "status", "mode", "executed", "requires_confirmation", "operation_id", "reason_code")},
                     "response_sha256": _hash(public)}
 
         def request_payload(request: dict[str, Any], *, text: str | None = None,
@@ -710,14 +835,19 @@ def _candidate_worker() -> int:
                     ))
                 response_http = submitted[0]
                 response = response_http.json()
-                concurrent_response = submitted[1].json()
+                concurrent_http = submitted[1]
+                concurrent_response = concurrent_http.json()
             else:
                 response_http = client.post("/api/language/requests", json=payload)
                 response = response_http.json()
+                concurrent_http = None
                 concurrent_response = None
             after_submit = canonical_state()
+            confirmation_http: Any | None = None
             confirmation_response: dict[str, Any] | None = None
+            duplicate_confirmation_http: Any | None = None
             duplicate_confirmation: dict[str, Any] | None = None
+            replay_http: Any | None = None
             replay_response: dict[str, Any] | None = None
             replay_before, replay_after = after_submit, after_submit
             calls_before_event = calls
@@ -725,14 +855,16 @@ def _candidate_worker() -> int:
             if phase == "restart_replay":
                 previous = _WorkerObservation.model_validate_json(Path(os.environ["D36_PREVIOUS_OUTPUT"]).read_bytes())
                 replay_after = canonical_state()
+                replay_projection = RedactedResponse.model_validate(
+                    response_projection(response, response_http.status_code)
+                )
                 output = previous.model_copy(update={
                     "after": RedactedState.model_validate(redact_state(replay_after)),
                     "model_calls": previous.model_calls + calls,
                     "replay": ReplayObservation(attempted=True, model_calls=calls,
                         state_unchanged=previous.after.state_sha256 == _hash(replay_after),
-                        same_response=previous.response.response_sha256 == response_projection(
-                            response, response_http.status_code
-                        )["response_sha256"], failure_class=None),
+                        same_response=previous.response.response_sha256 == replay_projection.response_sha256,
+                        response=replay_projection, failure_class=None),
                 })
                 Path(os.environ["D36_WORKER_OUTPUT"]).write_bytes(_canonical_json_bytes(output.model_dump(mode="json")))
                 return 0
@@ -740,22 +872,28 @@ def _candidate_worker() -> int:
             kind = event["kind"]
             if kind in {"confirm_generation", "confirm_twice"} and response.get("confirmation_token"):
                 permission = {"confirmation_token": response["confirmation_token"], "confirm_generation": True}
-                confirmed_http = client.post(f"/api/language/requests/{request['request_id']}/execute", json=permission)
-                confirmation_response = confirmed_http.json()
+                confirmation_http = client.post(f"/api/language/requests/{request['request_id']}/execute", json=permission)
+                confirmation_response = confirmation_http.json()
                 if kind == "confirm_twice":
-                    duplicate_confirmation = client.post(f"/api/language/requests/{request['request_id']}/execute", json=permission).json()
+                    duplicate_confirmation_http = client.post(
+                        f"/api/language/requests/{request['request_id']}/execute", json=permission
+                    )
+                    duplicate_confirmation = duplicate_confirmation_http.json()
             elif kind == "resend_identical":
                 replay_before = canonical_state()
-                replay_response = client.post("/api/language/requests", json=payload).json()
+                replay_http = client.post("/api/language/requests", json=payload)
+                replay_response = replay_http.json()
                 replay_after = canonical_state()
             elif kind == "same_id_different_body":
                 replacement = request_payload(request, text=event["replacement_text"],
                     target=event.get("replacement_target_project_id", request["target_project_id"]))
                 replay_before = canonical_state()
-                replay_response = client.post("/api/language/requests", json=replacement).json()
+                replay_http = client.post("/api/language/requests", json=replacement)
+                replay_response = replay_http.json()
                 replay_after = canonical_state()
             elif kind == "concurrent_identical":
                 replay_before = before
+                replay_http = concurrent_http
                 replay_response = concurrent_response
                 replay_after = after_submit
             elif kind == "switch_target":
@@ -763,7 +901,8 @@ def _candidate_worker() -> int:
                     text=event["replacement_text"], target=event["replacement_target_project_id"])
                 switched["target"]["selected_project_id"] = event["selected_project_id_after"]
                 replay_before = canonical_state()
-                replay_response = client.post("/api/language/requests", json=switched).json()
+                replay_http = client.post("/api/language/requests", json=switched)
+                replay_response = replay_http.json()
                 replay_after = canonical_state()
 
             after = canonical_state()
@@ -772,7 +911,18 @@ def _candidate_worker() -> int:
             cancel_before = [(item["id"], item["cancel_requested"]) for item in before["jobs"]]
             cancel_after = [(item["id"], item["cancel_requested"]) for item in after["jobs"]]
             redacted_response = response_projection(response, response_http.status_code)
-            replay_projection = response_projection(replay_response, 200) if replay_response is not None else None
+            replay_projection = (
+                response_projection(replay_response, replay_http.status_code)
+                if replay_response is not None and replay_http is not None else None
+            )
+            confirmation_projection = (
+                response_projection(confirmation_response, confirmation_http.status_code)
+                if confirmation_response is not None and confirmation_http is not None else None
+            )
+            duplicate_confirmation_projection = (
+                response_projection(duplicate_confirmation, duplicate_confirmation_http.status_code)
+                if duplicate_confirmation is not None and duplicate_confirmation_http is not None else None
+            )
             output = {
                 "schema_version": 1, "response": redacted_response,
                 "before": redact_state(before), "after": redact_state(after),
@@ -783,15 +933,18 @@ def _candidate_worker() -> int:
                     "external_calls": collection_changes["external_calls"], "history": collection_changes["history"],
                     "language_records": int(collection_changes["language_requests"] or collection_changes["language_turns"])},
                 "model_calls": calls, "failure_class": None,
-                "replay": {"attempted": replay_response is not None, "model_calls": calls - calls_before_event,
+                "replay": {"attempted": replay_projection is not None, "model_calls": calls - calls_before_event,
                     "state_unchanged": replay_before == replay_after,
                     "same_response": replay_projection is not None and redacted_response["response_sha256"] == replay_projection["response_sha256"],
-                    "failure_class": None},
-                "confirmation": {"attempted": confirmation_response is not None,
-                    "duplicate_attempted": duplicate_confirmation is not None,
-                    "state_sha256": _hash(after) if confirmation_response is not None else None,
-                    "duplicate_same_response": (_hash(response_projection(confirmation_response, 200)) ==
-                        _hash(response_projection(duplicate_confirmation, 200))) if duplicate_confirmation is not None else None,
+                    "response": replay_projection, "failure_class": None},
+                "confirmation": {"attempted": confirmation_projection is not None,
+                    "duplicate_attempted": duplicate_confirmation_projection is not None,
+                    "state_sha256": _hash(after) if confirmation_projection is not None else None,
+                    "duplicate_same_response": (
+                        confirmation_projection["response_sha256"] == duplicate_confirmation_projection["response_sha256"]
+                    ) if duplicate_confirmation_projection is not None and confirmation_projection is not None else None,
+                    "response": confirmation_projection,
+                    "duplicate_response": duplicate_confirmation_projection,
                     "failure_class": None},
             }
             Path(os.environ["D36_WORKER_OUTPUT"]).write_bytes(_canonical_json_bytes(output))

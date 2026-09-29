@@ -207,10 +207,15 @@ restart replay, same-ID conflict, concurrent identity, external revision race,
 payloads. Fresh external state can include bounded projects, settings history, jobs
 with derived candidate snapshots/fingerprints, artifacts, receipts, external calls,
 and dialogue turns. Canonical sorted full-content hashes detect same-count and
-in-place mutation. Public observations contain only strict enums, fixed failure/reason
-classes, counts/flags, and deterministic redacted hashes; timing and private/model
-prose are excluded. Candidate/backend/storage/output boundaries reject symlink and
-reparse paths, use exclusive fsynced atomic files, and monitor file-redirected
+in-place mutation. Logical-state hashes exclude timestamps, leases, owner tokens, and
+runtime durations, and normalize generated core-request and confirmation identifiers
+while preserving their equality relationships. Public observations contain only strict
+enums, actual per-event HTTP/status/reason projections, fixed failure classes,
+counts/flags, deterministic redacted hashes, and the pre/post-equal candidate snapshot
+hash; timing and private/model prose are excluded. Candidate workers run with both
+`-B` and `PYTHONDONTWRITEBYTECODE=1`. Candidate/backend/storage/output boundaries
+reject symlink and reparse paths, use exclusive fsynced temporary files, publish the
+final output with an atomic no-replace hard link, and monitor file-redirected
 subprocess output with a 2 MiB kill limit. Mode rules remain exact (`stateful`
 requires an index and `all_tools` rejects one). No future D36 tooling hash is known
 or recorded by Task 1.
