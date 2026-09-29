@@ -1443,6 +1443,55 @@ def test_revision_race_exact_next_revision_executes_real_worker(tmp_path: Path) 
     assert observation.failure_class is None
 
 
+def test_real_worker_preserves_null_and_explicit_artifact_pointers(tmp_path: Path) -> None:
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
+    _ModelHandler.proposal = {"kind": "no_operation", "reason": "変更しません"}
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    project_hashes: dict[str, str] = {}
+    try:
+        for name, artifact, current_artifact_id in (
+            ("without-artifacts", None, None),
+            ("artifacts-null", 10, None),
+            ("artifacts-explicit", 10, 10),
+        ):
+            case = _case()
+            case["initial"]["artifact_revisions"] = []
+            case["initial"]["current_artifact_id"] = current_artifact_id
+            if artifact is not None:
+                case["initial"]["artifacts"] = [{
+                    "id": artifact,
+                    "project_id": 101,
+                    "job_id": None,
+                    "revision": 5,
+                    "file_content_hex": "78",
+                    "file_size": 1,
+                    "file_sha256": hashlib.sha256(b"x").hexdigest(),
+                }]
+            case["case_sha256"] = canonical_case_sha256(case)
+            input_path = tmp_path / f"{name}.json"
+            input_path.write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+            observation = run_trial_host(
+                candidate_root=Path(__file__).parents[2],
+                mode="all_tools",
+                input_path=input_path,
+                output_path=tmp_path / f"{name}-output.json",
+                storage=tmp_path / f"{name}-storage",
+                model="d36-test-model",
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            )
+            project_hashes[name] = observation.before.projects_sha256
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert project_hashes["artifacts-null"] == project_hashes["without-artifacts"]
+    assert project_hashes["artifacts-explicit"] != project_hashes["artifacts-null"]
+
+
 def test_real_worker_seeds_complete_allowed_initial_state(tmp_path: Path) -> None:
     _ModelHandler.delay_seconds = 0
     _ModelHandler.calls = 0

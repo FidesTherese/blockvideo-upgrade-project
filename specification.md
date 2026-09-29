@@ -217,8 +217,10 @@ while accepting every valid seed and up to four event/model effects: projects 17
 history 36, jobs 36, artifacts 68 (32 explicit plus 32 revision-derived plus four),
 receipts 36, external calls 36, language requests 12, and language turns 12. Derived artifact IDs must remain within the database integer range. The host validates
 the complete seed graph before worker launch: every project, revision, history restore,
-job parent, artifact/job, receipt/job, external call, current artifact, prior-turn link,
-and continuation target must exist and retain one project owner; parent and dialogue
+job parent, artifact/job, receipt/job, external call, explicit current artifact, prior-turn link,
+and continuation target must exist and retain one project owner. Artifact presence never implies a
+current artifact: a null or omitted `current_artifact_id` remains null, and the worker sets project
+current/output pointers only for an explicit non-null, validated same-project artifact. Parent and dialogue
 graphs must be acyclic, dialogue links reciprocal, database-unique identities distinct,
 and receipt hashes reproducible. A revision-race event must use exactly the primary
 project's next revision, which must remain in bounds and must not collide with a seeded

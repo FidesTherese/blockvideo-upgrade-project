@@ -635,7 +635,8 @@ def _candidate_worker(model_call_budget: int) -> int:
 
         def seed() -> None:
             primary = {"project_id": initial["project_id"], "revision": initial["revision"],
-                       "settings": initial["settings"], "project_status": initial["project_status"]}
+                       "settings": initial["settings"], "project_status": initial["project_status"],
+                       "current_artifact_id": initial.get("current_artifact_id")}
             with get_session_factory()() as db:
                 projects = [make_project(primary, primary=True), *(make_project(item) for item in initial.get("additional_projects", []))]
                 db.add_all(projects)
@@ -683,9 +684,6 @@ def _candidate_worker(model_call_budget: int) -> int:
                 for project_input in project_inputs:
                     project = project_map[project_input["project_id"]]
                     current_id = project_input.get("current_artifact_id")
-                    if current_id is None and project.id == initial["project_id"]:
-                        owned_artifacts = [item for item in artifacts if item["project_id"] == project.id]
-                        current_id = owned_artifacts[-1]["id"] if owned_artifacts else None
                     if current_id is not None:
                         current = artifact_map[current_id]
                         project.current_artifact_id = current_id

@@ -979,9 +979,11 @@ is absent from that project's seeded settings history, and equals the exact next
 that the worker persists. Explicit and revision-derived artifact IDs are checked as one
 set. Receipt request/result hashes must equal the exact values reconstructed by the
 worker. `current_artifact_id`, `parent_request_id`, and `successor_request_id` are
-optional for compatibility; when supplied they are seeded exactly, while omitted
-prior-turn links retain the deterministic list-order chain and an omitted primary
-current artifact retains the last-owned-artifact rule. The worker derives complete
+optional for compatibility. An explicit non-null `current_artifact_id` is validated
+against the complete artifact graph and seeded exactly; only that value sets the
+project's `current_artifact_id` and output video path. A null or omitted pointer remains
+null even when the project owns artifacts. Omitted prior-turn links retain the
+deterministic list-order chain. The worker derives complete
 generation snapshots and fingerprints with candidate
 `capture_inputs`/`fingerprint_inputs` and creates synthetic artifact bytes whose
 size/hash must match the wire identity. No label model or D24 contract is imported. Before and after each event, the worker canonicalizes sorted

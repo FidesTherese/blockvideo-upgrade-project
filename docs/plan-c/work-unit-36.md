@@ -46,5 +46,7 @@ candidate invocation. This includes out-of-range or future artifact revisions, u
 project/job/artifact/history/receipt/call/prior-turn/parent/successor references,
 cross-project ownership, cyclic job or dialogue ancestry, non-reciprocal dialogue
 links, duplicate database-unique identities, receipt identity mismatch, current-artifact
-ownership mismatch, and derived artifact IDs above the database integer range. A
-maximum-count graph-valid case MUST seed through the real worker.
+ownership mismatch, and derived artifact IDs above the database integer range. Artifact
+presence MUST NOT infer a current artifact: null or omitted `current_artifact_id` remains
+null, and current/output pointers are set only for an explicit validated same-project
+artifact. A maximum-count graph-valid case MUST seed through the real worker.
