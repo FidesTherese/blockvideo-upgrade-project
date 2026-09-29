@@ -9,9 +9,13 @@ SQLite migration, and recovery UI. Validation uses deterministic tests first, th
 bounded local-model, browser, and real-FFmpeg journeys where relevant; user data is
 never used for destructive tests.
 
-The clean D35 delivery commit is the release candidate. D36 and all later tools are
-external post-candidate tooling: D36 pins that D35 parent through a strict canonical
-candidate control plus detached expected hash and freezes an isolated checkout. D37
+The clean D35 delivery commit `522775516c0797abdb313e3432339a3a444b7ae2`
+is the release candidate. Its canonical external candidate control is
+`../blockvideo-d36-control/d35-candidate.json`; the separately communicated SHA-256
+is `dda5f8b5e1ca95ca0b709122d1fa2826ba647e05d720d829b9e06b4b3f88e833`.
+D36 and all later tools are external post-candidate tooling: D36 pins that D35 parent
+through the strict canonical candidate control plus detached expected hash and freezes
+an isolated checkout. D37
 supplies a separately attested blinded runner whose held-out corpus remains mounted
 outside and unread by the implementation process; it creates one immutable canonical
 run protocol and one shared full result schema. Public evaluation evidence uses only
@@ -193,6 +197,14 @@ declared category with zero included tokens in either mode as Not ready, even if
 incorrectly accepted it. Conditional readiness additionally requires candidate-bound,
 content-hashed, artifact-approved non-safety limitation evidence; free-text or safety
 limitations cannot qualify.
+
+D36 Task 1 defines only external protocol, unlabeled-contract, and candidate-host
+tooling. The host validates one recursively strict, label-free case before launching
+a subprocess with the candidate backend as its working directory and import root;
+candidate modules never import D36 tooling. Case storage is fresh and external, mode
+rules are exact (`stateful` requires an index and `all_tools` rejects one), and the
+published observation is canonical and redacted. No future D36 tooling hash is known
+or recorded by Task 1.
 
 D36 derives `FreezeManifest.created_at` solely from the frozen candidate commit's
 integer committer timestamp normalized to UTC, so identical inputs produce

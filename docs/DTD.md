@@ -851,9 +851,13 @@ real-browser evidence at 390x844 and 1440x900 against synthetic API state.
 ### D36 frozen D35 candidate and external trial boundary
 
 The candidate is exactly the clean `[DONE] Mission 35 Add recovery-oriented
-operational UI` commit. D36 tooling is committed later and freezes an isolated,
-detached checkout of that D35 parent. Before any D36 output, the operator supplies a
-canonical `CandidateControl` plus its expected SHA-256 through a separate channel:
+operational UI` commit `522775516c0797abdb313e3432339a3a444b7ae2`. Its canonical
+external control is `../blockvideo-d36-control/d35-candidate.json`, whose separately
+communicated SHA-256 is
+`dda5f8b5e1ca95ca0b709122d1fa2826ba647e05d720d829b9e06b4b3f88e833`.
+D36 tooling is committed later and freezes an isolated, detached checkout of that D35
+parent. Before any D36 output, the operator supplies that canonical
+`CandidateControl` plus its expected SHA-256 through the separate channel:
 
 ```python
 class CandidateControl(BaseModel):
@@ -924,11 +928,21 @@ through, or expose D24's label-bearing `Case`; no field graph may contain `expec
 accepted operations/answers, scoring labels, review state, or generic extras. D37
 projects each approved `Case` through an explicit allowlist before serialization.
 The host rejects label/review/scoring fields, multiple cases, wrong mode/index
-combinations, or non-empty output before candidate invocation. It executes D35
-public/application interfaces only through a candidate-rooted subprocess; all case
-storage and observations remain external. Its redacted observation contains effects,
-call/failure classes, replay/confirmation observations, and hashes, never request
-text, model bodies, labels, expected values, or private paths.
+combinations, or non-empty output before candidate invocation. It serializes only the
+validated allowlisted wire fields into fresh external case storage, then launches an
+external worker subprocess with the D35 candidate's `backend/` directory as both
+working directory and Python import root. The worker imports only committed D35
+application modules; the candidate never imports D36 tooling and neither checkout is
+mutated. `stateful` requires one index path and `all_tools` rejects an index. The
+subprocess receives only explicit non-secret runtime settings, executes the ordinary
+D30 language/application path, and returns one bounded internal observation for host
+validation. The host atomically publishes a canonical redacted observation containing
+persisted-state/effect hashes and bounded state summaries, model-call count, fixed
+failure classes, replay/confirmation observations, and SHA-256 identities. It never
+publishes request text, model bodies, labels, expected values, source text, or private
+paths. Each invocation requires fresh storage and refuses a pre-existing non-empty
+storage directory or output file. Task 1 records no future freezer or trial-tool
+attestation hash because those bytes do not yet exist.
 
 ### D37 canonical protocol artifact and shared full result bundle
 
