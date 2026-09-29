@@ -169,6 +169,19 @@ def _tree_snapshot(root: Path) -> dict[str, str]:
     return result
 
 
+def _rewrite_completion_marker(publication: Path) -> None:
+    files = []
+    for name in ("d36-tool-attestation.json", "freeze-manifest.json"):
+        raw = (publication / name).read_bytes()
+        files.append(
+            {"path": name, "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
+        )
+    marker = {"files": files, "schema_version": 1}
+    (publication / ".d36-publication-complete").write_bytes(
+        _canonical_bytes(marker) + b"\n"
+    )
+
+
 def test_freezer_module_is_available() -> None:
     freeze, fingerprints, attestation = _freeze_api()
     assert callable(freeze.freeze_candidate)
@@ -932,9 +945,20 @@ def test_completed_publication_retains_validated_completion_marker(tmp_path: Pat
         "d36-tool-attestation.json",
         "freeze-manifest.json",
     }
-    assert (
-        publication / freeze._COMPLETED_MARKER_NAME
-    ).read_bytes() == freeze._COMPLETED_MARKER_BYTES
+    marker_raw = (publication / freeze._COMPLETED_MARKER_NAME).read_bytes()
+    marker = json.loads(marker_raw)
+    assert marker_raw == _canonical_bytes(marker) + b"\n"
+    assert marker == {
+        "files": [
+            {
+                "path": name,
+                "sha256": hashlib.sha256((publication / name).read_bytes()).hexdigest(),
+                "size": (publication / name).stat().st_size,
+            }
+            for name in ("d36-tool-attestation.json", "freeze-manifest.json")
+        ],
+        "schema_version": 1,
+    }
     assert not (publication / freeze._CLAIM_TOKEN_NAME).exists()
 
 
@@ -952,7 +976,7 @@ def test_frozen_candidate_reader_requires_exact_valid_completion_marker(
     if condition == "missing":
         marker.unlink()
     elif condition == "tampered":
-        marker.write_bytes(b"D" + marker.read_bytes()[1:])
+        marker.write_bytes(b"{" + marker.read_bytes()[1:-2] + b"X\n")
     elif condition == "claim":
         marker.rename(publication / freeze._CLAIM_TOKEN_NAME)
     elif condition == "extra":
@@ -962,11 +986,58 @@ def test_frozen_candidate_reader_requires_exact_valid_completion_marker(
 
         def replace_marker(path: Path, *, maximum: int, label: str) -> bytes:
             if label == "tool attestation":
+                saved = marker.read_bytes()
                 marker.unlink()
-                marker.write_bytes(freeze._COMPLETED_MARKER_BYTES)
+                marker.write_bytes(saved)
             return original_read(path, maximum=maximum, label=label)
 
         monkeypatch.setattr(freeze, "_read_regular_once", replace_marker)
+
+    with pytest.raises(ValueError, match="completed publication"):
+        freeze.read_frozen_candidate(publication)
+
+
+@pytest.mark.parametrize(
+    "tampering",
+    [
+        "file_fingerprint",
+        "aggregate_suffix",
+        "candidate_id",
+        "duplicate_file_path",
+        "unsorted_file_paths",
+        "canonical_manifest_bytes",
+    ],
+)
+def test_frozen_candidate_reader_rejects_content_address_tampering(
+    tmp_path: Path, tampering: str
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    manifest = _freeze(tmp_path, candidate, commit)
+    freeze, _, _ = _freeze_api()
+    publication = tmp_path / "output" / manifest.candidate_id
+    manifest_path = publication / "freeze-manifest.json"
+    payload = json.loads(manifest_path.read_bytes())
+
+    if tampering == "file_fingerprint":
+        payload["files"][0]["sha256"] = "f" * 64
+    elif tampering == "aggregate_suffix":
+        suffix = "0" if payload["aggregate_sha256"][-1] != "0" else "1"
+        payload["aggregate_sha256"] = payload["aggregate_sha256"][:-1] + suffix
+    elif tampering == "candidate_id":
+        payload["candidate_id"] = f"{'f' * 16}-{'e' * 12}"
+        publication.rename(publication.with_name(payload["candidate_id"]))
+        publication = publication.with_name(payload["candidate_id"])
+        manifest_path = publication / "freeze-manifest.json"
+    elif tampering == "duplicate_file_path":
+        payload["files"][1]["path"] = payload["files"][0]["path"]
+    elif tampering == "unsorted_file_paths":
+        payload["files"] = list(reversed(payload["files"]))
+    else:
+        payload["created_at"] = "2023-11-14T22:13:21Z"
+
+    manifest_path.write_bytes(_canonical_bytes(payload) + b"\n")
+    if tampering != "canonical_manifest_bytes":
+        _rewrite_completion_marker(publication)
 
     with pytest.raises(ValueError, match="completed publication"):
         freeze.read_frozen_candidate(publication)

@@ -39,11 +39,13 @@ change unnoticed.
   MUST touch nothing, including an empty replacement. Any post-claim failure MUST leave
   the claim token/final path for operator cleanup and retry MUST fail on the existing
   destination. After validating both artifacts, exclusively create, fsync, and read
-  back a retained `.d36-publication-complete` marker containing exactly
-  `d36-publication-complete-v1\n`, then retire the claim marker. Readers MUST accept
-  only the exact canonical manifest/attestation pair plus that exact completion marker,
-  with no claim marker or extra entry. Require exact canonical artifact bytes, fsyncs,
-  and a recomputed tool-attestation aggregate.
+  back a retained canonical `.d36-publication-complete` record containing the exact
+  byte size and SHA-256 of `freeze-manifest.json` and `d36-tool-attestation.json`, then
+  retire the claim marker. Readers MUST accept only the exact canonical artifact pair
+  plus that exact completion record, with no claim marker or extra entry. Require exact
+  canonical artifact bytes, fsyncs, a recomputed tool-attestation aggregate, an exact
+  recomputed manifest file aggregate, and the candidate ID derived from that aggregate
+  prefix plus commit prefix.
 
 ## Non-goals
 

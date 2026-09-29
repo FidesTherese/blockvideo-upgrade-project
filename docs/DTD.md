@@ -884,6 +884,10 @@ class FreezeManifest(BaseModel):
     mode_configuration: dict[str, object]
     files: list[FileFingerprint]
     aggregate_sha256: str
+
+class CompletionMarker(BaseModel):
+    schema_version: Literal[1]
+    files: list[FileFingerprint]  # exact sorted canonical artifact fingerprints
 ```
 
 `evaluation/release_candidate/freeze.py` reads bounded control bytes once, validates
@@ -952,10 +956,13 @@ exclusive-create copy only where hard links are unsupported, fsyncs the claimed
 directory and parent, and never renames a directory over a destination. Each successfully
 created staging file, published hard link, fallback copy, and claim token records its own
 `lstat` device/inode identity. After successful artifact readback and final ownership
-validation, it exclusively creates and fsyncs `.d36-publication-complete` with the exact
-ASCII bytes `d36-publication-complete-v1\n`, reads back those bounded regular-file bytes,
-revalidates ownership, and only then retires the identity-matching claim token. The
-successful directory contains exactly the completion marker plus the two artifacts.
+validation, it exclusively creates and fsyncs `.d36-publication-complete` as canonical
+newline-terminated JSON. The strict version-1 record contains exactly two sorted
+`FileFingerprint` entries, for `d36-tool-attestation.json` and `freeze-manifest.json`,
+whose sizes and SHA-256 values cover the exact canonical newline-terminated artifact
+bytes. The freezer reads back those bounded regular-file bytes, revalidates ownership,
+and only then retires the identity-matching claim token. The successful directory
+contains exactly the completion record plus the two artifacts.
 
 Failure cleanup never calls directory rename, recursive deletion, or final-directory
 removal. It first proves the original final-directory identity, resolved parent, exact
@@ -969,11 +976,16 @@ claim token as an incomplete, non-evidentiary claim requiring operator cleanup; 
 completion marker created during an interrupted final transition does not override that
 claim. A retry therefore fails the exclusive destination claim.
 `read_frozen_candidate()` and every downstream reader MUST require exactly
-`freeze-manifest.json`, `d36-tool-attestation.json`, and the regular completion marker;
-require its exact bytes; reject `.d36-publication-claim` and every extra entry; parse
-bounded artifact bytes through strict models; require canonical bytes and a directory
-name equal to `candidate_id`; and recompute the tool-attestation aggregate. The reader
-rechecks the exact entry set and completion-marker bytes after reading both artifacts.
+`freeze-manifest.json`, `d36-tool-attestation.json`, and the regular completion record;
+require canonical completion-record bytes and the exact two-file fingerprint list;
+reject `.d36-publication-claim` and every extra entry; parse bounded artifact bytes
+through strict models; reject duplicate or unsorted manifest paths; recompute
+`aggregate_fingerprints(manifest.files)` and require exact `aggregate_sha256` equality;
+derive `candidate_id` exactly as the aggregate's first 16 hex characters, a hyphen, and
+the commit's first 12 hex characters; and recompute the tool-attestation aggregate. The
+completion record's size/hash pairs must equal the exact canonical artifact bytes. The
+reader captures all three file identities, rereads all bytes, and rechecks identities
+and the exact entry set before returning.
 
 `evaluation/final_protocol.json` is the canonical D36 policy template only. The
 external `evaluation_trial_host` accepts exactly one strict independent wire object:

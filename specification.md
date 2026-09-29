@@ -269,15 +269,19 @@ immediately records its non-reparse/non-symlink `lstat` device/inode identity an
 resolved parent, and exclusively creates and fsyncs a random claim-token file. Every
 artifact publication and bounded no-follow readback revalidates that identity and exact
 token before and after the operation. After successful artifact validation, the freezer
-exclusively creates, fsyncs, and reads back `.d36-publication-complete` with the exact
-bytes `d36-publication-complete-v1\n`, then retires the claim token. Failure cleanup
-never renames, removes, or recursively deletes the claimed final directory. It proceeds
+exclusively creates, fsyncs, and reads back a canonical `.d36-publication-complete`
+record containing the exact byte size and SHA-256 of both canonical artifacts, then
+retires the claim token. Failure cleanup never renames, removes, or recursively deletes
+the claimed final directory. It proceeds
 only while directory and token ownership remain valid and unlinks only recorded staging
 or published files whose individual device/inode identities still match. Ownership loss
 touches nothing. Every failed post-claim publication leaves the claim marker and final
 path for operator cleanup; retries fail because that destination exists. Readers accept
 only the exact canonical manifest/attestation pair plus the exact completion marker,
-with no claim marker or extra entry, so an incomplete claim is never evidence. Verified
+with no claim marker or extra entry, so an incomplete claim is never evidence. The
+reader recomputes the manifest file aggregate, requires exact aggregate equality,
+derives the exact candidate ID from that aggregate and commit, and requires the
+completion record's hashes and sizes to match the stable canonical file bytes. Verified
 files retain no-replace semantics and required fsyncs.
 
 Any candidate-behavior change after D35 requires a new candidate and D36 freeze and

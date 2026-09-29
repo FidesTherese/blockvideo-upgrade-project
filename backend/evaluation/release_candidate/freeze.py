@@ -21,13 +21,19 @@ from pydantic import ValidationError
 from evaluation.release_candidate.contracts import (
     CANDIDATE_COMMIT_SUBJECT,
     CandidateControl,
+    CompletionMarker,
     FreezeManifest,
 )
 from evaluation.release_candidate.fingerprints import (
     aggregate_fingerprints,
     fingerprint_files,
 )
-from evaluation.tool_attestation import ToolAttestation, attest_tool, canonical_json_bytes
+from evaluation.tool_attestation import (
+    FileFingerprint,
+    ToolAttestation,
+    attest_tool,
+    canonical_json_bytes,
+)
 
 _MAX_CONTROL_BYTES = 4096
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -46,9 +52,9 @@ _TOOL_SOURCE_PATHS = (
 )
 _CLAIM_TOKEN_NAME = ".d36-publication-claim"
 _COMPLETED_MARKER_NAME = ".d36-publication-complete"
-_COMPLETED_MARKER_BYTES = b"d36-publication-complete-v1\n"
 _CLAIM_TOKEN_BYTES = 32
 _MAX_CLAIM_TOKEN_BYTES = 64
+_MAX_COMPLETED_MARKER_BYTES = 1024
 _MAX_FREEZE_MANIFEST_BYTES = 16 * 1024 * 1024
 _MAX_TOOL_ATTESTATION_BYTES = 1024 * 1024
 
@@ -502,7 +508,7 @@ def _read_owned(
         _assert_claim_owned(claim)
 
 
-def _finish_claim(claim: _PublicationClaim) -> None:
+def _finish_claim(claim: _PublicationClaim, completion_marker_bytes: bytes) -> None:
     _assert_claim_owned(claim)
     claimed_names = {
         _CLAIM_TOKEN_NAME,
@@ -519,15 +525,15 @@ def _finish_claim(claim: _PublicationClaim) -> None:
             raise _ownership_lost()
         completed_identity = _write_fsynced(
             claim.path / _COMPLETED_MARKER_NAME,
-            _COMPLETED_MARKER_BYTES,
+            completion_marker_bytes,
         )
         if (
             _read_regular_once(
                 completed_identity.path,
-                maximum=len(_COMPLETED_MARKER_BYTES),
+                maximum=len(completion_marker_bytes),
                 label="publication completion marker",
             )
-            != _COMPLETED_MARKER_BYTES
+            != completion_marker_bytes
             or not _file_identity_matches(completed_identity)
         ):
             raise _ownership_lost()
@@ -575,6 +581,29 @@ def _verify_canonical_attestation(raw: bytes, expected: ToolAttestation) -> None
         raise ValueError("published tool attestation aggregate mismatch")
 
 
+def _completion_marker(manifest_raw: bytes, attestation_raw: bytes) -> CompletionMarker:
+    return CompletionMarker(
+        schema_version=1,
+        files=[
+            FileFingerprint(
+                path="d36-tool-attestation.json",
+                sha256=hashlib.sha256(attestation_raw).hexdigest(),
+                size=len(attestation_raw),
+            ),
+            FileFingerprint(
+                path="freeze-manifest.json",
+                sha256=hashlib.sha256(manifest_raw).hexdigest(),
+                size=len(manifest_raw),
+            ),
+        ],
+    )
+
+
+def _completion_marker_bytes(manifest_raw: bytes, attestation_raw: bytes) -> bytes:
+    marker = _completion_marker(manifest_raw, attestation_raw)
+    return canonical_json_bytes(marker.model_dump(mode="json")) + b"\n"
+
+
 def read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestation]:
     expected_names = {
         _COMPLETED_MARKER_NAME,
@@ -587,12 +616,15 @@ def read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestat
         if {entry.name for entry in os.scandir(publication)} != expected_names:
             raise ValueError("completed publication entries are invalid")
         marker_identity = _file_identity(publication / _COMPLETED_MARKER_NAME)
-        marker = _read_regular_once(
+        manifest_identity = _file_identity(publication / "freeze-manifest.json")
+        attestation_identity = _file_identity(publication / "d36-tool-attestation.json")
+        marker_raw = _read_regular_once(
             publication / _COMPLETED_MARKER_NAME,
-            maximum=len(_COMPLETED_MARKER_BYTES),
+            maximum=_MAX_COMPLETED_MARKER_BYTES,
             label="publication completion marker",
         )
-        if marker != _COMPLETED_MARKER_BYTES:
+        marker = CompletionMarker.model_validate_json(marker_raw, strict=True)
+        if marker_raw != canonical_json_bytes(marker.model_dump(mode="json")) + b"\n":
             raise ValueError("publication completion marker is invalid")
         manifest_raw = _read_regular_once(
             publication / "freeze-manifest.json",
@@ -600,12 +632,16 @@ def read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestat
             label="freeze manifest",
         )
         manifest = FreezeManifest.model_validate_json(manifest_raw, strict=True)
+        manifest_aggregate = aggregate_fingerprints(manifest.files)
+        expected_candidate_id = f"{manifest_aggregate[:16]}-{manifest.git_commit[:12]}"
         if (
             manifest_raw
             != canonical_json_bytes(manifest.model_dump(mode="json")) + b"\n"
-            or publication.name != manifest.candidate_id
+            or manifest.aggregate_sha256 != manifest_aggregate
+            or manifest.candidate_id != expected_candidate_id
+            or publication.name != expected_candidate_id
         ):
-            raise ValueError("freeze manifest is not canonical")
+            raise ValueError("freeze manifest is not canonical or content-addressed")
         attestation_raw = _read_regular_once(
             publication / "d36-tool-attestation.json",
             maximum=_MAX_TOOL_ATTESTATION_BYTES,
@@ -613,6 +649,8 @@ def read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestat
         )
         attestation = ToolAttestation.model_validate_json(attestation_raw, strict=True)
         _verify_canonical_attestation(attestation_raw, attestation)
+        if marker != _completion_marker(manifest_raw, attestation_raw):
+            raise ValueError("publication completion marker does not bind artifacts")
         if (
             _directory_identity(publication) != publication_identity
             or {entry.name for entry in os.scandir(publication)} != expected_names
@@ -620,15 +658,31 @@ def read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestat
             raise ValueError("completed publication entries changed")
         if (
             not _file_identity_matches(marker_identity)
+            or not _file_identity_matches(manifest_identity)
+            or not _file_identity_matches(attestation_identity)
             or _read_regular_once(
                 publication / _COMPLETED_MARKER_NAME,
-                maximum=len(_COMPLETED_MARKER_BYTES),
+                maximum=_MAX_COMPLETED_MARKER_BYTES,
                 label="publication completion marker",
             )
-            != marker
+            != marker_raw
+            or _read_regular_once(
+                publication / "freeze-manifest.json",
+                maximum=_MAX_FREEZE_MANIFEST_BYTES,
+                label="freeze manifest",
+            )
+            != manifest_raw
+            or _read_regular_once(
+                publication / "d36-tool-attestation.json",
+                maximum=_MAX_TOOL_ATTESTATION_BYTES,
+                label="tool attestation",
+            )
+            != attestation_raw
             or not _file_identity_matches(marker_identity)
+            or not _file_identity_matches(manifest_identity)
+            or not _file_identity_matches(attestation_identity)
         ):
-            raise ValueError("publication completion marker changed")
+            raise ValueError("completed publication artifacts changed")
         return manifest, attestation
     except (OSError, ValidationError, ValueError) as exc:
         raise ValueError("completed publication is invalid") from exc
@@ -672,6 +726,7 @@ def freeze_candidate(
     )
     manifest_bytes = canonical_json_bytes(manifest.model_dump(mode="json")) + b"\n"
     attestation_bytes = canonical_json_bytes(attestation.model_dump(mode="json")) + b"\n"
+    completion_marker_bytes = _completion_marker_bytes(manifest_bytes, attestation_bytes)
     root: Path | None = None
     created_root = False
     staging: list[_FileIdentity] = []
@@ -739,7 +794,7 @@ def freeze_candidate(
             label="tool attestation",
         )
         _verify_canonical_attestation(published_attestation, attestation)
-        _finish_claim(claimed)
+        _finish_claim(claimed, completion_marker_bytes)
         claimed = None
         return manifest
     finally:

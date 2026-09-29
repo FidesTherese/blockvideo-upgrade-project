@@ -20,6 +20,23 @@ class CandidateControl(BaseModel):
     git_tree_clean: Literal[True]
 
 
+class CompletionMarker(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1]
+    files: list[FileFingerprint]
+
+    @field_validator("files")
+    @classmethod
+    def validate_files(cls, value: list[FileFingerprint]) -> list[FileFingerprint]:
+        if [item.path for item in value] != [
+            "d36-tool-attestation.json",
+            "freeze-manifest.json",
+        ]:
+            raise ValueError("completion marker files must match the canonical artifacts")
+        return value
+
+
 class FreezeManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
