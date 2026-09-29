@@ -12,12 +12,18 @@ import pytest
 
 from app.core.startup_status import (
     StartupStatus,
+    StartupUnavailableError,
     get_startup_status,
     reset_startup_status_for_tests,
     set_startup_status,
 )
+from app.db import Base, get_db, get_session_factory, reset_db_for_tests
 from app.main import create_app
 from app.migrations import MigrationError, MigrationResult
+from app.migrations.backup import sha256_file
+from app.migrations.runner import restore_database_backup
+from app.models.project import Project
+from tests.fixtures.migrations.build_fixtures import build_fixture
 
 
 class RecordingLease:
@@ -89,10 +95,21 @@ def _patch_successful_lifecycle(
         events.append("dispatch")
         await asyncio.Event().wait()
 
+    def shutdown_db() -> None:
+        assert get_startup_status() == StartupStatus(
+            status="starting",
+            reason_code=None,
+            message="終了処理中です。",
+            schema_version=None,
+            backup_available=False,
+        )
+        events.append("shutdown_db")
+
     monkeypatch.setattr(main_module, "register_models", register_models)
     monkeypatch.setattr(main_module, "acquire_database_lease", acquire)
     monkeypatch.setattr(main_module, "migrate_database", migrate)
     monkeypatch.setattr(main_module, "init_db", init_db)
+    monkeypatch.setattr(main_module, "shutdown_db", shutdown_db)
     monkeypatch.setattr(main_module, "mark_interrupted_operation_jobs", recover)
     monkeypatch.setattr(main_module, "run_operation_dispatcher", dispatch)
     monkeypatch.setattr(main_module.operation_dispatcher, "job_registry", registry)
@@ -128,8 +145,15 @@ def test_lifespan_registers_leases_migrates_then_initializes_before_database_use
 
     asyncio.run(exercise())
 
-    assert events[-3:] == ["registry_close", "registry_shutdown", "release"]
+    assert events[-4:] == [
+        "registry_close",
+        "registry_shutdown",
+        "shutdown_db",
+        "release",
+    ]
     assert lease.release_count == 1
+    with pytest.raises(StartupUnavailableError):
+        next(get_db())
 
 
 @pytest.mark.parametrize(
@@ -167,6 +191,7 @@ def test_migration_failure_keeps_status_routes_readable_and_database_routes_fixe
 
     monkeypatch.setattr(main_module, "migrate_database", fail_migration)
     monkeypatch.setattr(main_module, "init_db", lambda: pytest.fail("init must not run"))
+    monkeypatch.setattr(main_module, "shutdown_db", lambda: events.append("shutdown_db"))
     monkeypatch.setattr(
         main_module,
         "mark_interrupted_operation_jobs",
@@ -198,7 +223,14 @@ def test_migration_failure_keeps_status_routes_readable_and_database_routes_fixe
         }
         assert lease.release_count == 0
 
-    assert events == ["register", "acquire", "migrate", "release"]
+    assert events == ["register", "acquire", "migrate", "shutdown_db", "release"]
+    assert get_startup_status() == StartupStatus(
+        status="starting",
+        reason_code=None,
+        message="終了処理中です。",
+        schema_version=None,
+        backup_available=False,
+    )
     assert lease.release_count == 1
 
 
@@ -219,7 +251,14 @@ def test_post_acquisition_startup_error_releases_lease_once(
         with TestClient(create_app()):
             pass
 
-    assert events == ["register", "acquire", "migrate", "init", "release"]
+    assert events == [
+        "register",
+        "acquire",
+        "migrate",
+        "init",
+        "shutdown_db",
+        "release",
+    ]
     assert lease.release_count == 1
 
 
@@ -238,7 +277,12 @@ def test_registry_shutdown_error_still_releases_lease_once(
         with TestClient(create_app()):
             pass
 
-    assert events[-3:] == ["registry_close", "registry_shutdown", "release"]
+    assert events[-4:] == [
+        "registry_close",
+        "registry_shutdown",
+        "shutdown_db",
+        "release",
+    ]
     assert lease.release_count == 1
 
 
@@ -275,6 +319,47 @@ def test_lease_acquisition_failure_aborts_without_database_users_or_release(
             pass
 
     assert events == ["register", "acquire"]
+
+
+def test_offline_restore_between_lifespans_reopens_restored_database_inode(
+    temp_storage: Path,
+) -> None:
+    database = temp_storage / "blockvideo.db"
+    reset_db_for_tests()
+    database.unlink(missing_ok=True)
+    build_fixture("d30_v0", database, Base.metadata)
+    application = create_app()
+
+    with TestClient(application):
+        with get_session_factory()() as db:
+            project = db.get(Project, 101)
+            assert project is not None
+            assert project.title == "fixture-project"
+            project.title = "state-from-replaced-inode"
+            db.commit()
+
+    with pytest.raises(StartupUnavailableError):
+        next(get_db())
+
+    backup = next(
+        path
+        for path in (database.parent / ".backups").iterdir()
+        if not path.name.endswith(".metadata.json")
+    )
+    backup_sha256 = sha256_file(backup)
+    restore_database_backup(
+        f"sqlite:///{database.as_posix()}",
+        backup,
+        backup_sha256,
+        Base.metadata,
+    )
+    assert sha256_file(database) == backup_sha256
+
+    with TestClient(application):
+        with get_session_factory()() as db:
+            project = db.get(Project, 101)
+            assert project is not None
+            assert project.title == "fixture-project"
 
 
 def _hold_application_lifespan(

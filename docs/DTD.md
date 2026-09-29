@@ -10,7 +10,7 @@
 - **Specification:** `specification.md`, `docs/plan-c/work-unit-31.md` through
   `docs/plan-c/work-unit-40.md`
 - **DTD:** `docs/DTD.md`
-- **Updated:** 2026-09-27
+- **Updated:** 2026-09-29
 - **Scope:** sequential hardening, blinded evaluation, and release-readiness decision
 - **Open decisions:** none for implementation. Held-out case content and independent
   evaluator identity remain intentionally outside the implementation process.
@@ -185,11 +185,13 @@ verification was not rerun in this documentation-only session:
   <https://www.sqlite.org/datatype3.html#determination_of_column_affinity>
 
 The backup connection is synchronous and owned/closed by the migration runner.
-The application lifespan owns the database lease from pre-migration startup until
-all database users stop at shutdown. Migration and application startup are
-single-threaded. Offline restore owns a separate lease for only its stopped-app
-operation. Existing async model/provider clients retain their present ownership and
-deadlines.
+The application lifespan owns the database lease and the cached SQLAlchemy engine,
+pool, and sessionmaker from pre-migration startup until all database users stop at
+shutdown. After dispatcher and registry drain, lifespan marks startup non-ready,
+disposes and clears the database caches, and only then releases the lease. Migration
+and application startup are single-threaded. Offline restore owns a separate lease
+for only its stopped-app operation. Existing async model/provider clients retain
+their present ownership and deadlines.
 
 ### Intended repository structure
 
@@ -684,16 +686,23 @@ identity, and references. It releases the lease in `finally`. If an application
 before reading the backup or opening/replacing the target. Reverse SQL is prohibited.
 
 `db.register_models()` is registration-only and `db.init_db()` is
-`Base.metadata.create_all()` only for a migration-approved/current database;
-reflective mutation moves to `migrations/schema.py`. Task 1 temporarily retains the
+`Base.metadata.create_all()` only for a migration-approved/current database.
+`db.shutdown_db() -> None` disposes the cached engine/pool and clears both engine and
+sessionmaker globals without calling metadata DDL. It is production lifecycle code,
+not a test reset, and runs while the application still owns the database lease.
+Reflective mutation moves to `migrations/schema.py`. Task 1 temporarily retains the
 deprecated `_add_missing_columns(engine)` solely so pre-D34 tests collect: it opens the
 engine's DBAPI connection and delegates to `apply_v0_to_v1(connection, Base.metadata)`.
 Neither `init_db()` nor startup calls it. Tasks 2/3 migrate those legacy tests to the
 runner and remove the wrapper. `main.lifespan()` wiring is intentionally Task 3, not a
 Task 1 acceptance condition. In Task 3 it registers models, acquires the lease, calls
 migration before `init_db()` and interrupted-job recovery, retains the lease while
-ready or degraded, stops dispatcher/database users at shutdown, and releases the
-lease as its final database-lifecycle action.
+ready or degraded, stops dispatcher/database users at shutdown, sets a bounded
+`starting` shutdown snapshot, calls `shutdown_db()`, and releases the lease as its
+final database-lifecycle action. This order also applies when migration degraded or a
+post-acquisition startup error aborts lifespan. `get_db()` therefore rejects between
+lifespans, and a later lifespan always creates a fresh pool after an offline restore
+has atomically replaced the SQLite file.
 
 #### Degraded startup contract
 
@@ -1400,6 +1409,10 @@ sequenceDiagram
         Main-->>DB: abort startup with database_lease_unavailable; no DB open/mutation
     end
     Note over Main,DB: An acquired lease remains held until database users stop at shutdown
+    Main->>Dispatcher: close admission, cancel dispatcher, drain registry
+    Main->>Status: starting (bounded shutdown message)
+    Main->>DB: dispose pool and clear engine/sessionmaker
+    Main->>Mig: release lease as final DB lifecycle action
 ```
 
 ```mermaid
@@ -1528,7 +1541,11 @@ independent review gates supply the recorded trust decisions.
   descriptor/path exact-payload checks and in-place tamper rejection; lease loss
   immediately before each backup publication with no retained partial;
   redirected/symlink/reparse/non-directory backup-root rejection before writes;
-  graceful release/reacquisition; stale-lease refusal; and successful stopped-app restore.
+  graceful release/reacquisition; stale-lease refusal; successful stopped-app restore;
+  non-ready `get_db()` rejection between lifespans; pool disposal before lease release
+  on ready and degraded shutdown; offline restore between lifespans followed by a
+  second lifespan reading restored bytes/state instead of the old pooled inode; and
+  repeated lifespan startup with a fresh pool.
 - **D35:** API contract tests and Vitest interactions for every code/action, stale
   refresh, duplicate click, keyboard focus, role/status text, and 390 px layout.
 - **D36:** strict canonical candidate control plus detached digest; exact D35
@@ -1633,8 +1650,9 @@ critical-table row counts and canonical PK identity digests; and validate every
 enumerated ownership/reference ID while preserving intentional receipt non-FKs and
 unknown extras. Move reflective schema mutation from `db.py`; acquire the lease before
 migration, require it for migration operations, retain it through ready/degraded
-lifespan, and release it after database users stop through an identity/token-validated
-atomic tombstone. Publish a canonical metadata sidecar only after temp backup
+lifespan, and after dispatcher/registry drain mark non-ready, dispose and clear the
+engine/sessionmaker without DDL, then release through an identity/token-validated
+atomic tombstone as the final database lifecycle action. Publish a canonical metadata sidecar only after temp backup
 integrity/identity/hash/fsync validation and verify both atomic publications. Make
 offline restore acquire the same lease non-blocking, require registered metadata and an
 exact target-bound backup under `.backups`, validate hash/schema/identity/references,

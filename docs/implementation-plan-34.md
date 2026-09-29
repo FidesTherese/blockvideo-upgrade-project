@@ -31,7 +31,9 @@
 - Startup lifecycle wiring is intentionally Task 3. At that point startup calls
   `register_models()` before touching the database, acquires the application-lifetime
   lease, then runs `migrate_database()` and `init_db()` under it before recovery/
-  dispatcher work, and releases it only after database users stop.
+  dispatcher work. After dispatcher and registry drain it marks startup non-ready,
+  calls production `shutdown_db()` to dispose/clear the engine pool and sessionmaker
+  without DDL, then releases the lease as the final database lifecycle action.
 - A degraded application retains the lease until shutdown. A second app process and offline restore fail immediately with `database_lease_unavailable`; they never wait, migrate, restore, or modify database bytes.
 - Stale lease files are never removed automatically. Operator removal is allowed only after confirming no application or restore process is live.
 - HTTP errors never expose raw database/backup/lease paths.
@@ -264,6 +266,7 @@ class StartupUnavailableError(RuntimeError):
 get_startup_status() -> StartupStatus
 set_startup_status(status: StartupStatus) -> None
 reset_startup_status_for_tests() -> None
+shutdown_db() -> None
 ```
 
 HTTP contracts:
@@ -273,17 +276,17 @@ HTTP contracts:
 
 - [ ] **Step 1: Write RED lifecycle/API tests**
 
-Assert lifespan sets `starting` and calls, in exact order, `register_models()`, `acquire_database_lease(database_url)`, `migrate_database(database_url, Base.metadata, lease=lease)`, and `init_db()` before reaching `ready`, recovery, or dispatcher startup. Assert migration receives metadata containing every registered model table and the exact live lease. Keep the lease held while ready or migration-degraded, stop dispatcher/database users before releasing it in lifespan `finally`, and release it exactly once at normal/degraded shutdown. A later post-acquisition startup exception that aborts lifespan releases it in `finally`; lease-acquisition failure aborts startup without migration/recovery/dispatcher calls or a release attempt. While one spawned app lifespan holds the lease, assert a second app startup fails immediately. On each migration `MigrationError`, assert `init_db()`, `mark_interrupted_operation_jobs()`, and `run_operation_dispatcher()` are not called. Assert startup/health remain readable during migration-degraded operation while `/api/projects` returns the fixed 503.
+Assert lifespan sets `starting` and calls, in exact order, `register_models()`, `acquire_database_lease(database_url)`, `migrate_database(database_url, Base.metadata, lease=lease)`, and `init_db()` before reaching `ready`, recovery, or dispatcher startup. Assert migration receives metadata containing every registered model table and the exact live lease. Keep the lease held while ready or migration-degraded, stop dispatcher/database users before releasing it in lifespan `finally`, and release it exactly once at normal/degraded shutdown. A later post-acquisition startup exception that aborts lifespan releases it in `finally`; lease-acquisition failure aborts startup without migration/recovery/dispatcher calls or a release attempt. After ready or degraded shutdown, assert status is `starting` with a bounded shutdown message, `get_db()` rejects, `shutdown_db()` runs after dispatcher/registry drain and before release, and no cached engine/sessionmaker survives the lease. Restore the verified backup between two real lifespans and prove the second lifespan reads restored bytes/state through a fresh pool rather than the replaced inode. While one spawned app lifespan holds the lease, assert a second app startup fails immediately. On each migration `MigrationError`, assert `init_db()`, `mark_interrupted_operation_jobs()`, and `run_operation_dispatcher()` are not called. Assert startup/health remain readable during migration-degraded operation while `/api/projects` returns the fixed 503.
 
 - [ ] **Step 2: Implement startup state and routing**
 
-Add `routes_startup.router`, map `StartupUnavailableError` in `create_app()`, and gate `get_db()` before session creation. Keep internal cause chaining in logs by exception class/reason only; expose no path.
+Add `routes_startup.router`, map `StartupUnavailableError` in `create_app()`, and gate `get_db()` before session creation. Add production `shutdown_db()` that disposes the cached engine and clears the engine/sessionmaker without DDL. In lifespan `finally`, drain dispatcher/registry, publish the non-ready shutdown snapshot, call `shutdown_db()`, and release the lease last; use the same order for degraded startup and post-acquisition failure. Keep internal cause chaining in logs by exception class/reason only; expose no path.
 
 - [ ] **Step 3: Run startup and migration regressions**
 
 ```bash
 cd backend
-python -m uv run pytest tests/test_d35_startup_recovery_api.py tests/test_d34_migrations.py tests/test_health.py tests/test_job_recovery.py -q
+python -m uv run pytest tests/test_d35_startup_recovery_api.py tests/test_d34_migrations.py tests/test_job_recovery.py tests/test_external_call_recovery.py tests/test_operation_dispatcher.py tests/test_d33_recovery_matrix.py -q
 python -m uv run ruff check app/core/startup_status.py app/api/routes_startup.py app/api/routes_health.py app/main.py app/db.py tests/test_d35_startup_recovery_api.py
 ```
 

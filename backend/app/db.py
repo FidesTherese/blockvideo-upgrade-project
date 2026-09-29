@@ -111,6 +111,22 @@ def init_db() -> None:
     Base.metadata.create_all(bind=get_engine())
 
 
+def shutdown_db() -> None:
+    """Dispose the application engine pool and clear cached database factories.
+
+    This production shutdown seam performs no schema mutation. The next
+    application lifespan constructs a new engine bound to the current database
+    file after acquiring its lease.
+    """
+    global _engine, _SessionLocal
+    try:
+        if _engine is not None:
+            _engine.dispose()
+    finally:
+        _engine = None
+        _SessionLocal = None
+
+
 def get_db() -> Iterator[Session]:
     """Yield one request-scoped session and close it after use.
 

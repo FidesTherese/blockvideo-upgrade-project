@@ -12,7 +12,10 @@ from historical BlockVideo databases.
 - Record and validate a schema version. Reject unknown newer schemas.
 - Acquire one non-blocking exclusive database lease before migration and hold it for
   the full application lifetime, including degraded startup, until database users
-  stop at shutdown.
+  stop at shutdown. The cached SQLAlchemy engine/pool and sessionmaker are scoped to
+  that lease: after dispatcher and registry drain, mark startup non-ready, dispose
+  and clear the caches without DDL, then release the lease as the final database
+  lifecycle action.
 - Create and verify a database backup before applying pending migrations. Hash,
   integrity-check, identity-check, and fsync temporary bytes before atomic publication;
   require a live-lease callback immediately before each backup/metadata replacement,
@@ -79,4 +82,6 @@ root is rejected before writes. In-place lock tampering fails assertion and rele
 Wrong-target, escaping, symlink, special, schema/identity/reference-incompatible restores fail before target mutation. Migration,
 live use, and restore are mutually excluded across processes; contention returns
 immediately, raced lease release preserves the other owner, and restore succeeds only
-after the application lease is released.
+after the application lease is released. Between lifespans `get_db()` rejects access;
+no cached connection survives lease release; and a second lifespan after offline
+restore reads restored state rather than the replaced pre-restore inode.

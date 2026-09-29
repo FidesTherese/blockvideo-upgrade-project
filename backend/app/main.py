@@ -36,7 +36,7 @@ from app.core.startup_status import (
     StartupUnavailableError,
     set_startup_status,
 )
-from app.db import Base, init_db, register_models
+from app.db import Base, init_db, register_models, shutdown_db
 from app.migrations import MigrationError, acquire_database_lease, migrate_database
 from app.services.transactions import WriteBusyError
 from app.services.job_records import ProjectBusyError, UnresolvedExternalWorkError
@@ -130,7 +130,19 @@ async def lifespan(app: FastAPI):
                 if registry_started:
                     await operation_dispatcher.job_registry.shutdown()
         finally:
-            lease.release()
+            set_startup_status(
+                StartupStatus(
+                    status="starting",
+                    reason_code=None,
+                    message="終了処理中です。",
+                    schema_version=None,
+                    backup_available=False,
+                )
+            )
+            try:
+                shutdown_db()
+            finally:
+                lease.release()
 
 
 def create_app() -> FastAPI:

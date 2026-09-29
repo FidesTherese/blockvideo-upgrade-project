@@ -63,8 +63,13 @@ modules. This proves the journal and import boundaries exercised by D31, not the
 absence of arbitrary future unjournaled network code.
 
 D34 acquires one non-blocking exclusive database lease before migration and holds it
-for the application lifetime through shutdown, including degraded startup. Migration
-runs only under that lease. Lease acquisition creates a missing database parent before
+for the application lifetime through shutdown, including degraded startup. The cached
+SQLAlchemy engine, pool, and sessionmaker belong to that lease lifetime: after
+registry/dispatcher drain, shutdown marks startup non-ready, disposes and clears those
+caches without DDL, then releases the lease as the final database lifecycle action.
+This same order applies to degraded startup and prevents requests or a later lifespan
+from reusing a connection to a replaced SQLite inode. Migration runs only under that
+lease. Lease acquisition creates a missing database parent before
 creating the sibling lock and retains the exact canonical token payload written at
 acquisition. Ownership checks and release both require the descriptor and current path
 to retain the acquired inode identity and exact payload bytes. Release atomically
