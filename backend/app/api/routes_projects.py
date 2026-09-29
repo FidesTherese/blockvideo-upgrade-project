@@ -49,7 +49,7 @@ from app.services.project_settings import apply_project_settings
 from app.services.transactions import begin_write
 from app.services.settings_history import record_settings, validate_settings
 from app.services.job_control import cancel_job
-from app.services.job_views import job_summary
+from app.services.job_views import RecoveryContext, build_recovery_contexts, job_summary
 from app.services.project_identity import allocate_project_id, reserve_project_id
 from app.services.artifact_store import artifact_file_path
 from app.services.job_records import create_pending_job
@@ -174,7 +174,7 @@ def _block_summary(block: Block) -> BlockSummary:
     )
 
 
-def _job_summary(job: GenerationJob) -> JobSummary:
+def _job_summary(job: GenerationJob, recovery_context: RecoveryContext | None) -> JobSummary:
     """Map a persisted job row to the public progress schema.
 
     Args:
@@ -184,7 +184,7 @@ def _job_summary(job: GenerationJob) -> JobSummary:
         ``JobSummary`` with ISO timestamps and status/progress fields.
 
     """
-    return job_summary(job)
+    return job_summary(job, recovery_context)
 
 
 def _provisional_title(script: str) -> str:
@@ -267,8 +267,9 @@ async def quick_create(
     db.refresh(project)
     db.refresh(job)
     ensure_project_layout(project.id)
+    recovery_context = build_recovery_contexts(db, [project.id]).get(project.id)
     return QuickCreateResponse(
-        project=_project_detail(project), job=_job_summary(job)
+        project=_project_detail(project), job=_job_summary(job, recovery_context)
     )
 
 
@@ -501,7 +502,8 @@ def list_jobs(project_id: int, db: Session = Depends(get_db)) -> list[JobSummary
         .order_by(GenerationJob.id.desc())
         .limit(20)
     ).scalars().all()
-    return [_job_summary(j) for j in jobs]
+    recovery_context = build_recovery_contexts(db, [project_id]).get(project_id)
+    return [_job_summary(job, recovery_context) for job in jobs]
 
 
 @router.post("/{project_id}/generate-all", response_model=GenerateAllResponse, status_code=202)
@@ -528,7 +530,10 @@ async def generate_all(project_id: int, db: Session = Depends(get_db)) -> Genera
     # enqueue_* closes its own session; re-fetch from the request session.
     fresh = db.get(GenerationJob, job.id)
     summary_source = fresh if fresh is not None else job
-    return GenerateAllResponse(job=_job_summary(summary_source), message="queued")
+    recovery_context = build_recovery_contexts(db, [project_id]).get(project_id)
+    return GenerateAllResponse(
+        job=_job_summary(summary_source, recovery_context), message="queued"
+    )
 
 
 @router.post("/{project_id}/cancel", status_code=200)
@@ -590,7 +595,10 @@ async def rerender(project_id: int, db: Session = Depends(get_db)) -> GenerateAl
     job = await enqueue_rerender(project_id)
     fresh = db.get(GenerationJob, job.id)
     summary_source = fresh if fresh is not None else job
-    return GenerateAllResponse(job=_job_summary(summary_source), message="rerender queued")
+    recovery_context = build_recovery_contexts(db, [project_id]).get(project_id)
+    return GenerateAllResponse(
+        job=_job_summary(summary_source, recovery_context), message="rerender queued"
+    )
 
 
 @router.get("/{project_id}/artifacts/image/{block_index}")

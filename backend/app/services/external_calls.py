@@ -18,7 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, and_, select
 from sqlalchemy.orm import Session
 
 from app.db import get_session_factory
@@ -45,12 +45,19 @@ def job_call_context(job_id: int) -> Iterator[None]:
         _job_id.reset(token)
 
 
+def unresolved_remote_side_effect_predicate() -> ColumnElement[bool]:
+    """Match only unresolved calls that may have produced a remote side effect."""
+    return and_(
+        ExternalCall.remote_side_effect.is_(True),
+        ExternalCall.status.in_(["in_flight", "unknown"]),
+    )
+
+
 def has_unresolved_calls(db: Session, job_id: int) -> bool:
     """Return whether a job has an in-flight or unresolved potentially paid call."""
     return db.scalar(select(ExternalCall.id).where(
         ExternalCall.job_id == job_id,
-        ExternalCall.remote_side_effect.is_(True),
-        ExternalCall.status.in_(["in_flight", "unknown"]),
+        unresolved_remote_side_effect_predicate(),
     ).limit(1)) is not None
 
 

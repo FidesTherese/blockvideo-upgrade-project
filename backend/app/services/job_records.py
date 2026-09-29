@@ -11,6 +11,7 @@ from app.models.operation_request import OperationReceipt
 from app.models.project import Project, ProjectStatus
 from app.models.external_call import ExternalCall
 from app.models.artifact import GenerationArtifact
+from app.services.external_calls import unresolved_remote_side_effect_predicate
 from app.services.generation_plan import build_generation_plan
 from app.services.generation_snapshots import capture_inputs, fingerprint_inputs
 from app.services.settings_history import record_settings
@@ -47,8 +48,7 @@ def create_pending_job(db: Session, project_id: int, stage: str = "queued", *, k
         GenerationJob.project_id == project_id, GenerationJob.status == JobStatus.unknown).limit(1))
     unresolved_call = db.scalar(select(ExternalCall.id).join(GenerationJob, GenerationJob.id == ExternalCall.job_id)
                                .where(GenerationJob.project_id == project_id,
-                                      ExternalCall.remote_side_effect.is_(True),
-                                      ExternalCall.status.in_(["in_flight", "unknown"])).limit(1))
+                                      unresolved_remote_side_effect_predicate()).limit(1))
     if uncertain or unresolved_call:
         raise UnresolvedExternalWorkError("以前の外部処理の結果が未確定です。確認できるまで生成を再送できません")
     project = db.get(Project, project_id)

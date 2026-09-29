@@ -121,6 +121,15 @@ best-effort file cleanup after commit. Startup dispatch supports an internal inj
 registry, but the database job claim remains authoritative. This is single-server
 race correctness, not a multi-server or capacity claim.
 
+D35 recovery guidance mirrors durable execution permission. Only pending/running
+jobs wait; unknown outcomes always require provider checking; completed jobs are
+complete. Failed or cancelled jobs offer current-settings retry only when one
+project-level recovery context proves there is no unknown job and no unresolved
+remote-side-effect call. The same exact remote-call predicate protects pending-job
+creation, while local unknown calls do not block. List and history responses build
+that typed context once with one bulk aggregate query and reuse it for every job;
+a detached terminal job without context requires refresh rather than guessing.
+
 D33 recovery evidence includes the complete persisted project progress/stage/output/
 error view. `JobRegistry` has explicit accepting/closing lifecycle state. FastAPI
 startup reopens the fully drained registry before starting the dispatcher; shutdown

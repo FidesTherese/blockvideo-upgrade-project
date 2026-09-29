@@ -1,14 +1,17 @@
 """Public job metadata, with safe retry guidance and unambiguous UTC timestamps."""
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, or_, select
-from sqlalchemy.orm import object_session
+from sqlalchemy import case, func, select
+from sqlalchemy.orm import Session
 
 from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob, JobStatus
 from app.schemas import JobSummary, RecommendedAction, RecoveryCode
+from app.services.external_calls import unresolved_remote_side_effect_predicate
 from app.services.generation_plan import STAGE_ORDER
 
 
@@ -21,59 +24,82 @@ def utc_timestamp(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def _retry_blocked_reason(job: GenerationJob) -> str | None:
-    if job.status == JobStatus.unknown:
-        return "外部処理の結果が未確定です。このアプリでは結果を照会できないため、外部サービス側の履歴を確認してください。"
-    if job.status not in {JobStatus.failed, JobStatus.cancelled}:
-        return None
-    db = object_session(job)
-    if db is None:
-        return "現在の状態を再取得してから再実行してください。"
-    unknown_job = db.scalar(select(GenerationJob.id).where(
-        GenerationJob.project_id == job.project_id,
-        GenerationJob.status == JobStatus.unknown,
-    ).limit(1))
-    unresolved_call = db.scalar(select(ExternalCall.id).join(
-        GenerationJob, GenerationJob.id == ExternalCall.job_id,
-    ).where(
-        GenerationJob.project_id == job.project_id,
-        or_(ExternalCall.status == "unknown", and_(
-            ExternalCall.status == "in_flight", ExternalCall.remote_side_effect.is_(True),
-        )),
-    ).limit(1))
-    if unknown_job is not None or unresolved_call is not None:
-        return "以前の外部処理の結果が未確定です。外部サービス側の履歴を確認できるまで再実行できません。"
-    return None
+_EXTERNAL_UNKNOWN_MESSAGE = (
+    "外部処理の結果が未確定です。このアプリでは結果を照会できないため、"
+    "外部サービス側の履歴を確認してください。"
+)
+_PROJECT_BLOCKED_MESSAGE = (
+    "以前の外部処理の結果が未確定です。"
+    "外部サービス側の履歴を確認できるまで再実行できません。"
+)
+_REFRESH_MESSAGE = "現在の状態を再取得してから再実行してください。"
+
+
+@dataclass(frozen=True)
+class RecoveryContext:
+    """Project-wide durable facts required to authorize retry guidance."""
+
+    project_id: int
+    has_unknown_job: bool
+    has_unresolved_remote_side_effect: bool
+
+    @property
+    def blocks_retry(self) -> bool:
+        return self.has_unknown_job or self.has_unresolved_remote_side_effect
+
+
+def build_recovery_contexts(
+    db: Session, project_ids: Iterable[int]
+) -> dict[int, RecoveryContext]:
+    """Load project-wide retry blockers in one aggregate query."""
+    ids = sorted(set(project_ids))
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(
+            GenerationJob.project_id,
+            func.max(case((GenerationJob.status == JobStatus.unknown, 1), else_=0)),
+            func.max(case((unresolved_remote_side_effect_predicate(), 1), else_=0)),
+        )
+        .outerjoin(ExternalCall, ExternalCall.job_id == GenerationJob.id)
+        .where(GenerationJob.project_id.in_(ids))
+        .group_by(GenerationJob.project_id)
+    )
+    return {
+        project_id: RecoveryContext(
+            project_id=project_id,
+            has_unknown_job=bool(has_unknown_job),
+            has_unresolved_remote_side_effect=bool(has_unresolved_call),
+        )
+        for project_id, has_unknown_job, has_unresolved_call in rows
+    }
 
 
 def _recovery_action(
-    job: GenerationJob, blocked_reason: str | None
-) -> tuple[RecoveryCode, RecommendedAction, bool]:
-    if job.cancel_requested or job.status in {JobStatus.pending, JobStatus.running}:
-        return "wait", "wait", False
+    job: GenerationJob, context: RecoveryContext | None
+) -> tuple[RecoveryCode, RecommendedAction, bool, str | None]:
+    if job.status in {JobStatus.pending, JobStatus.running}:
+        return "wait", "wait", False, None
     if job.status == JobStatus.unknown:
-        return "external_outcome_unknown", "check_provider", False
+        return "external_outcome_unknown", "check_provider", False, _EXTERNAL_UNKNOWN_MESSAGE
     if job.status == JobStatus.completed:
-        return "completed", "none", False
-    if job.status == JobStatus.failed:
-        if blocked_reason is None:
-            return "safe_retry", "retry_current", True
-        if object_session(job) is None:
-            return "refresh_required", "refresh", False
-        return "external_outcome_unknown", "check_provider", False
-    if job.status == JobStatus.cancelled:
-        if blocked_reason is None:
-            return "safe_retry", "retry_current", True
-        if object_session(job) is not None:
-            return "external_outcome_unknown", "check_provider", False
-        return "cancelled", "none", False
-    return "failed", "none", False
+        return "completed", "none", False, None
+    if job.status in {JobStatus.failed, JobStatus.cancelled}:
+        if context is None or context.project_id != job.project_id:
+            return "refresh_required", "refresh", False, _REFRESH_MESSAGE
+        if context.blocks_retry:
+            return "external_outcome_unknown", "check_provider", False, _PROJECT_BLOCKED_MESSAGE
+        return "safe_retry", "retry_current", True, None
+    return "failed", "none", False, None
 
 
-def job_summary(job: GenerationJob) -> JobSummary:
+def job_summary(
+    job: GenerationJob, recovery_context: RecoveryContext | None = None
+) -> JobSummary:
     """Expose control metadata without snapshots, provider responses or secrets."""
-    blocked_reason = _retry_blocked_reason(job)
-    recovery_code, recommended_action, retryable = _recovery_action(job, blocked_reason)
+    recovery_code, recommended_action, retryable, blocked_reason = _recovery_action(
+        job, recovery_context
+    )
     raw_stages = (job.plan_json or {}).get("stages", [])
     stages = raw_stages if isinstance(raw_stages, list) else []
     plan = {"stages": [stage for stage in STAGE_ORDER if stage in stages]} if job.plan_json else None

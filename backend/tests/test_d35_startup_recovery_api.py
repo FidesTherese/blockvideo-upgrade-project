@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 import pytest
+from sqlalchemy import event
 
 from app.core.startup_status import (
     StartupStatus,
@@ -25,7 +26,7 @@ from app.migrations.runner import restore_database_backup
 from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob, JobStatus
 from app.models.project import Project
-from app.services.job_views import job_summary
+from app.services.job_views import build_recovery_contexts, job_summary
 from tests.fixtures.migrations.build_fixtures import build_fixture
 
 
@@ -130,10 +131,13 @@ def test_job_summary_derives_exact_recovery_codes_from_persisted_state_and_journ
             ("cancel_requested", JobStatus.running, True),
             ("failed_retryable", JobStatus.failed, False),
             ("failed_unknown_call", JobStatus.failed, False),
+            ("failed_local_unknown_call", JobStatus.failed, False),
             ("unknown", JobStatus.unknown, False),
-            ("cancelled", JobStatus.cancelled, False),
+            ("unknown_cancel_requested", JobStatus.unknown, True),
+            ("cancelled", JobStatus.cancelled, True),
             ("completed", JobStatus.completed, False),
             ("detached_failed", JobStatus.failed, False),
+            ("detached_cancelled", JobStatus.cancelled, True),
         ]:
             project = Project(title=f"recovery-{name}", source_script="synthetic")
             db.add(project)
@@ -147,7 +151,7 @@ def test_job_summary_derives_exact_recovery_codes_from_persisted_state_and_journ
             db.add(job)
             jobs[name] = job
         db.flush()
-        db.add(
+        db.add_all([
             ExternalCall(
                 job_id=jobs["failed_unknown_call"].id,
                 fingerprint="f" * 64,
@@ -155,15 +159,47 @@ def test_job_summary_derives_exact_recovery_codes_from_persisted_state_and_journ
                 endpoint="https://provider.invalid/jobs",
                 remote_side_effect=True,
                 status="unknown",
-            )
+            ),
+            ExternalCall(
+                job_id=jobs["failed_local_unknown_call"].id,
+                fingerprint="l" * 64,
+                provider="synthetic-local",
+                endpoint="http://localhost/jobs",
+                remote_side_effect=False,
+                status="unknown",
+            ),
+        ])
+        blocked_project = Project(title="project-blocker", source_script="synthetic")
+        db.add(blocked_project)
+        db.flush()
+        blocked_target = GenerationJob(
+            project_id=blocked_project.id,
+            current_stage="synthetic",
+            status=JobStatus.cancelled,
+            cancel_requested=True,
         )
+        unknown_sibling = GenerationJob(
+            project_id=blocked_project.id,
+            current_stage="synthetic",
+            status=JobStatus.unknown,
+        )
+        db.add_all([blocked_target, unknown_sibling])
+        jobs["cancelled_other_unknown_job"] = blocked_target
         db.commit()
 
         detached_failed = jobs.pop("detached_failed")
+        detached_cancelled = jobs.pop("detached_cancelled")
         db.refresh(detached_failed)
+        db.refresh(detached_cancelled)
         db.expunge(detached_failed)
-        summaries = {name: job_summary(job) for name, job in jobs.items()}
+        db.expunge(detached_cancelled)
+        contexts = build_recovery_contexts(db, [job.project_id for job in jobs.values()])
+        summaries = {
+            name: job_summary(job, contexts.get(job.project_id))
+            for name, job in jobs.items()
+        }
         summaries["detached_failed"] = job_summary(detached_failed)
+        summaries["detached_cancelled"] = job_summary(detached_cancelled)
 
     expected = {
         "pending": ("wait", "wait", False, None),
@@ -176,15 +212,34 @@ def test_job_summary_derives_exact_recovery_codes_from_persisted_state_and_journ
             False,
             "以前の外部処理の結果が未確定です。外部サービス側の履歴を確認できるまで再実行できません。",
         ),
+        "failed_local_unknown_call": ("safe_retry", "retry_current", True, None),
         "unknown": (
             "external_outcome_unknown",
             "check_provider",
             False,
             "外部処理の結果が未確定です。このアプリでは結果を照会できないため、外部サービス側の履歴を確認してください。",
         ),
+        "unknown_cancel_requested": (
+            "external_outcome_unknown",
+            "check_provider",
+            False,
+            "外部処理の結果が未確定です。このアプリでは結果を照会できないため、外部サービス側の履歴を確認してください。",
+        ),
         "cancelled": ("safe_retry", "retry_current", True, None),
+        "cancelled_other_unknown_job": (
+            "external_outcome_unknown",
+            "check_provider",
+            False,
+            "以前の外部処理の結果が未確定です。外部サービス側の履歴を確認できるまで再実行できません。",
+        ),
         "completed": ("completed", "none", False, None),
         "detached_failed": (
+            "refresh_required",
+            "refresh",
+            False,
+            "現在の状態を再取得してから再実行してください。",
+        ),
+        "detached_cancelled": (
             "refresh_required",
             "refresh",
             False,
@@ -211,6 +266,7 @@ def test_job_summary_derives_exact_recovery_codes_from_persisted_state_and_journ
     ],
 )
 def test_block_regeneration_responses_include_required_recovery_contract(
+    temp_storage: Path,
     monkeypatch: pytest.MonkeyPatch,
     route_name: str,
     enqueue_name: str,
@@ -218,34 +274,80 @@ def test_block_regeneration_responses_include_required_recovery_contract(
     from app.api import routes_blocks
     from app.models.block import Block
 
-    block = Block(id=5, project_id=7, index=0, source_text="synthetic")
-    project = Project(id=7, title="synthetic", source_script="synthetic")
-    job = GenerationJob(
-        id=11,
-        project_id=7,
-        current_stage="queued",
-        status=JobStatus.pending,
-        progress=0.0,
-        stage_progress=0.0,
-        cancel_requested=False,
-    )
+    with get_session_factory()() as db:
+        project = Project(title="synthetic", source_script="synthetic")
+        db.add(project)
+        db.flush()
+        block = Block(
+            project_id=project.id,
+            index=0,
+            source_text="synthetic",
+            tts_text="synthetic",
+        )
+        job = GenerationJob(
+            project_id=project.id,
+            current_stage="queued",
+            status=JobStatus.pending,
+            progress=0.0,
+            stage_progress=0.0,
+            cancel_requested=False,
+        )
+        db.add_all([block, job])
+        db.commit()
 
-    class FakeDb:
-        def get(self, model: type[Any], identifier: int) -> Any:
-            return {Block: block, Project: project, GenerationJob: job}[model]
+        async def enqueue(*_args: Any) -> GenerationJob:
+            return job
 
-    async def enqueue(*_args: Any) -> GenerationJob:
-        return job
+        monkeypatch.setattr(routes_blocks, "ensure_project_idle", lambda *_args: None)
+        monkeypatch.setattr(routes_blocks, "ensure_render_assets_ready", lambda *_args: None)
+        monkeypatch.setattr(routes_blocks, enqueue_name, enqueue)
 
-    monkeypatch.setattr(routes_blocks, "ensure_project_idle", lambda *_args: None)
-    monkeypatch.setattr(routes_blocks, "ensure_render_assets_ready", lambda *_args: None)
-    monkeypatch.setattr(routes_blocks, enqueue_name, enqueue)
+        response = asyncio.run(getattr(routes_blocks, route_name)(block.id, db))
 
-    response = asyncio.run(getattr(routes_blocks, route_name)(block.id, FakeDb()))
+        assert response.job.recovery_code == "wait"
+        assert response.job.recommended_action == "wait"
+        assert response.job.retryable is False
 
-    assert response.job.recovery_code == "wait"
-    assert response.job.recommended_action == "wait"
-    assert response.job.retryable is False
+
+def test_job_list_and_history_build_one_recovery_context_query_each(
+    temp_storage: Path,
+) -> None:
+    from app.api.routes_history import project_history
+    from app.api.routes_projects import list_jobs
+
+    with get_session_factory()() as db:
+        project = Project(title="query-count", source_script="synthetic")
+        db.add(project)
+        db.flush()
+        db.add_all([
+            GenerationJob(
+                project_id=project.id,
+                current_stage="synthetic",
+                status=JobStatus.failed,
+            )
+            for _ in range(100)
+        ])
+        db.commit()
+        project_id = project.id
+
+    def select_count(call: Any) -> tuple[int, int]:
+        with get_session_factory()() as db:
+            statements: list[str] = []
+
+            def record(_conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
+                if statement.lstrip().upper().startswith("SELECT"):
+                    statements.append(statement)
+
+            engine = db.get_bind()
+            event.listen(engine, "before_cursor_execute", record)
+            try:
+                result = call(db)
+            finally:
+                event.remove(engine, "before_cursor_execute", record)
+            return len(result if isinstance(result, list) else result["jobs"]), len(statements)
+
+    assert select_count(lambda db: list_jobs(project_id, db)) == (20, 3)
+    assert select_count(lambda db: project_history(project_id, db)) == (100, 5)
 
 
 def test_lifespan_registers_leases_migrates_then_initializes_before_database_users(

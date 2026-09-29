@@ -766,9 +766,23 @@ recommended_action: Literal[
 ]
 ```
 
-`job_views.job_summary()` derives both from persisted status, cancellation flag,
-and unresolved-call query. Existing prose fields remain compatibility display text,
-but button state uses only `retryable` and `recommended_action`.
+`job_views.job_summary()` derives both from persisted status and an explicit typed
+`RecoveryContext`. `build_recovery_contexts()` computes project-wide unknown-job and
+unresolved-remote-side-effect facts in one aggregate query for any job collection;
+list and history routes reuse that context for every summary. The unresolved-call
+predicate is shared with `create_pending_job()` and matches only
+`remote_side_effect IS TRUE` with `in_flight` or `unknown`; local unknown calls do
+not block retry. A summary without context never queries implicitly and reports
+`refresh_required` for failed or cancelled jobs.
+
+Status mapping is ordered by durable state. Only pending or running jobs report
+`wait`, including cancellation requests. Unknown always reports
+`external_outcome_unknown`/`check_provider`, completed reports `completed`/`none`,
+and failed or cancelled reports `safe_retry`/`retry_current` only when the supplied
+project context proves that the full `create_pending_job()` path has no project-wide
+unknown job or unresolved remote side effect. Otherwise it reports the corresponding
+authoritative blocker. Existing prose fields remain compatibility display text, but
+button state uses only `retryable` and `recommended_action`.
 
 Frontend mirrors these exact unions. `RecoveryStatus.tsx` renders one status region
 and optional action description; it does not execute an action itself.

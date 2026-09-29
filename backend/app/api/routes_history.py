@@ -14,7 +14,7 @@ from app.models.job import GenerationJob
 from app.models.project import Project
 from app.models.settings_revision import SettingsRevision
 from app.services.artifact_store import artifact_file_path, artifact_to_summary, file_identity
-from app.services.job_views import job_summary, utc_timestamp
+from app.services.job_views import build_recovery_contexts, job_summary, utc_timestamp
 from app.services.settings_history import settings_version_summary
 
 router = APIRouter(prefix="/projects", tags=["history"])
@@ -61,6 +61,8 @@ def project_history(project_id: int, db: Session = Depends(get_db)) -> dict[str,
     jobs = db.scalars(select(GenerationJob).where(
         GenerationJob.project_id == project_id,
     ).order_by(GenerationJob.id.desc()).limit(100)).all()
+    recovery_contexts = build_recovery_contexts(db, [project_id])
+    recovery_context = recovery_contexts.get(project_id)
     return {
         "revision": project.revision,
         "output_state": _output_state(project, summaries),
@@ -70,7 +72,7 @@ def project_history(project_id: int, db: Session = Depends(get_db)) -> dict[str,
             {**settings_version_summary(version), "created_at": utc_timestamp(version.created_at)}
             for version in versions
         ],
-        "jobs": [job_summary(job).model_dump() for job in jobs],
+        "jobs": [job_summary(job, recovery_context).model_dump() for job in jobs],
     }
 
 

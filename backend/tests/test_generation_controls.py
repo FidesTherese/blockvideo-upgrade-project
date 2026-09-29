@@ -225,6 +225,44 @@ def test_uncertain_remote_work_blocks_new_generation_and_retry(temp_storage, unc
         assert db.get(OperationReceipt, value.request_id) is None
 
 
+def test_local_unknown_call_does_not_block_retry(temp_storage) -> None:
+    project_id = make_project()
+    failed = execute(request(project_id, "generation.start"))
+    finish(failed.job_id)
+    with get_session_factory()() as db:
+        db.add(ExternalCall(
+            job_id=failed.job_id,
+            fingerprint="local-unknown",
+            provider="synthetic-local",
+            endpoint="http://localhost/jobs",
+            remote_side_effect=False,
+            status="unknown",
+        ))
+        db.commit()
+
+    result = execute(request(project_id, "generation.retry", {"job_id": failed.job_id}))
+
+    assert result.job_id is not None
+    with get_session_factory()() as db:
+        assert db.get(GenerationJob, result.job_id).parent_job_id == failed.job_id
+
+
+def test_cancelled_job_with_persisted_cancel_request_can_retry(temp_storage) -> None:
+    project_id = make_project()
+    cancelled = execute(request(project_id, "generation.start"))
+    with get_session_factory()() as db:
+        job = db.get(GenerationJob, cancelled.job_id)
+        job.status = JobStatus.cancelled
+        job.cancel_requested = True
+        db.commit()
+
+    result = execute(request(project_id, "generation.retry", {"job_id": cancelled.job_id}))
+
+    assert result.job_id is not None
+    with get_session_factory()() as db:
+        assert db.get(GenerationJob, result.job_id).parent_job_id == cancelled.job_id
+
+
 def test_other_job_unknown_call_also_blocks_retry_of_a_known_failure(temp_storage) -> None:
     project_id = make_project()
     failed = execute(request(project_id, "generation.start"))
