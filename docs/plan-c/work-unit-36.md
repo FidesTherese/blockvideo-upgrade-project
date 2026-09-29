@@ -30,22 +30,21 @@ change unnoticed.
   permit external roots without treating other ignored in-repository roots as evidence.
 - Claim the final candidate directory with exclusive `mkdir`; immediately record its
   non-reparse/non-symlink `lstat` device/inode identity and strict resolved parent, then
-  exclusively create and fsync a random claim-token file. Before and after every
-  no-replace artifact publication and bounded no-follow readback, require the same
-  directory identity, parent, and exact token. Failure cleanup MUST NOT rename,
-  recursively delete, or remove the final directory. It MUST proceed only while the
-  directory identity and token still prove ownership and MUST unlink only individually
-  recorded staging/published files whose own identities still match. Ownership loss
-  MUST touch nothing, including an empty replacement. Any post-claim failure MUST leave
-  the claim token/final path for operator cleanup and retry MUST fail on the existing
-  destination. After validating both artifacts, exclusively create, fsync, and read
-  back a retained canonical `.d36-publication-complete` record containing the exact
-  byte size and SHA-256 of `freeze-manifest.json` and `d36-tool-attestation.json`, then
-  retire the claim marker. Readers MUST accept only the exact canonical artifact pair
-  plus that exact completion record, with no claim marker or extra entry. Require exact
-  canonical artifact bytes, fsyncs, a recomputed tool-attestation aggregate, an exact
-  recomputed manifest file aggregate, and the candidate ID derived from that aggregate
-  prefix plus commit prefix.
+  exclusively open one `.d36-publication-state` file and retain its descriptor. Write
+  and fsync a random 32-byte claim token through that descriptor. Before and after every
+  exclusive artifact write and bounded no-follow readback, require the same directory,
+  state-file, descriptor, parent, and exact token identity. Write artifacts directly
+  with exclusive creation; create no staging names. After validating both artifacts,
+  truncate, seek, write, fsync, and read back canonical `CompletionMarker` bytes through
+  the same retained descriptor. Never rename or unlink any state, publication, staging,
+  or artifact path. On failure or ownership loss, close retained descriptors and touch
+  no publication paths; leave every incomplete partial for operator cleanup and make a
+  retry fail on the existing destination. Readers MUST require exactly the canonical
+  artifact pair plus `.d36-publication-state`, and MUST accept that state only when its
+  bytes are the exact canonical completion record with the artifact sizes and SHA-256
+  values. Require exact canonical artifact bytes, fsyncs, a recomputed tool-attestation
+  aggregate, an exact recomputed manifest file aggregate, and the candidate ID derived
+  from that aggregate prefix plus commit prefix.
 
 ## Non-goals
 
@@ -60,9 +59,12 @@ or post-claim replacement final directory is never replaced or removed. Race tes
 write, readback, and cleanup boundaries preserve a replacement sentinel at the exact
 final path, preserve an empty replacement, and return the bounded ownership-lost error.
 An ordinary failed claim remains incomplete and non-evidentiary, and a retry fails
-closed until operator cleanup. A successful reader rejects a missing, altered, replaced,
-or non-regular completion marker, any retained claim marker, and every extra entry. The
-frozen candidate can be reconstructed using documented commands.
+closed until operator cleanup. Deterministic races at the former check/unlink boundaries
+leave replacement exact paths untouched. A successful reader rejects a missing,
+altered, replaced, non-regular, or token-valued state file and every extra entry. A
+successful final directory contains exactly two evidence files and one state file, with
+no random token remaining in the state bytes. The frozen candidate can be reconstructed
+using documented commands.
 
 For Task 1 trial evidence, equivalent fresh runs MUST produce identical logical-state
 and response projections: timestamps, leases, runtime durations, and generated opaque

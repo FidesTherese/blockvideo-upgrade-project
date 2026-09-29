@@ -57,12 +57,19 @@ After the tracked D36 commit is pushed, the real freezer runs from that clean to
 
 - `freeze-manifest.json`;
 - `d36-tool-attestation.json`;
-- `.d36-publication-complete`.
+- `.d36-publication-state`.
 
-Final validation must recompute the control hash, manifest content aggregate,
-candidate ID, commit-derived UTC `created_at`, tool-attestation aggregate, artifact
-sizes/hashes, and completion marker. It must also prove the candidate remains clean and
-that the tooling checkout differs from `HEAD` only by ignored release evidence.
+The state file begins as a fsynced random claim token and is completed by truncating,
+seeking, writing, and fsyncing canonical completion bytes through the same retained
+descriptor. Publication never unlinks any path. Failure closes descriptors and leaves
+partials for operator cleanup. Final validation must recompute the control hash,
+manifest content aggregate, candidate ID, commit-derived UTC `created_at`, tool-
+attestation aggregate, artifact sizes/hashes, and canonical state content. It must also
+prove the candidate remains clean and that the tooling checkout differs from `HEAD`
+only by ignored release evidence.
+
+This tooling-only fix changes the D36 source attestation. Real D36 evidence MUST be
+regenerated after this final D36 commit is pushed; no pre-push evidence is current.
 
 ## Boundary and limits
 

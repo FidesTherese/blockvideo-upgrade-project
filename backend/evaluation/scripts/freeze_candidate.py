@@ -28,7 +28,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     result = {
         "candidate_id": manifest.candidate_id,
-        "completion_marker": f"{manifest.candidate_id}/.d36-publication-complete",
+        "completion_marker": f"{manifest.candidate_id}/.d36-publication-state",
         "freeze_manifest": f"{manifest.candidate_id}/freeze-manifest.json",
         "tool_attestation": f"{manifest.candidate_id}/d36-tool-attestation.json",
     }

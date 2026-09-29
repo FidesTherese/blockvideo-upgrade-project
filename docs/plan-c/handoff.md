@@ -22,10 +22,13 @@ inputs were byte-equal before execution, with path/content aggregate
 
 D36-D40 modules are external post-candidate tooling and are separately attested. They
 are absent from candidate behavior and never become part of its content identity. The
-real freezer must run only after the D36 tooling/report commit is committed and pushed,
-then write the exact canonical manifest, tool attestation, and completion marker under
-ignored `release-evidence/d36/<candidate-id>/`. The generated manifest must continue to
-name the D35 candidate, while the attestation names the clean later tooling `HEAD`.
+real freezer must run only after the final D36 tooling/report fix is committed and
+pushed, then write the exact canonical manifest, tool attestation, and
+`.d36-publication-state` under ignored `release-evidence/d36/<candidate-id>/`. The
+state file is the stable claim/completion inode and must contain canonical completion
+bytes in successful evidence. The generated manifest must continue to name the D35
+candidate, while the attestation names the clean later tooling `HEAD`. Any D36 evidence
+from before the final push is stale and must be regenerated.
 No held-out evaluation, tag, publication, deployment, or readiness decision is part of
 D36.
 

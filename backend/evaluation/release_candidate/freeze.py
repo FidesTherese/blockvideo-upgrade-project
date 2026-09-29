@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import ast
-import errno
 import hashlib
 import os
 import platform
@@ -50,11 +49,9 @@ _TOOL_SOURCE_PATHS = (
     "backend/evaluation/tool_attestation.py",
     "backend/evaluation/unlabeled_contracts.py",
 )
-_CLAIM_TOKEN_NAME = ".d36-publication-claim"
-_COMPLETED_MARKER_NAME = ".d36-publication-complete"
+_PUBLICATION_STATE_NAME = ".d36-publication-state"
 _CLAIM_TOKEN_BYTES = 32
-_MAX_CLAIM_TOKEN_BYTES = 64
-_MAX_COMPLETED_MARKER_BYTES = 1024
+_MAX_PUBLICATION_STATE_BYTES = 1024
 _MAX_FREEZE_MANIFEST_BYTES = 16 * 1024 * 1024
 _MAX_TOOL_ATTESTATION_BYTES = 1024 * 1024
 
@@ -77,7 +74,8 @@ class _PublicationClaim:
     device: int
     inode: int
     token: bytes
-    token_identity: _FileIdentity
+    state_identity: _FileIdentity
+    state_descriptor: int
 
 
 _MODE_CONFIGURATION: dict[str, object] = {
@@ -398,32 +396,40 @@ def _file_identity_matches(identity: _FileIdentity) -> bool:
     return (current.device, current.inode) == (identity.device, identity.inode)
 
 
-def _unlink_recorded_file(identity: _FileIdentity) -> None:
-    if not _file_identity_matches(identity):
-        return
+def _open_fsynced_retained(path: Path, value: bytes) -> tuple[int, _FileIdentity]:
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
     try:
-        identity.path.unlink()
-    except FileNotFoundError:
-        pass
+        written = 0
+        while written < len(value):
+            written += os.write(descriptor, value[written:])
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        identity = _FileIdentity(path=path, device=metadata.st_dev, inode=metadata.st_ino)
+        if not _file_identity_matches(identity):
+            raise ValueError("written file identity changed")
+        return descriptor, identity
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
-def _publish_file_no_replace(
-    source: Path, destination: Path, value: bytes
-) -> _FileIdentity:
-    source_identity = _file_identity(source)
-    try:
-        os.link(source, destination)
-    except OSError as exc:
-        if exc.errno not in {errno.EACCES, errno.EPERM, errno.EXDEV, errno.ENOTSUP}:
-            raise
-        return _write_fsynced(destination, value)
-    destination_identity = _file_identity(destination)
-    if (destination_identity.device, destination_identity.inode) != (
-        source_identity.device,
-        source_identity.inode,
-    ):
-        raise ValueError("published file identity changed")
-    return destination_identity
+def _read_retained(descriptor: int, maximum: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while total <= maximum:
+        chunk = os.read(descriptor, min(65536, maximum + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    value = b"".join(chunks)
+    if len(value) > maximum:
+        raise ValueError("publication state exceeds bounded size")
+    return value
 
 
 def _ownership_lost() -> PublicationOwnershipLost:
@@ -447,14 +453,17 @@ def _assert_claim_owned(claim: _PublicationClaim) -> None:
             raise _ownership_lost()
         if _directory_identity(claim.path) != (claim.device, claim.inode):
             raise _ownership_lost()
-        if not _file_identity_matches(claim.token_identity):
+        state_metadata = os.fstat(claim.state_descriptor)
+        if (
+            not stat.S_ISREG(state_metadata.st_mode)
+            or _is_reparse(state_metadata)
+            or (state_metadata.st_dev, state_metadata.st_ino)
+            != (claim.state_identity.device, claim.state_identity.inode)
+            or not _file_identity_matches(claim.state_identity)
+        ):
             raise _ownership_lost()
-        token = _read_regular_once(
-            claim.path / _CLAIM_TOKEN_NAME,
-            maximum=_MAX_CLAIM_TOKEN_BYTES,
-            label="publication claim token",
-        )
-        if token != claim.token or not _file_identity_matches(claim.token_identity):
+        token = _read_retained(claim.state_descriptor, _MAX_PUBLICATION_STATE_BYTES)
+        if token != claim.token or not _file_identity_matches(claim.state_identity):
             raise _ownership_lost()
         if _directory_identity(claim.path) != (claim.device, claim.inode):
             raise _ownership_lost()
@@ -471,28 +480,33 @@ def _claim_publication_directory(path: Path) -> _PublicationClaim:
     device, inode = _directory_identity(path)
     resolved_parent = path.parent.resolve(strict=True)
     token = secrets.token_bytes(_CLAIM_TOKEN_BYTES)
-    token_identity = _write_fsynced(path / _CLAIM_TOKEN_NAME, token)
-    _fsync_directory(path)
+    state_descriptor, state_identity = _open_fsynced_retained(
+        path / _PUBLICATION_STATE_NAME, token
+    )
     claim = _PublicationClaim(
         path=path,
         resolved_parent=resolved_parent,
         device=device,
         inode=inode,
         token=token,
-        token_identity=token_identity,
+        state_identity=state_identity,
+        state_descriptor=state_descriptor,
     )
-    _assert_claim_owned(claim)
-    return claim
+    try:
+        _fsync_directory(path)
+        _assert_claim_owned(claim)
+        return claim
+    except BaseException:
+        _close_claim(claim)
+        raise
 
 
 def _publish_owned(
-    claim: _PublicationClaim, source: Path, destination_name: str, value: bytes
+    claim: _PublicationClaim, destination_name: str, value: bytes
 ) -> _FileIdentity:
     _assert_claim_owned(claim)
     try:
-        identity = _publish_file_no_replace(
-            source, claim.path / destination_name, value
-        )
+        identity = _write_fsynced(claim.path / destination_name, value)
     finally:
         _assert_claim_owned(claim)
     return identity
@@ -510,63 +524,42 @@ def _read_owned(
 
 def _finish_claim(claim: _PublicationClaim, completion_marker_bytes: bytes) -> None:
     _assert_claim_owned(claim)
-    claimed_names = {
-        _CLAIM_TOKEN_NAME,
-        "freeze-manifest.json",
-        "d36-tool-attestation.json",
-    }
-    completed_names = {
-        _COMPLETED_MARKER_NAME,
+    expected_names = {
+        _PUBLICATION_STATE_NAME,
         "freeze-manifest.json",
         "d36-tool-attestation.json",
     }
     try:
-        if {entry.name for entry in os.scandir(claim.path)} != claimed_names:
+        if {entry.name for entry in os.scandir(claim.path)} != expected_names:
             raise _ownership_lost()
-        completed_identity = _write_fsynced(
-            claim.path / _COMPLETED_MARKER_NAME,
-            completion_marker_bytes,
-        )
-        if (
-            _read_regular_once(
-                completed_identity.path,
-                maximum=len(completion_marker_bytes),
-                label="publication completion marker",
+        os.ftruncate(claim.state_descriptor, 0)
+        os.lseek(claim.state_descriptor, 0, os.SEEK_SET)
+        written = 0
+        while written < len(completion_marker_bytes):
+            written += os.write(
+                claim.state_descriptor, completion_marker_bytes[written:]
             )
+        os.fsync(claim.state_descriptor)
+        if (
+            _read_retained(claim.state_descriptor, _MAX_PUBLICATION_STATE_BYTES)
             != completion_marker_bytes
-            or not _file_identity_matches(completed_identity)
+            or not _file_identity_matches(claim.state_identity)
+            or {entry.name for entry in os.scandir(claim.path)} != expected_names
+            or _directory_identity(claim.path) != (claim.device, claim.inode)
+            or claim.path.parent.resolve(strict=True) != claim.resolved_parent
         ):
-            raise _ownership_lost()
-        _assert_claim_owned(claim)
-        _unlink_recorded_file(claim.token_identity)
-        if claim.token_identity.path.exists():
-            raise _ownership_lost()
-        if {entry.name for entry in os.scandir(claim.path)} != completed_names:
-            raise _ownership_lost()
-        if _directory_identity(claim.path) != (claim.device, claim.inode):
-            raise _ownership_lost()
-        if claim.path.parent.resolve(strict=True) != claim.resolved_parent:
             raise _ownership_lost()
     except PublicationOwnershipLost:
         raise
     except (OSError, ValueError):
         raise _ownership_lost() from None
-    _fsync_directory(claim.path)
-    _fsync_directory(claim.resolved_parent)
 
 
-def _cleanup_claim(
-    claim: _PublicationClaim,
-    published: tuple[_FileIdentity, ...],
-    staging: tuple[_FileIdentity, ...],
-) -> None:
-    _assert_claim_owned(claim)
-    for identity in (*published, *staging):
-        _assert_claim_owned(claim)
-        _unlink_recorded_file(identity)
-        _assert_claim_owned(claim)
-    _fsync_directory(claim.path)
-    _fsync_directory(claim.resolved_parent)
+def _close_claim(claim: _PublicationClaim) -> None:
+    try:
+        os.close(claim.state_descriptor)
+    except OSError:
+        pass
 
 
 def _verify_canonical_attestation(raw: bytes, expected: ToolAttestation) -> None:
@@ -606,7 +599,7 @@ def _completion_marker_bytes(manifest_raw: bytes, attestation_raw: bytes) -> byt
 
 def read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestation]:
     expected_names = {
-        _COMPLETED_MARKER_NAME,
+        _PUBLICATION_STATE_NAME,
         "freeze-manifest.json",
         "d36-tool-attestation.json",
     }
@@ -615,13 +608,13 @@ def read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestat
         publication_identity = _directory_identity(publication)
         if {entry.name for entry in os.scandir(publication)} != expected_names:
             raise ValueError("completed publication entries are invalid")
-        marker_identity = _file_identity(publication / _COMPLETED_MARKER_NAME)
+        marker_identity = _file_identity(publication / _PUBLICATION_STATE_NAME)
         manifest_identity = _file_identity(publication / "freeze-manifest.json")
         attestation_identity = _file_identity(publication / "d36-tool-attestation.json")
         marker_raw = _read_regular_once(
-            publication / _COMPLETED_MARKER_NAME,
-            maximum=_MAX_COMPLETED_MARKER_BYTES,
-            label="publication completion marker",
+            publication / _PUBLICATION_STATE_NAME,
+            maximum=_MAX_PUBLICATION_STATE_BYTES,
+            label="publication state",
         )
         marker = CompletionMarker.model_validate_json(marker_raw, strict=True)
         if marker_raw != canonical_json_bytes(marker.model_dump(mode="json")) + b"\n":
@@ -661,9 +654,9 @@ def read_frozen_candidate(directory: Path) -> tuple[FreezeManifest, ToolAttestat
             or not _file_identity_matches(manifest_identity)
             or not _file_identity_matches(attestation_identity)
             or _read_regular_once(
-                publication / _COMPLETED_MARKER_NAME,
-                maximum=_MAX_COMPLETED_MARKER_BYTES,
-                label="publication completion marker",
+                publication / _PUBLICATION_STATE_NAME,
+                maximum=_MAX_PUBLICATION_STATE_BYTES,
+                label="publication state",
             )
             != marker_raw
             or _read_regular_once(
@@ -727,31 +720,13 @@ def freeze_candidate(
     manifest_bytes = canonical_json_bytes(manifest.model_dump(mode="json")) + b"\n"
     attestation_bytes = canonical_json_bytes(attestation.model_dump(mode="json")) + b"\n"
     completion_marker_bytes = _completion_marker_bytes(manifest_bytes, attestation_bytes)
-    root: Path | None = None
-    created_root = False
-    staging: list[_FileIdentity] = []
-    published: list[_FileIdentity] = []
     claimed: _PublicationClaim | None = None
     try:
-        root, created_root = _validate_output_root(output_root, candidate, tool_root)
+        root, _ = _validate_output_root(output_root, candidate, tool_root)
         final = root / manifest.candidate_id
-        token = secrets.token_hex(16)
-        staged_manifest = root / f".{manifest.candidate_id}.{token}.freeze-manifest.tmp"
-        staged_attestation = root / f".{manifest.candidate_id}.{token}.tool-attestation.tmp"
-        staging.append(_write_fsynced(staged_manifest, manifest_bytes))
-        staging.append(_write_fsynced(staged_attestation, attestation_bytes))
-        if _read_regular_once(
-            staged_manifest, maximum=len(manifest_bytes), label="staged freeze manifest"
-        ) != manifest_bytes:
-            raise ValueError("written freeze manifest failed verification")
-        staged_tool_bytes = _read_regular_once(
-            staged_attestation,
-            maximum=len(attestation_bytes),
-            label="staged tool attestation",
-        )
-        _verify_canonical_attestation(staged_tool_bytes, attestation)
         if FreezeManifest.model_validate_json(manifest_bytes, strict=True) != manifest:
-            raise ValueError("written freeze manifest failed verification")
+            raise ValueError("freeze manifest failed verification")
+        _verify_canonical_attestation(attestation_bytes, attestation)
         rechecked_commit, rechecked_timestamp = _candidate_identity(candidate, control)
         if rechecked_commit != commit or rechecked_timestamp != timestamp:
             raise ValueError("candidate identity changed during freeze")
@@ -763,18 +738,11 @@ def freeze_candidate(
         except FileExistsError as exc:
             raise ValueError("output destination already exists") from exc
         _fsync_directory(root)
-        published.append(
-            _publish_owned(
-                claimed, staged_manifest, "freeze-manifest.json", manifest_bytes
-            )
-        )
-        published.append(
-            _publish_owned(
-                claimed,
-                staged_attestation,
-                "d36-tool-attestation.json",
-                attestation_bytes,
-            )
+        _publish_owned(claimed, "freeze-manifest.json", manifest_bytes)
+        _publish_owned(
+            claimed,
+            "d36-tool-attestation.json",
+            attestation_bytes,
         )
         _fsync_directory(claimed.path)
         _fsync_directory(root)
@@ -795,16 +763,7 @@ def freeze_candidate(
         )
         _verify_canonical_attestation(published_attestation, attestation)
         _finish_claim(claimed, completion_marker_bytes)
-        claimed = None
         return manifest
     finally:
         if claimed is not None:
-            _cleanup_claim(claimed, tuple(published), tuple(staging))
-        else:
-            for staged in staging:
-                _unlink_recorded_file(staged)
-        if created_root and root is not None and root.exists():
-            try:
-                root.rmdir()
-            except OSError:
-                pass
+            _close_claim(claimed)
