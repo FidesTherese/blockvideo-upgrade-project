@@ -1,6 +1,33 @@
-# Plan C Handoff — D34 final migration/rollback review verified; D35 has not started
+# Plan C Handoff — D35 recovery UI gate verified; D36 has not started
 
-## D34 current result (2026-09-29 JST)
+## D35 current result (2026-09-30 JST)
+
+Read `work-unit-35.md`, `work-report-35.md`, the D35 section of `docs/DTD.md`, and
+`docs/modules/operation-core.md` first. Backend summaries now expose typed recovery
+codes/actions from one project-wide recovery context. Frontend controls use only those
+contracts, disable during fetch/refetch, and refetch project plus history immediately
+before retry/cancel. Unknown external outcomes never expose retry. Startup polling is
+bounded to `GET /api/startup`; migration guidance mentions restore only when a backup
+is reported. D35 adds no runtime dependency. The only new package is pinned dev-only
+`@testing-library/user-event` 14.6.7 for keyboard tests.
+
+The sequential final gate passed: backend 1300 with seven existing ONNX skips and one
+existing deprecation warning; Ruff passed; frontend 17 files/150 tests passed; build
+transformed 190 modules; ESLint passed. Installed Chrome plus transient local
+Playwright passed 18/18 synthetic checks across 390x844 and 1440x900: ready, both
+migration-failure backup branches, wait, safe retry, unknown/no-retry, stale refetch,
+duplicate lock, and real Tab/Enter. All captures had no horizontal overflow. Evidence
+is ignored under `release-evidence/d35-browser/`; 18 screenshots, four sanitized logs,
+and one result JSON are covered by manifest SHA-256
+`bffe688169845e9462620568597d1b2e1a1198902a0cba9544884ab181ad5790`.
+
+This is synthetic automated technical evidence, not human acceptance or independent
+review. No real user database, provider, model, cloud call, release, tag, publication,
+or deployment was used. **D36 has not started and no candidate freeze exists.** The
+D35 delivery commit is the candidate only after the exact commit subject is created;
+a separately authorized later D36 task must pin and freeze it.
+
+## D34 historical result (2026-09-29 JST)
 
 Read `work-unit-34.md`, `work-report-34.md`, the D34 section of `docs/DTD.md`, and
 `docs/modules/operation-core.md` first. D34 now owns explicit SQLite schema v0-to-v1

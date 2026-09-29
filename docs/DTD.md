@@ -155,7 +155,9 @@ Prohibited directions:
 
 ### Technology and research record
 
-No new third-party package is selected. Direct in-scope dependencies are:
+No new runtime package is selected. D35 adds one pinned dev-only test dependency,
+`@testing-library/user-event` 14.6.7, to exercise realistic keyboard interactions.
+Direct in-scope dependencies are:
 
 | Dependency | Version/constraint | Symbols and role |
 |---|---|---|
@@ -166,7 +168,8 @@ No new third-party package is selected. Direct in-scope dependencies are:
 | pytest | dev dependency `>=8.3.3` | monkeypatch, temporary directories, process/race matrices |
 | React | 18.3.1 | recovery/status components |
 | TypeScript | project `^5.6.3` | exact frontend mirrors of backend enums |
-| Vitest/Testing Library | Vitest 2.1.9; user-event 14.6.7 | component and interaction tests with real tab/keyboard semantics |
+| Vitest/Testing Library | Vitest 2.1.9; existing component-test packages | component tests |
+| `@testing-library/user-event` | exactly 14.6.7; dev-only | realistic tab and keyboard interaction tests; not shipped at runtime |
 
 Official sources previously recorded as checked 2026-09-23:
 
@@ -750,7 +753,7 @@ and all eight migration reason codes in degraded startup. `work-report-34.md` re
 the exact synthetic identity/hash evidence and repository verification history without
 temporary paths. D34 makes no real-user migration, online restore, downgrade,
 cross-database, distributed-lock, capacity, or complete row-content-hash claim. D35
-remains unstarted.
+is implemented and its evidence is recorded separately in `work-report-35.md`.
 
 ### D35 recovery UI and API design
 
@@ -802,8 +805,8 @@ project/history revisions to authorize that exact action. A failed check execute
 operation and displays refresh guidance. A synchronous revalidation lock preserves
 duplicate-action exclusion before React state updates. All buttons remain native
 buttons, status text uses `role="status"` or `role="alert"`, and focus order follows DOM
-order. Vitest proves structural narrow-layout containment only; Task 4 must supply real
-browser evidence at 390 px.
+order. Vitest proves structural narrow-layout containment; Task 4 supplies local
+real-browser evidence at 390x844 and 1440x900 against synthetic API state.
 
 ### D36 frozen D35 candidate and external trial boundary
 
@@ -1606,10 +1609,13 @@ independent review gates supply the recorded trust decisions.
   on ready and degraded shutdown; offline restore between lifespans followed by a
   second lifespan reading restored bytes/state instead of the old pooled inode; and
   repeated lifespan startup with a fresh pool.
-- **D35:** API contract tests and Vitest interactions for every code/action, immediate
+- **D35:** API contract tests and Vitest interactions cover every code/action, immediate
   action revalidation, stale refresh, duplicate click, DOM-order tab/Enter behavior,
-  role/status text, and structural narrow-layout containment. Task 4 supplies real
-  browser 390 px layout evidence.
+  role/status text, and structural narrow-layout containment. The final gate passed
+  1300 backend tests and 150 frontend tests plus Ruff/build/lint. Installed Chrome
+  passed 18 synthetic-state checks at 390x844 and 1440x900, including real Tab/Enter,
+  one POST from duplicate activation, and no horizontal overflow. This is automated
+  technical evidence, not human acceptance.
 - **D36:** strict canonical candidate control plus detached digest; exact D35
   parent/subject/cleanliness; commit-timestamp-derived UTC `created_at`; byte-identical
   manifest generation on repeated identical inputs; changed allowlisted byte;

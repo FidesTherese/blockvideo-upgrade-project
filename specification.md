@@ -140,6 +140,12 @@ on cleanup, and stops on ready, migration failure, or network failure. Network
 failure exposes an explicit status-refetch button. Migration failure mentions the
 documented restore procedure only when `backup_available` is true; otherwise it
 instructs stop/restart and support contact without implying that a backup exists.
+D35 implementation evidence includes 1300 backend tests, 150 frontend tests, Ruff,
+build, lint, and 18 local real-browser checks over synthetic API states at 390x844
+and 1440x900. The browser checks cover both migration-backup branches, wait, safe
+retry, unknown/no-retry, stale refetch, duplicate locking, and real Tab/Enter; they
+are automated technical evidence, not human acceptance. D35 adds no runtime package;
+`@testing-library/user-event` 14.6.7 is pinned as a dev-only test dependency.
 
 D33 recovery evidence includes the complete persisted project progress/stage/output/
 error view. `JobRegistry` has explicit accepting/closing lifecycle state. FastAPI

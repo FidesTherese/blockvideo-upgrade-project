@@ -5,9 +5,9 @@
 Provide one typed, state-aware execution boundary for UI/API and natural-language
 entry points. It owns durable replay, revisions, settings and generation intent,
 input-bound history, recovery, cancellation, negative-intent vetoes, and registered
-operation dispatch. D32–D34 retain the database-authoritative single-server model
+operation dispatch. D32–D35 retain the database-authoritative single-server model
 while hardening dialogue/deletion races, lifespan cancellation, resumed completion,
-rename-before-commit recovery, and lease-gated database startup.
+rename-before-commit recovery, lease-gated database startup, and typed recovery UI.
 
 ## Project Position
 
@@ -87,7 +87,11 @@ publication and can leave only the permitted unreferenced same-job video orphan.
 Startup registers models, acquires the lease, migrates/verifies, then initializes and
 recovers jobs. Degraded state starts no recovery or dispatcher; database dependencies
 return the fixed 503. Shutdown drains users, clears database caches, and releases the
-lease last, preventing reuse of an offline-restored SQLite inode.
+lease last, preventing reuse of an offline-restored SQLite inode. D35 job views derive
+one typed recovery context for a project collection. The browser renders its exact
+recovery/action enums, disables controls while state is unavailable, and refetches
+project plus history immediately before retry or cancellation; it never infers retry
+permission from prose.
 
 ## Key Decisions and Limits
 
@@ -131,9 +135,13 @@ lease last, preventing reuse of an offline-restored SQLite inode.
   Backup/restore and the application mutually exclude through one non-blocking sibling
   lease; restore requires a stopped application, and stale lease removal is an operator
   action only after confirming no live application or restore.
+- D35 startup status polling is bounded and non-overlapping; unknown external outcomes
+  remain button-free, stale actions require refresh, and duplicate recovery activation
+  is synchronously locked. Browser evidence is synthetic and is not human acceptance.
 - See `docs/plan-c/work-unit-12-15.md` for historical retention/restart behavior,
-  `docs/plan-c/work-report-31.md` for D31 evidence, and
-  `docs/plan-c/work-report-34.md` for migration/restore evidence and limits.
+  `docs/plan-c/work-report-31.md` for D31 evidence,
+  `docs/plan-c/work-report-34.md` for migration/restore evidence and limits, and
+  `docs/plan-c/work-report-35.md` for recovery UI evidence and limits.
 
 ## Relevant Verification
 
@@ -148,6 +156,10 @@ lease last, preventing reuse of an offline-restored SQLite inode.
 - `backend/tests/test_d32_concurrency_matrix.py`
 - `backend/tests/test_d33_recovery_matrix.py`
 - `backend/tests/test_d34_migrations.py`
-- `backend/tests/test_d35_startup_recovery_api.py` (D34 startup contract only)
+- `backend/tests/test_d35_startup_recovery_api.py`
+- `frontend/src/test/recovery-status.test.tsx`
+- `frontend/src/test/project-history.test.tsx`
+- real-browser synthetic checks: ignored `release-evidence/d35-browser/`
 - `cd backend && python -m uv run pytest`
 - `cd backend && python -m uv run ruff check .`
+- `cd frontend && npx -y pnpm@10.18.3 test && npx -y pnpm@10.18.3 build && npx -y pnpm@10.18.3 lint`
