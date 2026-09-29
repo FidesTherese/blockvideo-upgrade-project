@@ -220,7 +220,9 @@ the complete seed graph before worker launch: every project, revision, history r
 job parent, artifact/job, receipt/job, external call, current artifact, prior-turn link,
 and continuation target must exist and retain one project owner; parent and dialogue
 graphs must be acyclic, dialogue links reciprocal, database-unique identities distinct,
-and receipt hashes reproducible. `artifact_revisions` are strict integers from 1 through
+and receipt hashes reproducible. A revision-race event must use exactly the primary
+project's next revision, which must remain in bounds and must not collide with a seeded
+primary settings-history revision. `artifact_revisions` are strict integers from 1 through
 the finite revision maximum and cannot exceed the primary project's current revision.
 Candidate workers run with both
 `-B` and `PYTHONDONTWRITEBYTECODE=1`. The trusted host supplies each worker an

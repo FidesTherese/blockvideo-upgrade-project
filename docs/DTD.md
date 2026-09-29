@@ -956,7 +956,10 @@ dialogue-successor references; a revision newer than its owning project; cross-p
 job-parent, artifact-job, receipt-job, continuation-parent, or current-artifact links;
 job or dialogue cycles; non-reciprocal dialogue links; missing restore-source revisions;
 and database uniqueness collisions for artifact jobs, receipt jobs, or external-call
-job/fingerprint pairs. Explicit and revision-derived artifact IDs are checked as one
+job/fingerprint pairs. A revision-race event is accepted only when its external revision
+is in the global revision range, is strictly newer than the primary initial revision,
+is absent from that project's seeded settings history, and equals the exact next revision
+that the worker persists. Explicit and revision-derived artifact IDs are checked as one
 set. Receipt request/result hashes must equal the exact values reconstructed by the
 worker. `current_artifact_id`, `parent_request_id`, and `successor_request_id` are
 optional for compatibility; when supplied they are seeded exactly, while omitted

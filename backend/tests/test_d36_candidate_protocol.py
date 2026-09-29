@@ -508,6 +508,41 @@ def test_event_requires_exact_kind_specific_fields() -> None:
         UnlabeledTrialCase.model_validate(value)
 
 
+def test_revision_race_rejects_seeded_history_collision() -> None:
+    value = _case()
+    value["initial"]["history"] = [{
+        "project_id": 101,
+        "revision": 5,
+        "settings": value["initial"]["settings"],
+        "changed_fields": [],
+        "restored_from_revision": None,
+    }]
+    value["event"] = {
+        "kind": "revision_race",
+        "request": value["event"]["request"],
+        "external_revision": 5,
+        "external_settings": {"subtitle_font_size": 52},
+    }
+    value["case_sha256"] = canonical_case_sha256(value)
+
+    with pytest.raises(ValidationError, match="external revision collides with seeded history"):
+        UnlabeledTrialCase.model_validate(value)
+
+
+def test_revision_race_rejects_revision_gap() -> None:
+    value = _case()
+    value["event"] = {
+        "kind": "revision_race",
+        "request": value["event"]["request"],
+        "external_revision": 7,
+        "external_settings": {"subtitle_font_size": 52},
+    }
+    value["case_sha256"] = canonical_case_sha256(value)
+
+    with pytest.raises(ValidationError, match="external revision must be the next primary revision"):
+        UnlabeledTrialCase.model_validate(value)
+
+
 def test_prior_proposal_rejects_cross_branch_fields() -> None:
     value = _bound_case()
     value["initial"]["prior_turns"] = [{
@@ -1066,6 +1101,49 @@ def test_real_worker_executes_every_allowed_event(tmp_path: Path, kind: str) -> 
         assert observation.replay.response.status == "http_error"
         assert observation.replay.response.reason_code == "request_id_conflict"
     assert observation.confirmation.duplicate_attempted == (kind == "confirm_twice")
+
+
+def test_revision_race_exact_next_revision_executes_real_worker(tmp_path: Path) -> None:
+    case = _case()
+    case["event"] = {
+        "kind": "revision_race",
+        "request": case["event"]["request"],
+        "external_revision": 6,
+        "external_settings": {"subtitle_font_size": 52},
+    }
+    case["case_sha256"] = canonical_case_sha256(case)
+    _ModelHandler.proposal = {
+        "kind": "operation",
+        "operation_id": "project.status.get",
+        "operation_version": 1,
+        "arguments": {},
+        "generate_after_save": False,
+    }
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        input_path = tmp_path / "valid-revision-race.json"
+        input_path.write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+        observation = run_trial_host(
+            candidate_root=Path(__file__).parents[2],
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "valid-revision-race-observation.json",
+            storage=tmp_path / "valid-revision-race-storage",
+            model="d36-test-model",
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert observation.before.history_count == 0
+    assert observation.after.history_count == 1
+    assert observation.effects.revision == 1
+    assert observation.effects.history == 1
+    assert observation.failure_class is None
 
 
 def test_real_worker_seeds_complete_allowed_initial_state(tmp_path: Path) -> None:

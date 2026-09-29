@@ -559,6 +559,19 @@ class UnlabeledTrialCase(StrictUnlabeledRecord):
                 raise ValueError("continuation parent already has successor")
             if request.target_project_id is not None and parent.project_id != request.target_project_id:
                 raise ValueError("continuation parent ownership mismatch")
+        if isinstance(self.event, UnlabeledRevisionRaceEvent):
+            primary_history_revisions = {
+                item.revision
+                for item in self.initial.history
+                if (item.project_id or self.initial.project_id) == self.initial.project_id
+            }
+            if self.event.external_revision in primary_history_revisions:
+                raise ValueError("external revision collides with seeded history")
+            if self.event.external_revision <= self.initial.revision:
+                raise ValueError("external revision must exceed primary initial revision")
+            if (self.initial.revision == MAX_REVISION
+                    or self.event.external_revision != self.initial.revision + 1):
+                raise ValueError("external revision must be the next primary revision")
         if isinstance(self.event, UnlabeledDifferentBodyEvent):
             replacement_target = self.event.replacement_target_project_id
             if replacement_target is not None and replacement_target not in projects:
