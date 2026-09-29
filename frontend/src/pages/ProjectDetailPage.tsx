@@ -29,13 +29,16 @@ function ProjectMonitor({ id }: { id: number }) {
   const command = useProjectOperation(id);
   const language = useLanguageRequest(id);
   const jobs = history.data?.jobs ?? [];
-  const active = jobs.filter((job) => ['pending', 'running'].includes(job.status));
+  const active = jobs.filter((job) => job.recommended_action === 'wait');
   const running = active.length > 0 || ['splitting', 'planning', 'generating', 'rendering'].includes(project.data?.status ?? '');
-  const unknown = jobs.some((job) => job.status === 'unknown');
+  const unknown = jobs.some((job) => job.recommended_action === 'check_provider');
   const viewsDiffer = history.data != null && project.data != null && history.data.revision !== project.data.revision;
-  const blocked = running || command.locked || language.locked || !history.data || !!history.error || viewsDiffer;
+  const actionsUnavailable = command.locked || language.locked || !history.data || !!history.error || viewsDiffer;
+  const blocked = running || actionsUnavailable;
   const { refetch: refreshProject } = project;
   const { refetch: refreshBlocks } = blocks;
+  const { refetch: refreshHistory } = history;
+  const refreshState = () => Promise.all([refreshProject(), refreshBlocks(), refreshHistory()]);
   const observedRevision = history.data?.revision;
   const observedJobState = jobs.map((job) => `${job.id}:${job.status}:${job.cancel_requested}`).join(',');
 
@@ -56,7 +59,7 @@ function ProjectMonitor({ id }: { id: number }) {
   </p></Layout>;
 
   const p = project.data;
-  const revision = history.data?.revision ?? p.revision;
+  const revision = p.revision;
   return (
     <Layout>
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -73,7 +76,7 @@ function ProjectMonitor({ id }: { id: number }) {
           </button>
           <button type="button" className="btn-secondary" disabled={blocked || unknown || !p.block_count}
             onClick={() => command.execute('project.generation.start', revision, { kind: 'rerender' }, '動画の再レンダリング')}>レンダリングのみ再実行</button>
-          {active[0] && <button type="button" className="btn-danger" disabled={command.locked || language.locked || active[0].cancel_requested}
+          {active[0] && <button type="button" className="btn-danger" disabled={actionsUnavailable || active[0].cancel_requested}
             onClick={() => command.execute('project.generation.cancel', revision, { job_id: active[0].id }, 'キャンセル要求')}>
             {active[0].cancel_requested ? 'キャンセル要求済み' : '生成をキャンセル'}
           </button>}
@@ -93,6 +96,10 @@ function ProjectMonitor({ id }: { id: number }) {
         外部処理の結果が未確定です。「生成の履歴」の復旧情報を確認してください。
       </p>}
       {history.error && <p role="alert" className="mt-4 text-sm text-red-600">履歴を取得できません。状態を確認できるまで操作を待機します。</p>}
+      {viewsDiffer && <div role="status" className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+        <p>プロジェクトと生成履歴の版が一致しません。最新の状態を取得するまで操作できません。</p>
+        <button type="button" className="btn-secondary mt-2" onClick={() => { void refreshState(); }}>最新の状態を再取得</button>
+      </div>}
       {p.error_message && <p role="alert" className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
         {p.error_message}
       </p>}
@@ -108,7 +115,7 @@ function ProjectMonitor({ id }: { id: number }) {
       {history.data && <>
         <SettingsHistory versions={history.data.settings_versions} revision={revision} disabled={blocked}
           onRestore={(selectedRevision) => command.execute('project.settings.restore', revision, { revision: selectedRevision }, '設定の復元')} />
-        <GenerationHistory jobs={jobs} running={running} disabled={command.locked || language.locked || !history.data || !!history.error}
+        <GenerationHistory jobs={jobs} running={running} disabled={actionsUnavailable}
           onCancel={(jobId) => command.execute('project.generation.cancel', revision, { job_id: jobId }, 'キャンセル要求')}
           onRetry={(jobId) => { if (!running) command.execute('project.generation.retry', revision, { job_id: jobId }, '現在の設定での再実行'); }} />
       </>}

@@ -9,7 +9,7 @@ import { blockFixture, historyFixture, jobFixture, projectFixture } from '@/test
 
 vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof import('@/api/client')>();
-  return { ...actual, api: { ...actual.api, getProject: vi.fn(), listBlocks: vi.fn(), getProjectHistory: vi.fn(), executeOperation: vi.fn() } };
+  return { ...actual, api: { ...actual.api, startup: vi.fn(), getProject: vi.fn(), listBlocks: vi.fn(), getProjectHistory: vi.fn(), executeOperation: vi.fn() } };
 });
 
 function page() {
@@ -22,6 +22,9 @@ function page() {
 beforeEach(() => {
   vi.clearAllMocks();
   sessionStorage.clear();
+  vi.mocked(api.startup).mockResolvedValue({
+    status: 'ready', reason_code: null, message: '起動が完了しました。', schema_version: 1, backup_available: false,
+  });
   vi.mocked(api.getProject).mockResolvedValue(projectFixture());
   vi.mocked(api.listBlocks).mockResolvedValue([]);
   vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture());
@@ -182,9 +185,48 @@ describe('project durable controls', () => {
     })));
   });
 
+  it('locks stale project/history actions until an explicit refetch supplies matching typed recovery state', async () => {
+    const safeRetry = jobFixture({ recovery_code: 'safe_retry', recommended_action: 'retry_current', retryable: true });
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({ revision: 4 }));
+    vi.mocked(api.getProjectHistory)
+      .mockResolvedValueOnce(historyFixture({ revision: 3, jobs: [safeRetry] }))
+      .mockResolvedValue(historyFixture({ revision: 4, jobs: [safeRetry] }));
+
+    page();
+
+    expect(await screen.findByRole('button', { name: '現在の設定で再実行' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '現在の設定で新しく生成' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '最新の状態を再取得' }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: '現在の設定で再実行' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '現在の設定で再実行' }));
+    await waitFor(() => expect(api.executeOperation).toHaveBeenCalledWith(expect.objectContaining({
+      operation_id: 'project.generation.retry', base_revision: 4, arguments: { job_id: 8 },
+    })));
+  });
+
+  it('locks duplicate retry activation before a second operation can be submitted', async () => {
+    let finish!: (value: { operation_id: string; request_id: string; revision: number; job_id: number | null; data: Record<string, unknown> }) => void;
+    vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture({
+      jobs: [jobFixture({ recovery_code: 'safe_retry', recommended_action: 'retry_current', retryable: true })],
+    }));
+    vi.mocked(api.executeOperation).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    page();
+
+    const retry = await screen.findByRole('button', { name: '現在の設定で再実行' });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+
+    expect(api.executeOperation).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(retry).toBeDisabled());
+    finish({ operation_id: 'project.generation.retry', request_id: 'retry', revision: 3, job_id: 9, data: {} });
+    await waitFor(() => expect(screen.getByText('現在の設定での再実行を受け付けました。')).toBeInTheDocument());
+  });
+
   it('shows unknown external outcomes and blocks silently resending or starting again', async () => {
     vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture({ jobs: [jobFixture({
-      status: 'unknown', retryable: false, recovery_message: '外部送信後にプロセスが終了しました。', retry_blocked_reason: '外部処理の結果を確認してください。',
+      status: 'failed', recovery_code: 'external_outcome_unknown', recommended_action: 'check_provider',
+      retryable: false, recovery_message: '外部送信後にプロセスが終了しました。', retry_blocked_reason: '外部処理の結果を確認してください。',
     })] }));
     page();
     expect(await screen.findByText(/自動で再送しません/)).toBeInTheDocument();

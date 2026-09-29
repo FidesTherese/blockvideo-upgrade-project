@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '@/api/client';
 import { GenerationHistory } from '@/components/GenerationHistory';
+import { Layout } from '@/components/Layout';
 import { RecoveryStatus } from '@/components/RecoveryStatus';
 import { StartupStatus } from '@/components/StartupStatus';
 import type { JobSummary, RecoveryCode, RecommendedAction, StartupState } from '@/lib/types';
@@ -109,12 +110,13 @@ describe('GenerationHistory recovery controls', () => {
     />);
 
     expect(screen.getByRole('button', { name: '現在の設定で再実行' })).toBeEnabled();
+    expect(screen.getAllByRole('status')).toHaveLength(1);
   });
 
-  it('keeps an unknown provider outcome button-free', () => {
+  it('keeps an unknown provider outcome button-free using the typed action', () => {
     render(<GenerationHistory
       jobs={[jobFixture({
-        status: 'unknown',
+        status: 'failed',
         recovery_code: 'external_outcome_unknown',
         recommended_action: 'check_provider',
         retryable: false,
@@ -127,6 +129,93 @@ describe('GenerationHistory recovery controls', () => {
 
     expect(screen.getByRole('status')).toHaveTextContent('外部処理の結果が不明');
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('renders cancellation wait and completed states without an invalid action', () => {
+    const { rerender } = render(<GenerationHistory
+      jobs={[jobFixture({
+        status: 'running',
+        cancel_requested: true,
+        recovery_code: 'wait',
+        recommended_action: 'wait',
+        retryable: false,
+      })]}
+      disabled={false}
+      running
+      onRetry={vi.fn()}
+      onCancel={vi.fn()}
+    />);
+
+    expect(screen.getByRole('button', { name: '停止を待っています' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('処理の完了待ち');
+
+    rerender(<GenerationHistory
+      jobs={[jobFixture({
+        status: 'failed',
+        recovery_code: 'completed',
+        recommended_action: 'none',
+        retryable: true,
+      })]}
+      disabled={false}
+      running={false}
+      onRetry={vi.fn()}
+      onCancel={vi.fn()}
+    />);
+
+    expect(screen.getByRole('status')).toHaveTextContent('生成完了');
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('keeps the native retry button keyboard-focusable and activatable', () => {
+    const retry = vi.fn();
+    render(<GenerationHistory
+      jobs={[jobFixture({ recovery_code: 'safe_retry', recommended_action: 'retry_current', retryable: true })]}
+      disabled={false}
+      running={false}
+      onRetry={retry}
+      onCancel={vi.fn()}
+    />);
+
+    const button = screen.getByRole('button', { name: '現在の設定で再実行' });
+    button.focus();
+    expect(button).toHaveFocus();
+    const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
+    expect(button.dispatchEvent(keydown)).toBe(true);
+    button.click();
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it('contains long recovery content at a 390px viewport', () => {
+    vi.stubGlobal('innerWidth', 390);
+    const { container } = render(<GenerationHistory
+      jobs={[jobFixture({
+        recovery_message: '外部処理の状態を確認する必要があります。'.repeat(20),
+        recovery_code: 'external_outcome_unknown',
+        recommended_action: 'check_provider',
+        retryable: false,
+      })]}
+      disabled={false}
+      running={false}
+      onRetry={vi.fn()}
+      onCancel={vi.fn()}
+    />);
+
+    expect(container.firstElementChild).toHaveClass('max-w-full');
+    expect(container.scrollWidth).toBeLessThanOrEqual(390);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('Layout startup integration', () => {
+  it('mounts one startup live region above routed content', async () => {
+    vi.mocked(api.startup).mockResolvedValue(startup());
+
+    render(<Layout><p>ページ本文</p></Layout>);
+
+    expect(await screen.findByRole('status')).toHaveTextContent('起動が完了しました。');
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(screen.getByText('ページ本文')).toBeInTheDocument();
+    expect(api.startup).toHaveBeenCalledOnce();
   });
 });
 
