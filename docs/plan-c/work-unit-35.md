@@ -11,6 +11,8 @@ moving recovery authority into the browser.
   cancelled, and safely retryable states from explicit backend reason codes.
 - Show whether refresh, exact resend, cancellation wait, new generation, or restore
   from backup is appropriate.
+- Expose required `ProjectDetail.generation_recovery` as bounded `busy/wait`,
+  `external_outcome_unknown/check_provider`, or `ready/generate` state.
 - Disable controls that would imply unknown remote work can be retried.
 - Display migration/startup failures safely through a bounded status contract.
 - Preserve reload, stale-tab, responsive, keyboard, and screen-reader behavior.
@@ -27,11 +29,15 @@ startup polling is permitted while the backend explicitly reports `starting`.
 Component and browser tests cover every state and stale-view transition. Suggested
 actions match backend permissions, duplicate clicks remain safe, and narrow-screen
 and keyboard operation remain usable. Project/history fetches disable recovery actions.
-Immediately before retry or cancellation, the client refetches both, finds the same job,
-and requires current typed recommendation, retryability, status, cancellation state,
-and coherent revisions to still authorize the action; otherwise it sends no operation
-and shows refresh guidance. Startup migration guidance mentions restore
-only when the backend reports a backup. While startup remains `starting`, the client
+Generation, rerender, and per-block generation controls require the authoritative
+project contract as well as visible job rows. Immediately before retry or cancellation,
+the client refetches both, finds the same job, and requires the current project contract,
+typed recommendation, retryability, status, cancellation state, and coherent revisions
+to still authorize the action; otherwise it sends no operation and shows refresh
+guidance. Startup migration guidance mentions restore only when
+`MigrationError.backup_available` reports a verified published backup. The value is
+false before publication and remains true if migration fails afterward. While startup
+remains `starting`, the client
 polls only the startup status endpoint at a fixed interval with no overlap, aborts and
 cleans up on unmount, stops on terminal or network failure, and offers an explicit
 native status-refetch button after a network failure. jsdom tests establish only
@@ -42,6 +48,10 @@ creation: any unknown job or any `remote_side_effect IS TRUE` call in `in_flight
 `unknown` blocks retry, while local unknown calls do not. Only pending and running
 jobs wait. Unknown jobs always require provider checking; completed jobs are final;
 failed and cancelled jobs offer retry only when full retry execution can proceed.
-Job lists and history MUST construct one typed project recovery context with one
-aggregate query and reuse it across all returned summaries. Detached terminal jobs
-without context require refresh.
+Project detail, job lists, and history MUST derive one typed project recovery context
+with one aggregate query across all project jobs and unresolved remote-side-effect
+calls, independent of the 100-row history limit. Project detail exposes only the
+bounded code/action pair; lists and history reuse the context across returned summaries.
+Pending-job creation enforces the same active and uncertain-work blockers. Detached
+terminal jobs without context require refresh. Regression tests include blockers older
+than 100 rows and both pre- and post-backup migration failures.

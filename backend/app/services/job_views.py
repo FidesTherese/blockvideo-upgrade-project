@@ -10,7 +10,12 @@ from sqlalchemy.orm import Session
 
 from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob, JobStatus
-from app.schemas import JobSummary, RecommendedAction, RecoveryCode
+from app.schemas import (
+    JobSummary,
+    ProjectGenerationRecovery,
+    RecommendedAction,
+    RecoveryCode,
+)
 from app.services.external_calls import unresolved_remote_side_effect_predicate
 from app.services.generation_plan import STAGE_ORDER
 
@@ -40,6 +45,7 @@ class RecoveryContext:
     """Project-wide durable facts required to authorize retry guidance."""
 
     project_id: int
+    has_active_job: bool
     has_unknown_job: bool
     has_unresolved_remote_side_effect: bool
 
@@ -58,6 +64,12 @@ def build_recovery_contexts(
     rows = db.execute(
         select(
             GenerationJob.project_id,
+            func.max(
+                case(
+                    (GenerationJob.status.in_([JobStatus.pending, JobStatus.running]), 1),
+                    else_=0,
+                )
+            ),
             func.max(case((GenerationJob.status == JobStatus.unknown, 1), else_=0)),
             func.max(case((unresolved_remote_side_effect_predicate(), 1), else_=0)),
         )
@@ -65,14 +77,37 @@ def build_recovery_contexts(
         .where(GenerationJob.project_id.in_(ids))
         .group_by(GenerationJob.project_id)
     )
-    return {
+    contexts = {
         project_id: RecoveryContext(
             project_id=project_id,
+            has_active_job=False,
+            has_unknown_job=False,
+            has_unresolved_remote_side_effect=False,
+        )
+        for project_id in ids
+    }
+    contexts.update({
+        project_id: RecoveryContext(
+            project_id=project_id,
+            has_active_job=bool(has_active_job),
             has_unknown_job=bool(has_unknown_job),
             has_unresolved_remote_side_effect=bool(has_unresolved_call),
         )
-        for project_id, has_unknown_job, has_unresolved_call in rows
-    }
+        for project_id, has_active_job, has_unknown_job, has_unresolved_call in rows
+    })
+    return contexts
+
+
+def project_generation_recovery(context: RecoveryContext) -> ProjectGenerationRecovery:
+    """Map all persisted project blockers to a bounded public generation contract."""
+    if context.has_active_job:
+        return ProjectGenerationRecovery(code="busy", recommended_action="wait")
+    if context.blocks_retry:
+        return ProjectGenerationRecovery(
+            code="external_outcome_unknown",
+            recommended_action="check_provider",
+        )
+    return ProjectGenerationRecovery(code="ready", recommended_action="generate")
 
 
 def _recovery_action(

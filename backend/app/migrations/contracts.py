@@ -38,7 +38,14 @@ class MigrationError(RuntimeError):
     """Bounded migration failure carrying a stable machine-readable reason."""
 
     reason_code: MigrationReasonCode
+    backup_available: bool
 
-    def __init__(self, reason_code: MigrationReasonCode) -> None:
+    def __init__(
+        self,
+        reason_code: MigrationReasonCode,
+        *,
+        backup_available: bool = False,
+    ) -> None:
         self.reason_code = reason_code
+        self.backup_available = backup_available
         super().__init__(reason_code)

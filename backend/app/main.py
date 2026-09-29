@@ -96,7 +96,7 @@ async def lifespan(app: FastAPI):
                     reason_code=exc.reason_code,
                     message="データベースの移行に失敗しました。管理者に確認してください。",
                     schema_version=None,
-                    backup_available=False,
+                    backup_available=exc.backup_available,
                 )
             )
             yield

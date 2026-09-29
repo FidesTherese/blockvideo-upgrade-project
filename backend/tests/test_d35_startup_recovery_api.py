@@ -26,7 +26,9 @@ from app.migrations.runner import restore_database_backup
 from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob, JobStatus
 from app.models.project import Project
+from app.services.job_records import ProjectBusyError, UnresolvedExternalWorkError, create_pending_job
 from app.services.job_views import build_recovery_contexts, job_summary
+from app.services.transactions import begin_write
 from tests.fixtures.migrations.build_fixtures import build_fixture
 
 
@@ -309,6 +311,86 @@ def test_block_regeneration_responses_include_required_recovery_contract(
         assert response.job.retryable is False
 
 
+@pytest.mark.parametrize("blocker", ("busy", "unresolved_remote"))
+def test_project_generation_recovery_sees_blockers_older_than_history_window(
+    temp_storage: Path,
+    blocker: str,
+) -> None:
+    from app.api.routes_history import project_history
+    from app.api.routes_projects import get_project
+
+    with get_session_factory()() as db:
+        project = Project(title=f"old-{blocker}", source_script="synthetic")
+        db.add(project)
+        db.flush()
+        old_job = GenerationJob(
+            project_id=project.id,
+            current_stage="synthetic",
+            status=JobStatus.running if blocker == "busy" else JobStatus.failed,
+            input_snapshot={"source_script": "synthetic"} if blocker == "busy" else None,
+        )
+        db.add(old_job)
+        db.flush()
+        if blocker == "unresolved_remote":
+            db.add(ExternalCall(
+                job_id=old_job.id,
+                fingerprint="o" * 64,
+                provider="synthetic",
+                endpoint="https://provider.invalid/jobs",
+                remote_side_effect=True,
+                status="unknown",
+            ))
+        db.add_all([
+            GenerationJob(
+                project_id=project.id,
+                current_stage="synthetic",
+                status=JobStatus.completed,
+            )
+            for _ in range(101)
+        ])
+        db.commit()
+
+        history = project_history(project.id, db)
+        assert len(history["jobs"]) == 100
+        assert old_job.id not in {job["id"] for job in history["jobs"]}
+
+        detail = get_project(project.id, db)
+        expected = (
+            ("busy", "wait")
+            if blocker == "busy"
+            else ("external_outcome_unknown", "check_provider")
+        )
+        assert (
+            detail.generation_recovery.code,
+            detail.generation_recovery.recommended_action,
+        ) == expected
+
+        begin_write(db)
+        with pytest.raises(
+            ProjectBusyError if blocker == "busy" else UnresolvedExternalWorkError
+        ):
+            create_pending_job(db, project.id)
+        db.rollback()
+
+
+def test_project_generation_recovery_is_ready_without_durable_blockers(
+    temp_storage: Path,
+) -> None:
+    from app.api.routes_projects import get_project
+
+    with get_session_factory()() as db:
+        project = Project(title="ready", source_script="synthetic")
+        db.add(project)
+        db.commit()
+
+        detail = get_project(project.id, db)
+
+        assert detail.generation_recovery.model_dump() == {
+            "code": "ready",
+            "recommended_action": "generate",
+        }
+
+
 def test_job_list_and_history_build_one_recovery_context_query_each(
     temp_storage: Path,
 ) -> None:
@@ -466,6 +548,38 @@ def test_migration_failure_keeps_status_routes_readable_and_database_routes_fixe
         backup_available=False,
     )
     assert lease.release_count == 1
+
+
+def test_migration_failure_propagates_verified_backup_availability(
+    temp_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import main as main_module
+
+    events: list[str] = []
+    lease = RecordingLease(events)
+    monkeypatch.setattr(main_module, "register_models", lambda: events.append("register"))
+    monkeypatch.setattr(
+        main_module,
+        "acquire_database_lease",
+        lambda _database_url: events.append("acquire") or lease,
+    )
+
+    def fail_after_backup(*_args: Any, **_kwargs: Any) -> None:
+        events.append("migrate")
+        raise MigrationError("migration_failed", backup_available=True)
+
+    monkeypatch.setattr(main_module, "migrate_database", fail_after_backup)
+    monkeypatch.setattr(main_module, "init_db", lambda: pytest.fail("init must not run"))
+    monkeypatch.setattr(main_module, "shutdown_db", lambda: events.append("shutdown_db"))
+
+    with TestClient(create_app()) as client:
+        assert client.get("/api/startup").json() == {
+            "status": "migration_failed",
+            "reason_code": "migration_failed",
+            "message": "データベースの移行に失敗しました。管理者に確認してください。",
+            "schema_version": None,
+            "backup_available": True,
+        }
 
 
 def test_post_acquisition_startup_error_releases_lease_once(

@@ -70,6 +70,7 @@ def migrate_database(
         raise MigrationError("database_lease_unavailable")
     lease.assert_held_for(database_url)
     database_path = lease.database_path
+    backup_available = False
 
     try:
         with closing(sqlite3.connect(database_path)) as connection:
@@ -111,6 +112,7 @@ def migrate_database(
                     version,
                     before_publish=lambda: lease.assert_held_for(database_url),
                 )
+                backup_available = True
 
             lease.assert_held_for(database_url)
             apply_v0_to_v1(connection, metadata)
@@ -122,10 +124,18 @@ def migrate_database(
                 backup_created=backup is not None,
                 backup_sha256=backup.sha256 if backup is not None else None,
             )
-    except MigrationError:
+    except MigrationError as exc:
+        if backup_available and not exc.backup_available:
+            raise MigrationError(
+                exc.reason_code,
+                backup_available=True,
+            ) from exc
         raise
     except sqlite3.Error as exc:
-        raise MigrationError("migration_verification_failed") from exc
+        raise MigrationError(
+            "migration_verification_failed",
+            backup_available=backup_available,
+        ) from exc
 
 
 def _is_reparse_point(value: os.stat_result) -> bool:

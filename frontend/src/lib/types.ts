@@ -52,8 +52,17 @@ export interface ProjectSummary {
   updated_at: string | null;
 }
 
+export type ProjectGenerationRecoveryCode = 'busy' | 'external_outcome_unknown' | 'ready';
+export type ProjectGenerationRecommendedAction = 'wait' | 'check_provider' | 'generate';
+
+export interface ProjectGenerationRecovery {
+  code: ProjectGenerationRecoveryCode;
+  recommended_action: ProjectGenerationRecommendedAction;
+}
+
 /** Full project state returned by the detail and quick-create endpoints. */
 export interface ProjectDetail extends ProjectSummary, OutputQualitySettings {
+  generation_recovery: ProjectGenerationRecovery;
   source_script: string;
   global_visual_style: string | null;
   voicevox_url: string;

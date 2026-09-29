@@ -1189,6 +1189,7 @@ def test_runner_rejects_invalid_backup_integrity_without_publishing(
         _migrate(database)
 
     assert exc_info.value.reason_code == "backup_invalid"
+    assert exc_info.value.backup_available is False
     assert database.read_bytes() == before
     assert tuple((tmp_path / ".backups").iterdir()) == ()
 
@@ -1209,6 +1210,7 @@ def test_runner_removes_unpublished_backup_when_hashing_fails(
         _migrate(database)
 
     assert exc_info.value.reason_code == "backup_failed"
+    assert exc_info.value.backup_available is False
     assert database.read_bytes() == before
     assert tuple((tmp_path / ".backups").iterdir()) == ()
 
@@ -1229,6 +1231,7 @@ def test_runner_retains_verified_backup_when_ddl_fails(
         _migrate(database)
 
     assert exc_info.value.reason_code == "migration_failed"
+    assert exc_info.value.backup_available is True
     assert database.read_bytes() == before
     backups = _published_backups(tmp_path / ".backups")
     assert len(backups) == 1
@@ -1273,6 +1276,7 @@ def test_runner_surfaces_post_migration_verification_failures_with_backup(
         _migrate(database)
 
     assert exc_info.value.reason_code == "migration_verification_failed"
+    assert exc_info.value.backup_available is True
     backups = _published_backups(tmp_path / ".backups")
     assert len(backups) == 1
     with closing(sqlite3.connect(database)) as connection:

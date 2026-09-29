@@ -125,23 +125,29 @@ D35 recovery guidance mirrors durable execution permission. Only pending/running
 jobs wait; unknown outcomes always require provider checking; completed jobs are
 complete. Failed or cancelled jobs offer current-settings retry only when one
 project-level recovery context proves there is no unknown job and no unresolved
-remote-side-effect call. The same exact remote-call predicate protects pending-job
-creation, while local unknown calls do not block. List and history responses build
-that typed context once with one bulk aggregate query and reuse it for every job;
-a detached terminal job without context requires refresh rather than guessing.
-Recovery controls are disabled while project/history queries fetch or refetch. Retry
-and cancellation refetch both resources immediately before execution and proceed only
-when the same current job's typed status, recommendation, retryability, cancellation
+remote-side-effect call. The same exact active-job and remote-call predicates protect
+pending-job creation, while local unknown calls do not block. One aggregate query over
+all project jobs and remote calls, independent of the 100-row history window, derives
+required `ProjectDetail.generation_recovery`: `busy/wait`,
+`external_outcome_unknown/check_provider`, or `ready/generate`. List and history
+responses reuse that typed context for every job; a detached terminal job without
+context requires refresh rather than guessing. Generation, rerender, and block controls
+require the project contract as well as visible job rows. Recovery controls are
+disabled while project/history queries fetch or refetch. Retry and cancellation
+refetch both resources immediately before execution and proceed only when the project
+contract, same current job's typed status, recommendation, retryability, cancellation
 flag, and coherent revisions still authorize the requested action; otherwise no
 operation is sent and refresh guidance is shown. A synchronous lock prevents duplicate
 revalidation. Startup status polling performs only bounded, non-overlapping `GET /api/startup`
 requests at a fixed interval while status is `starting`, aborts and clears its timer
 on cleanup, and stops on ready, migration failure, or network failure. Network
-failure exposes an explicit status-refetch button. Migration failure mentions the
-documented restore procedure only when `backup_available` is true; otherwise it
-instructs stop/restart and support contact without implying that a backup exists.
-D35 implementation evidence includes 1300 backend tests, 150 frontend tests, Ruff,
-build, lint, and 18 local real-browser checks over synthetic API states at 390x844
+failure exposes an explicit status-refetch button. `MigrationError.backup_available`
+defaults false and becomes true only after verified backup publication; startup
+propagates that bounded value. Migration failure mentions the documented restore
+procedure only when it is true; otherwise it instructs stop/restart and support
+contact without implying that a backup exists.
+D35 final-review evidence includes 1304 backend tests, 154 frontend tests, Ruff,
+build, lint, and the prior 18 local real-browser checks over synthetic API states at 390x844
 and 1440x900. The browser checks cover both migration-backup branches, wait, safe
 retry, unknown/no-retry, stale refetch, duplicate locking, and real Tab/Enter; they
 are automated technical evidence, not human acceptance. D35 adds no runtime package;

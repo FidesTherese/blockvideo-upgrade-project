@@ -44,6 +44,12 @@ def create_pending_job(db: Session, project_id: int, stage: str = "queued", *, k
     SQLite can reuse deleted integer primary keys. Receipts outlive project/job
     deletion, so neither legacy nor durable enqueue may reuse a referenced job ID.
     """
+    active = db.scalar(select(GenerationJob.id).where(
+        GenerationJob.project_id == project_id,
+        GenerationJob.status.in_([JobStatus.pending, JobStatus.running]),
+    ).limit(1))
+    if active:
+        raise ProjectBusyError("このプロジェクトは生成中です。完了後に再実行してください。")
     uncertain = db.scalar(select(GenerationJob.id).where(
         GenerationJob.project_id == project_id, GenerationJob.status == JobStatus.unknown).limit(1))
     unresolved_call = db.scalar(select(ExternalCall.id).join(GenerationJob, GenerationJob.id == ExternalCall.job_id)

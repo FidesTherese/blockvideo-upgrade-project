@@ -582,6 +582,7 @@ class MigrationError(RuntimeError):
         "unsupported_legacy_schema", "backup_failed", "backup_invalid",
         "migration_failed", "migration_verification_failed"
     ]
+    backup_available: bool
 
 class BackupMetadata:
     target_database_path_sha256: str
@@ -678,7 +679,14 @@ runs only after columns exist; conflicting data that prevents a required unique 
 causes migration failure and rollback. Post-verification checks integrity, required
 tables, columns, ordinary/unique index sets, preserved pre-migration identities, and
 references. Failure rolls back where
-SQLite permits and retains only a complete verified backup/metadata pair. Every
+SQLite permits and retains only a complete verified backup/metadata pair.
+`migrate_database()` re-raises every later DDL or post-verification failure with
+`backup_available=True` only after `create_verified_backup()` returned a complete,
+verified, published backup/metadata pair. Classification, compatibility, identity,
+reference, capacity, backup-creation, and backup-publication failures retain
+`backup_available=False`. The exception exposes no path or hash. Lifespan copies this
+boolean directly into `StartupStatus.backup_available`, so UI restore guidance is
+shown only for a migration failure with an already published verified backup. Every
 migration entry point requires a live caller-owned `DatabaseLease` bound to the same
 canonical database path and rejects a missing, released, or mismatched lease before
 database I/O; it reasserts ownership immediately before backup publication and DDL,
@@ -757,6 +765,27 @@ is implemented and its evidence is recorded separately in `work-report-35.md`.
 
 ### D35 recovery UI and API design
 
+`ProjectDetail` adds one authoritative project-level generation contract:
+
+```python
+class ProjectGenerationRecovery(BaseModel):
+    code: Literal["busy", "external_outcome_unknown", "ready"]
+    recommended_action: Literal["wait", "check_provider", "generate"]
+
+class ProjectDetail(ProjectSummary):
+    generation_recovery: ProjectGenerationRecovery
+```
+
+`build_recovery_contexts()` derives this contract and job retry context in one
+aggregate query over every persisted job and every joined external call for the
+requested projects; history response limits never constrain that query. Pending or
+running jobs map to `busy/wait`. With no active job, any unknown job or unresolved
+remote-side-effect call maps to
+`external_outcome_unknown/check_provider`. Otherwise the project maps to
+`ready/generate`. The response contains only these bounded enum values and no job,
+provider, endpoint, path, or call detail. Pending-job creation enforces the same
+active/unknown/unresolved blockers under its writer transaction.
+
 `JobSummary` adds required fields:
 
 ```python
@@ -788,7 +817,14 @@ authoritative blocker. Existing prose fields remain compatibility display text, 
 button state uses only `retryable` and `recommended_action`.
 
 Frontend mirrors these exact unions. `RecoveryStatus.tsx` renders one status region
-and optional action description; it does not execute an action itself.
+and optional action description; it does not execute an action itself. Project-level
+generation, rerender, and block controls require
+`generation_recovery=ready/generate`; project guidance renders `busy/wait` or
+`external_outcome_unknown/check_provider` even when the blocking row is older than
+the 100-row history window. Immediate retry revalidation requires the refreshed
+project contract to remain `ready/generate` in addition to the target job's retry
+contract. Immediate cancellation revalidation requires the refreshed project contract
+to remain `busy/wait` in addition to the target job's cancellation contract.
 `StartupStatus.tsx` performs only `GET /api/startup` while status is `starting`, with
 one request in flight, a fixed two-second interval, and an `AbortController` plus
 timer cleanup on effect replacement or unmount. Polling stops on `ready`,
@@ -1609,8 +1645,10 @@ independent review gates supply the recorded trust decisions.
   on ready and degraded shutdown; offline restore between lifespans followed by a
   second lifespan reading restored bytes/state instead of the old pooled inode; and
   repeated lifespan startup with a fresh pool.
-- **D35:** API contract tests and Vitest interactions cover every code/action, immediate
-  action revalidation, stale refresh, duplicate click, DOM-order tab/Enter behavior,
+- **D35:** API contract tests and Vitest interactions cover every job and project-level
+  code/action, blockers older than the 100-row history window, unresolved old remote
+  calls, immediate action revalidation, migration backup availability propagation,
+  stale refresh, duplicate click, DOM-order tab/Enter behavior,
   role/status text, and structural narrow-layout containment. The final gate passed
   1300 backend tests and 150 frontend tests plus Ruff/build/lint. Installed Chrome
   passed 18 synthetic-state checks at 390x844 and 1440x900, including real Tab/Enter,

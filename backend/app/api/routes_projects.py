@@ -49,7 +49,12 @@ from app.services.project_settings import apply_project_settings
 from app.services.transactions import begin_write
 from app.services.settings_history import record_settings, validate_settings
 from app.services.job_control import cancel_job
-from app.services.job_views import RecoveryContext, build_recovery_contexts, job_summary
+from app.services.job_views import (
+    RecoveryContext,
+    build_recovery_contexts,
+    job_summary,
+    project_generation_recovery,
+)
 from app.services.project_identity import allocate_project_id, reserve_project_id
 from app.services.artifact_store import artifact_file_path
 from app.services.job_records import create_pending_job
@@ -88,7 +93,7 @@ def _project_summary(project: Project) -> ProjectSummary:
     )
 
 
-def _project_detail(project: Project) -> ProjectDetail:
+def _project_detail(project: Project, recovery_context: RecoveryContext) -> ProjectDetail:
     """Map user-visible project settings and state to API JSON.
 
     Args:
@@ -101,6 +106,7 @@ def _project_detail(project: Project) -> ProjectDetail:
     """
     return ProjectDetail(
         id=project.id,
+        generation_recovery=project_generation_recovery(recovery_context),
         revision=project.revision,
         title=project.title,
         status=project.status.value,
@@ -269,7 +275,8 @@ async def quick_create(
     ensure_project_layout(project.id)
     recovery_context = build_recovery_contexts(db, [project.id]).get(project.id)
     return QuickCreateResponse(
-        project=_project_detail(project), job=_job_summary(job, recovery_context)
+        project=_project_detail(project, recovery_context),
+        job=_job_summary(job, recovery_context),
     )
 
 
@@ -337,7 +344,8 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
     db.commit()
     db.refresh(project)
     ensure_project_layout(project.id)
-    return _project_detail(project)
+    recovery_context = build_recovery_contexts(db, [project.id])[project.id]
+    return _project_detail(project, recovery_context)
 
 
 @router.get("", response_model=list[ProjectSummary])
@@ -373,7 +381,8 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
-    return _project_detail(project)
+    recovery_context = build_recovery_contexts(db, [project_id])[project_id]
+    return _project_detail(project, recovery_context)
 
 
 @router.delete("/{project_id}", status_code=204)
@@ -454,7 +463,8 @@ def patch_project(
     apply_project_settings(project, updates)
     db.commit()
     db.refresh(project)
-    return _project_detail(project)
+    recovery_context = build_recovery_contexts(db, [project_id])[project_id]
+    return _project_detail(project, recovery_context)
 
 
 @router.get("/{project_id}/blocks", response_model=list[BlockSummary])

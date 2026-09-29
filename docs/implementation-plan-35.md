@@ -16,7 +16,8 @@
 - Unknown external outcomes never expose retry controls.
 - Native buttons, DOM-order focus, `role="status"`/`role="alert"`, keyboard operation, and 390 px layout are mandatory.
 - Duplicate action clicks remain safe through existing request IDs/locks.
-- Final delivery commit is `[DONE] Mission 35 Add recovery-oriented operational UI`.
+- The original D35 delivery commit is `561677c` (`[DONE] Mission 35 Add recovery-oriented operational UI`).
+- Final-review corrections remain D35 candidate behavior; D36 is not started.
 
 ---
 
@@ -220,3 +221,76 @@ git push
 ```
 
 Do not freeze, tag, publish, or deploy in D35.
+
+### Task 5: Final-review project recovery and backup guidance correction
+
+**Files:**
+- Modify: `backend/app/schemas/__init__.py`
+- Modify: `backend/app/services/job_views.py`
+- Modify: `backend/app/services/job_records.py`
+- Modify: `backend/app/api/routes_projects.py`
+- Modify: `backend/app/migrations/contracts.py`
+- Modify: `backend/app/migrations/runner.py`
+- Modify: `backend/app/main.py`
+- Modify: `backend/tests/test_d35_startup_recovery_api.py`
+- Modify: `backend/tests/test_d34_migrations.py`
+- Modify: `frontend/src/lib/types.ts`
+- Modify: `frontend/src/pages/ProjectDetailPage.tsx`
+- Modify: `frontend/src/test/project-fixtures.ts`
+- Modify: `frontend/src/test/project-history.test.tsx`
+- Modify: D35 specification, DTD, module note, report, and handoff
+
+**Interfaces:**
+- `ProjectDetail.generation_recovery` is a required bounded object containing
+  `code: "busy" | "external_outcome_unknown" | "ready"` and
+  `recommended_action: "wait" | "check_provider" | "generate"`.
+- `build_recovery_contexts()` performs one aggregate query over all project jobs and
+  joined external calls, independent of list/history limits.
+- `MigrationError(reason_code, *, backup_available=False)` exposes only a boolean
+  backup signal in addition to its bounded reason code.
+
+- [ ] **Step 1: Write and run RED backend tests**
+
+Add API coverage where the blocking job or unresolved remote-side-effect call falls
+outside the newest 100 history rows. Assert project detail still returns the exact
+project recovery contract and generation execution rejects. Add migration tests for
+failure after verified backup publication (`backup_available is True`) and failure
+before publication (`False`), plus lifespan propagation. Run:
+
+```bash
+cd backend
+python -m uv run pytest tests/test_d35_startup_recovery_api.py tests/test_d34_migrations.py -q
+```
+
+Expected: failures for the missing project contract and missing exception boolean.
+
+- [ ] **Step 2: Implement minimal backend contracts and rerun focused tests**
+
+Keep the recovery aggregate independent of returned history rows. Require the same
+active/unknown/unresolved facts before pending-job creation. Set the migration error
+boolean only after the verified backup publisher returns successfully, and copy it to
+startup status without exposing a path.
+
+- [ ] **Step 3: Write and run RED frontend tests**
+
+Assert an old busy blocker and an old unresolved remote call disable project, rerender,
+and block controls and show the matching fixed guidance despite no blocking job in the
+history payload. Assert retry/cancel revalidation refuses when the refreshed project
+contract disagrees with the job-level contract.
+
+```bash
+cd frontend
+npx -y pnpm@10.18.3 test -- project-history.test.tsx recovery-status.test.tsx
+```
+
+- [ ] **Step 4: Implement frontend project-contract gating and rerun focused tests**
+
+Use `ProjectDetail.generation_recovery` together with job rows for initial controls and
+immediate revalidation. Do not infer recovery from project prose or private details.
+
+- [ ] **Step 5: Reconcile D35 records and run the full gate**
+
+Record the original completed delivery commit `561677c`, the final correction commit
+subject, and that D36 is not started. Run backend pytest/Ruff and frontend test/build/
+lint, inspect diff/privacy, commit exactly
+`fix: align D35 project recovery and backup guidance`, and push `main`.

@@ -2,8 +2,16 @@ import { RecoveryStatus } from '@/components/RecoveryStatus';
 import type { JobSummary } from '@/lib/types';
 const stageLabels: Record<string, string> = { split: '台本分割', plan: '構成', image: '画像', audio: '音声', render: '動画組み立て', concat: '動画結合', subtitles: '字幕' };
 
-export function GenerationHistory({ jobs, disabled, running, onRetry, onCancel }: {
-  jobs: JobSummary[]; disabled: boolean; running: boolean; onRetry: (id: number) => void; onCancel: (id: number) => void;
+export function GenerationHistory({
+  jobs, disabled, running, retryBlocked = false, cancelBlocked = false, onRetry, onCancel,
+}: {
+  jobs: JobSummary[];
+  disabled: boolean;
+  running: boolean;
+  retryBlocked?: boolean;
+  cancelBlocked?: boolean;
+  onRetry: (id: number) => void;
+  onCancel: (id: number) => void;
 }) {
   return (
     <section id="generation-history" className="mt-6 max-w-full rounded-lg border border-slate-200 bg-white p-4">
@@ -18,10 +26,10 @@ export function GenerationHistory({ jobs, disabled, running, onRetry, onCancel }
               <p className="font-medium text-slate-800">生成 {job.id}
                 {job.input_revision != null && <span className="ml-2 font-normal text-slate-500">設定の版 {job.input_revision}</span>}
               </p>
-              {active ? <button type="button" className="btn-danger" disabled={disabled || job.cancel_requested}
+              {active ? <button type="button" className="btn-danger" disabled={disabled || cancelBlocked || job.cancel_requested}
                 onClick={() => onCancel(job.id)}>{job.cancel_requested ? '停止を待っています' : 'キャンセルを要求'}</button>
                 : job.recommended_action === 'retry_current' && job.retryable && <button type="button" className="btn-secondary"
-                  disabled={disabled || running} onClick={() => onRetry(job.id)}>現在の設定で再実行</button>}
+                  disabled={disabled || running || retryBlocked} onClick={() => onRetry(job.id)}>現在の設定で再実行</button>}
             </div>
             <RecoveryStatus job={job} />
             {job.parent_job_id != null && <p className="mt-1 text-xs text-slate-500">生成 {job.parent_job_id} からの再実行</p>}

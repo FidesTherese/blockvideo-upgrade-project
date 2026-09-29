@@ -88,8 +88,11 @@ Startup registers models, acquires the lease, migrates/verifies, then initialize
 recovers jobs. Degraded state starts no recovery or dispatcher; database dependencies
 return the fixed 503. Shutdown drains users, clears database caches, and releases the
 lease last, preventing reuse of an offline-restored SQLite inode. D35 job views derive
-one typed recovery context for a project collection. The browser renders its exact
-recovery/action enums, disables controls while state is unavailable, and refetches
+one typed recovery context with one aggregate query across all selected projects' jobs
+and unresolved remote-side-effect calls. `ProjectDetail.generation_recovery` exposes
+only `busy/wait`, `external_outcome_unknown/check_provider`, or `ready/generate`, so its
+authority is not constrained by the 100-row history view. The browser requires that
+contract alongside job rows, disables controls while state is unavailable, and refetches
 project plus history immediately before retry or cancellation; it never infers retry
 permission from prose.
 
@@ -134,7 +137,9 @@ permission from prose.
   exist, preserves every existing index, and rejects incomplete v1 structures.
   Backup/restore and the application mutually exclude through one non-blocking sibling
   lease; restore requires a stopped application, and stale lease removal is an operator
-  action only after confirming no live application or restore.
+  action only after confirming no live application or restore. `MigrationError` reports
+  backup availability only after verified publication, and startup preserves that value
+  for bounded restore guidance after a later migration failure.
 - D35 startup status polling is bounded and non-overlapping; unknown external outcomes
   remain button-free, stale actions require refresh, and duplicate recovery activation
   is synchronously locked. Browser evidence is synthetic and is not human acceptance.

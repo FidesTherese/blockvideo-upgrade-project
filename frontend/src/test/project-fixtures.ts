@@ -13,7 +13,9 @@ export function projectFixture(overrides: Partial<ProjectDetail> = {}): ProjectD
     subtitle_text_color: '#FFFFFF', subtitle_outline_color: '#000000', subtitle_background: true,
     subtitle_max_chars_per_line: 36, pre_margin_seconds: 0.15, post_margin_seconds: 1.5,
     min_display_seconds: 2, narration_sentence_pause_seconds: 1.5, max_slides_per_block: 1,
-    use_fake_providers: true, ...DEFAULT_QUALITY, ...overrides,
+    use_fake_providers: true,
+    generation_recovery: { code: 'ready', recommended_action: 'generate' },
+    ...DEFAULT_QUALITY, ...overrides,
   };
 }
 

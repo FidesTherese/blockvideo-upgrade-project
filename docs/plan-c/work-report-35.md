@@ -4,10 +4,16 @@
 
 D35 is implemented and technically verified. Backend job summaries expose required
 `recovery_code` and `recommended_action` enums derived from persisted project-wide
-recovery context. The frontend renders those contracts, polls only startup status
-while startup is pending, and revalidates project plus history immediately before a
-retry or cancellation. Unknown external outcomes expose no retry path. A synchronous
-client lock prevents duplicate recovery submissions before React state updates.
+recovery context. `ProjectDetail.generation_recovery` exposes the authoritative bounded
+project state from one aggregate query over all project jobs and unresolved remote-side-
+effect calls, independent of the 100-row history limit. The frontend requires that
+contract alongside job rows for generation controls and pre-action revalidation.
+Unknown external outcomes expose no retry path. A synchronous client lock prevents
+duplicate recovery submissions before React state updates.
+
+`MigrationError.backup_available` is false until verified backup publication and true
+for failures after publication. Startup status preserves that value, so restore
+guidance appears only when a verified backup exists.
 
 This is automated technical evidence, not hands-on user acceptance, independent
 review, publication, deployment, or a release decision.
@@ -21,15 +27,19 @@ the same exact specifier.
 
 ## Sequential full gate
 
-Executed from the repository root in the required order on 2026-09-30:
+Final-review commands executed from the repository root on 2026-09-30:
 
-1. `cd backend && python -m uv run pytest` — **1300 passed, 7 skipped**, one existing
-   Starlette/httpx deprecation warning, 166.92 s. The seven skips are the existing
+1. `cd backend && python -m uv run pytest` — **1304 passed, 7 skipped**, one existing
+   Starlette/httpx deprecation warning, 174.81 s. The seven skips are the existing
    ONNX-runtime-dependent cases.
 2. `cd backend && python -m uv run ruff check .` — **passed**.
-3. `cd frontend && npx -y pnpm@10.18.3 test` — **17 files, 150 tests passed**.
+3. `cd frontend && npx -y pnpm@10.18.3 test` — **17 files, 154 tests passed**.
 4. `cd frontend && npx -y pnpm@10.18.3 build` — **passed**, 190 modules transformed.
 5. `cd frontend && npx -y pnpm@10.18.3 lint` — **passed**.
+
+Focused regression evidence also passed: 209 backend generation, operation,
+startup, and migration tests; 39 focused project-history frontend tests; targeted
+Ruff; TypeScript/Vite build; and ESLint.
 
 No required command was skipped.
 
@@ -93,6 +103,8 @@ none of their generated contents.
 The browser checks prove behavior against synthetic API state in a real local browser;
 they do not prove a real migration failure, provider reconciliation, user acceptance,
 independent review, accessibility conformance certification, load/capacity, or release
-readiness. D36 has not started. D35 must be committed with the exact subject
-`[DONE] Mission 35 Add recovery-oriented operational UI`; only a later separately
-authorized D36 task may freeze that commit.
+readiness. The completed D35 delivery commit is
+`561677c` (`[DONE] Mission 35 Add recovery-oriented operational UI`). The final-review
+correction is the commit containing this report, identified by the exact subject
+`fix: align D35 project recovery and backup guidance`. **D36 has not started, and no
+candidate freeze exists.**

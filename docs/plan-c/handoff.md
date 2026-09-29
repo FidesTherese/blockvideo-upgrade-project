@@ -3,16 +3,19 @@
 ## D35 current result (2026-09-30 JST)
 
 Read `work-unit-35.md`, `work-report-35.md`, the D35 section of `docs/DTD.md`, and
-`docs/modules/operation-core.md` first. Backend summaries now expose typed recovery
-codes/actions from one project-wide recovery context. Frontend controls use only those
-contracts, disable during fetch/refetch, and refetch project plus history immediately
-before retry/cancel. Unknown external outcomes never expose retry. Startup polling is
-bounded to `GET /api/startup`; migration guidance mentions restore only when a backup
-is reported. D35 adds no runtime dependency. The only new package is pinned dev-only
-`@testing-library/user-event` 14.6.7 for keyboard tests.
+`docs/modules/operation-core.md` first. Backend job summaries expose typed recovery
+codes/actions from one project-wide recovery context. Required
+`ProjectDetail.generation_recovery` exposes bounded `busy/wait`,
+`external_outcome_unknown/check_provider`, or `ready/generate` state from one aggregate
+query across all project jobs and unresolved remote-side-effect calls, independent of
+the 100-row history limit. Frontend generation controls and pre-action revalidation
+require that contract alongside job rows. Unknown external outcomes never expose retry.
+`MigrationError.backup_available` becomes true only after verified backup publication;
+startup preserves it and restore guidance depends on it. D35 adds no runtime dependency.
+The only new package is pinned dev-only `@testing-library/user-event` 14.6.7.
 
-The sequential final gate passed: backend 1300 with seven existing ONNX skips and one
-existing deprecation warning; Ruff passed; frontend 17 files/150 tests passed; build
+The final-review gate passed: backend 1304 with seven existing ONNX skips and one
+existing deprecation warning; Ruff passed; frontend 17 files/154 tests passed; build
 transformed 190 modules; ESLint passed. Installed Chrome plus transient local
 Playwright passed 18/18 synthetic checks across 390x844 and 1440x900: ready, both
 migration-failure backup branches, wait, safe retry, unknown/no-retry, stale refetch,
@@ -23,9 +26,11 @@ and one result JSON are covered by manifest SHA-256
 
 This is synthetic automated technical evidence, not human acceptance or independent
 review. No real user database, provider, model, cloud call, release, tag, publication,
-or deployment was used. **D36 has not started and no candidate freeze exists.** The
-D35 delivery commit is the candidate only after the exact commit subject is created;
-a separately authorized later D36 task must pin and freeze it.
+or deployment was used. The completed D35 delivery commit is `561677c`
+(`[DONE] Mission 35 Add recovery-oriented operational UI`). The final-review correction
+is the commit containing this handoff, identified by the exact subject
+`fix: align D35 project recovery and backup guidance`. **D36 has not started and no
+candidate freeze exists.**
 
 ## D34 historical result (2026-09-29 JST)
 

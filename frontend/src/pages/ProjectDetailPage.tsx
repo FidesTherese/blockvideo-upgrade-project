@@ -33,8 +33,16 @@ function ProjectMonitor({ id }: { id: number }) {
   const [actionRefreshRequired, setActionRefreshRequired] = useState(false);
   const jobs = history.data?.jobs ?? [];
   const active = jobs.filter((job) => job.recommended_action === 'wait');
-  const running = active.length > 0 || ['splitting', 'planning', 'generating', 'rendering'].includes(project.data?.status ?? '');
-  const unknown = jobs.some((job) => job.recommended_action === 'check_provider');
+  const projectRecovery = project.data?.generation_recovery;
+  const projectBusy = projectRecovery?.code === 'busy'
+    && projectRecovery.recommended_action === 'wait';
+  const projectUnknown = projectRecovery?.code === 'external_outcome_unknown'
+    && projectRecovery.recommended_action === 'check_provider';
+  const projectReady = projectRecovery?.code === 'ready'
+    && projectRecovery.recommended_action === 'generate';
+  const running = projectBusy || active.length > 0
+    || ['splitting', 'planning', 'generating', 'rendering'].includes(project.data?.status ?? '');
+  const unknown = projectUnknown || jobs.some((job) => job.recommended_action === 'check_provider');
   const viewsDiffer = history.data != null && project.data != null && history.data.revision !== project.data.revision;
   const actionsUnavailable = command.locked || language.locked || project.isFetching || history.isFetching
     || revalidatingAction || !history.data || !!history.error || viewsDiffer;
@@ -57,12 +65,17 @@ function ProjectMonitor({ id }: { id: number }) {
       const coherent = !currentProject.isError && !currentHistory.isError
         && currentProject.data != null && currentHistory.data != null
         && currentProject.data.revision === currentHistory.data.revision;
+      const currentRecovery = currentProject.data?.generation_recovery;
       const authorized = action === 'retry'
         ? currentJob != null
+          && currentRecovery?.code === 'ready'
+          && currentRecovery.recommended_action === 'generate'
           && (currentJob.status === 'failed' || currentJob.status === 'cancelled')
           && currentJob.recommended_action === 'retry_current'
           && currentJob.retryable === true
         : currentJob != null
+          && currentRecovery?.code === 'busy'
+          && currentRecovery.recommended_action === 'wait'
           && (currentJob.status === 'pending' || currentJob.status === 'running')
           && currentJob.recommended_action === 'wait'
           && currentJob.retryable === false
@@ -114,13 +127,13 @@ function ProjectMonitor({ id }: { id: number }) {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <StatusBadge status={p.status} />
-          <button type="button" className="btn-primary" disabled={blocked || unknown}
+          <button type="button" className="btn-primary" disabled={blocked || !projectReady}
             onClick={() => command.execute('project.generation.start', revision, {}, '生成開始')}>
             {p.block_count > 0 ? '現在の設定で新しく生成' : '生成開始'}
           </button>
-          <button type="button" className="btn-secondary" disabled={blocked || unknown || !p.block_count}
+          <button type="button" className="btn-secondary" disabled={blocked || !projectReady || !p.block_count}
             onClick={() => command.execute('project.generation.start', revision, { kind: 'rerender' }, '動画の再レンダリング')}>レンダリングのみ再実行</button>
-          {active[0] && <button type="button" className="btn-danger" disabled={actionsUnavailable || active[0].cancel_requested}
+          {active[0] && <button type="button" className="btn-danger" disabled={actionsUnavailable || !projectBusy || active[0].cancel_requested}
             onClick={() => { void revalidateRecoveryAction('cancel', active[0].id); }}>
             {active[0].cancel_requested ? 'キャンセル要求済み' : '生成をキャンセル'}
           </button>}
@@ -134,10 +147,12 @@ function ProjectMonitor({ id }: { id: number }) {
         <ProgressBar progress={p.progress} stage={p.current_stage} status={p.status} />
       </div>
       {running && <p className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" role="status">
-        生成中のため設定を変更できません。キャンセルを要求した場合も、停止完了までお待ちください。
+        {projectBusy
+          ? '生成処理が完了するまでお待ちください。停止要求後も、安全に停止するまで生成操作はできません。'
+          : '生成中のため設定を変更できません。キャンセルを要求した場合も、停止完了までお待ちください。'}
       </p>}
       {unknown && <p className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" role="status">
-        外部処理の結果が未確定です。「生成の履歴」の復旧情報を確認してください。
+        外部処理の結果が未確定です。自動で再送せず、外部サービス側の実行履歴を確認してください。
       </p>}
       {history.error && <p role="alert" className="mt-4 text-sm text-red-600">履歴を取得できません。状態を確認できるまで操作を待機します。</p>}
       {viewsDiffer && <div role="status" className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
@@ -163,12 +178,13 @@ function ProjectMonitor({ id }: { id: number }) {
         <SettingsHistory versions={history.data.settings_versions} revision={revision} disabled={blocked}
           onRestore={(selectedRevision) => command.execute('project.settings.restore', revision, { revision: selectedRevision }, '設定の復元')} />
         <GenerationHistory jobs={jobs} running={running} disabled={actionsUnavailable}
+          retryBlocked={!projectReady} cancelBlocked={!projectBusy}
           onCancel={(jobId) => { void revalidateRecoveryAction('cancel', jobId); }}
           onRetry={(jobId) => { void revalidateRecoveryAction('retry', jobId); }} />
       </>}
       <section className="mt-6">
         <h2 className="text-base font-semibold text-slate-800">ブロック ({blocks.data?.length ?? 0})</h2>
-        <div className="mt-3"><BlockList blocks={blocks.data ?? []} disabled={blocked || unknown}
+        <div className="mt-3"><BlockList blocks={blocks.data ?? []} disabled={blocked || !projectReady}
           onGenerate={(kind, blockIndex) => command.execute('project.generation.start', revision,
             kind === 'rerender' ? { kind } : { kind, block_index: blockIndex },
             kind === 'block_audio' ? `ブロック ${blockIndex} の音声再生成` : kind === 'block_visual' ? `ブロック ${blockIndex} の画像再生成` : '動画の再レンダリング')} /></div>

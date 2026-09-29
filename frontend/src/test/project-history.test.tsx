@@ -163,12 +163,15 @@ describe('project durable controls', () => {
   });
 
   it.each(['pending', 'running'])('disables editing during a %s job', async (status) => {
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({
+      generation_recovery: { code: 'busy', recommended_action: 'wait' },
+    }));
     vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture({ jobs: [jobFixture({ status })] }));
     page();
     expect(await screen.findByLabelText('字幕の大きさ（px）')).toBeDisabled();
     expect(screen.getByLabelText('戻す設定の版')).toBeDisabled();
     expect(screen.getByRole('button', { name: '現在の設定で新しく生成' })).toBeDisabled();
-    expect(screen.getByText(/生成中のため設定を変更できません/)).toBeInTheDocument();
+    expect(screen.getByText(/生成処理が完了するまでお待ちください/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'キャンセルを要求' }));
     await waitFor(() => expect(api.executeOperation).toHaveBeenCalledWith(expect.objectContaining({
       operation_id: 'project.generation.cancel', arguments: { job_id: 8 },
@@ -260,6 +263,9 @@ describe('project durable controls', () => {
   });
 
   it('refuses cancellation when the same-revision job completes before execution', async () => {
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({
+      generation_recovery: { code: 'busy', recommended_action: 'wait' },
+    }));
     vi.mocked(api.getProjectHistory)
       .mockResolvedValueOnce(historyFixture({ jobs: [jobFixture({ status: 'running' })] }))
       .mockResolvedValue(historyFixture({ jobs: [jobFixture({
@@ -267,7 +273,9 @@ describe('project durable controls', () => {
       })] }));
     page();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'キャンセルを要求' }));
+    const cancel = await screen.findByRole('button', { name: 'キャンセルを要求' });
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture());
+    fireEvent.click(cancel);
 
     expect(await screen.findByText(/最新の状態を確認してから、表示された操作を選び直してください/)).toBeInTheDocument();
     expect(api.executeOperation).not.toHaveBeenCalled();
@@ -316,6 +324,12 @@ describe('project durable controls', () => {
   });
 
   it('shows unknown external outcomes and blocks silently resending or starting again', async () => {
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({
+      generation_recovery: {
+        code: 'external_outcome_unknown',
+        recommended_action: 'check_provider',
+      },
+    }));
     vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture({ jobs: [jobFixture({
       status: 'failed', recovery_code: 'external_outcome_unknown', recommended_action: 'check_provider',
       retryable: false, recovery_message: '外部送信後にプロセスが終了しました。', retry_blocked_reason: '外部処理の結果を確認してください。',
@@ -325,6 +339,58 @@ describe('project durable controls', () => {
     expect(screen.queryByRole('button', { name: '現在の設定で再実行' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '現在の設定で新しく生成' })).toBeDisabled();
     expect(screen.getByText('外部処理の結果を確認してください。')).toBeInTheDocument();
+    expect(api.executeOperation).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['busy', 'wait', '生成処理が完了するまでお待ちください。停止要求後も、安全に停止するまで生成操作はできません。'],
+    ['external_outcome_unknown', 'check_provider', '外部処理の結果が未確定です。自動で再送せず、外部サービス側の実行履歴を確認してください。'],
+  ] as const)('uses project-level %s recovery when the blocker is outside history', async (code, action, guidance) => {
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({
+      generation_recovery: { code, recommended_action: action },
+    }));
+    vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture({ jobs: [] }));
+    vi.mocked(api.listBlocks).mockResolvedValue([blockFixture()]);
+
+    page();
+
+    expect(await screen.findByText(guidance)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '現在の設定で新しく生成' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'レンダリングのみ再実行' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '画像だけ再生成' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '音声だけ再生成' })).toBeDisabled();
+    expect(api.executeOperation).not.toHaveBeenCalled();
+  });
+
+  it('disables an otherwise safe retry when project-level recovery is unknown', async () => {
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({
+      generation_recovery: {
+        code: 'external_outcome_unknown',
+        recommended_action: 'check_provider',
+      },
+    }));
+    vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture({ jobs: [jobFixture()] }));
+
+    page();
+
+    expect(await screen.findByRole('button', { name: '現在の設定で再実行' })).toBeDisabled();
+    expect(api.executeOperation).not.toHaveBeenCalled();
+  });
+
+  it('refuses retry when refreshed project-level recovery no longer permits generation', async () => {
+    vi.mocked(api.getProjectHistory).mockResolvedValue(historyFixture({ jobs: [jobFixture()] }));
+    page();
+
+    const retry = await screen.findByRole('button', { name: '現在の設定で再実行' });
+    vi.mocked(api.getProject).mockResolvedValue(projectFixture({
+      generation_recovery: {
+        code: 'external_outcome_unknown',
+        recommended_action: 'check_provider',
+      },
+    }));
+    fireEvent.click(retry);
+
+    expect(await screen.findByText(/最新の状態を確認してから、表示された操作を選び直してください/)).toBeInTheDocument();
     expect(api.executeOperation).not.toHaveBeenCalled();
   });
 

@@ -329,12 +329,24 @@ class ProjectSummary(BaseModel):
     updated_at: str | None
 
 
+ProjectGenerationRecoveryCode = Literal["busy", "external_outcome_unknown", "ready"]
+ProjectGenerationRecommendedAction = Literal["wait", "check_provider", "generate"]
+
+
+class ProjectGenerationRecovery(BaseModel):
+    """Bounded project-wide generation permission and operator action."""
+
+    code: ProjectGenerationRecoveryCode
+    recommended_action: ProjectGenerationRecommendedAction
+
+
 class ProjectDetail(ProjectSummary):
     """Project summary plus source, pacing, subtitle, and output settings.
 
     Raw provider credentials are intentionally not part of this response.
     """
 
+    generation_recovery: ProjectGenerationRecovery
     source_script: str
     global_visual_style: str | None
     voicevox_url: str
