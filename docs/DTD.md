@@ -889,23 +889,62 @@ class FreezeManifest(BaseModel):
 `evaluation/release_candidate/freeze.py` reads bounded control bytes once, validates
 the detached lowercase 64-hex digest before parsing, requires byte-for-byte canonical
 JSON and the exact fields above, and then matches commit, subject, and cleanliness to
-the detached candidate. `FreezeManifest.created_at` is not wall-clock time: it is the
-candidate commit's integer committer timestamp (`git show -s --format=%ct`) rendered
-in UTC exactly as `YYYY-MM-DDTHH:MM:SSZ`. Git timestamps are second precision, so no
-fraction is emitted. The freezer rechecks commit and cleanliness immediately before
-atomic publication. Given identical candidate-control bytes, candidate bytes,
-allowlisted inputs, and runtime/version strings, canonical manifest bytes are
-byte-identical; generation time, host locale, timezone, temp paths, and directory
-enumeration order cannot affect them. The fingerprint allowlist contains D35 behavior and its manifests,
-lockfiles, frontend source, profiles, tests, and design contracts as they existed in
-D35; it explicitly excludes all later D36–D40 tooling plus `.env`, databases, media,
-weights, caches, `node_modules`, and held-out material. Paths are lexical relative
-POSIX paths. `candidate_id` is
-`aggregate_sha256[:16] + "-" + git_commit[:12]`. D36 also creates the shared strict `evaluation/tool_attestation.py` contract. A
-separate canonical D36 source attestation identifies the post-candidate
+the detached candidate. Candidate validation rejects any cached index entry whose
+`git ls-files -v` tag is not normal `H`, any non-stage-zero entry, and any index mode
+other than regular `100644` or `100755`; this rejects assume-unchanged,
+skip-worktree, sparse-index directories, symlinks, submodules, and other special
+entries. For every allowlisted path, `fingerprint_committed_file()` reads the working
+regular file through its descriptor, reads `git show HEAD:<path>`, requires equal size
+and SHA-256, and places the committed blob size/hash in the manifest. Porcelain status
+is therefore not the provenance boundary. `backend/.env.example` is explicitly
+required and allowed before the broad `.env` exclusion; other environment files remain
+excluded.
+
+`_detect_schema_version()` parses only the committed
+`backend/app/migrations/schema.py` blob with Python `ast`. Exactly one
+`apply_v0_to_v1` definition and exactly one `connection.execute()` call with the
+exact constant text `PRAGMA user_version=<decimal>` must exist; malformed AST/text, absence, or ambiguity
+fails. The detected decimal must equal the sole supported version 1 and is recorded as
+`FreezeManifest.schema_version_number`; it is never supplied by the caller or
+hardcoded into the manifest independently of source.
+
+`FreezeManifest.created_at` is not wall-clock time: it is the candidate commit's
+integer committer timestamp (`git show -s --format=%ct`) rendered in UTC exactly as
+`YYYY-MM-DDTHH:MM:SSZ`. Git timestamps are second precision, so no fraction is
+emitted. The freezer rechecks commit and cleanliness immediately before publication.
+Given identical candidate-control bytes, committed allowlisted blobs, and
+runtime/version strings, canonical manifest bytes are byte-identical; generation time,
+host locale, timezone, temp paths, and directory enumeration order cannot affect them.
+The fingerprint allowlist contains D35 behavior and its manifests, lockfiles, frontend
+source, profiles, tests, and design contracts as they existed in D35; it explicitly
+excludes all later D36–D40 tooling plus secret `.env` files, databases, media, weights,
+caches, `node_modules`, and held-out material. Paths are lexical relative POSIX paths.
+`candidate_id` is `aggregate_sha256[:16] + "-" + git_commit[:12]`.
+
+D36 also creates the shared strict `evaluation/tool_attestation.py` contract.
+`validate_git_repository()` resolves `git rev-parse --show-toplevel` and requires it
+to equal the declared tooling root, requires declared `git_commit == HEAD`, a fully
+clean tracked/untracked status, and the same normal index-entry constraints used for
+the candidate. `attest_tool()` fingerprints every source from the declared HEAD blob
+only after exact working-byte comparison, repeats repository and per-file validation,
+and therefore refuses real generation until all attested tooling bytes are committed.
+The separate canonical D36 source attestation identifies the post-candidate
 freezer/protocol/unlabeled-contract/host allowlist and never replaces
-`FreezeManifest.git_commit` or `aggregate_sha256`; D37–D40 reuse the attestation
-model and canonical hashing unchanged.
+`FreezeManifest.git_commit` or `aggregate_sha256`; D37–D40 reuse the attestation model
+and canonical hashing unchanged.
+
+`_validate_output_root()` permits any resolved external root but, when the root is
+inside the identified tooling repository, permits only resolved
+`<tool-repo>/release-evidence/**`; `storage`, cache directories, and every other
+ignored or tracked in-repository location fail. Publication first writes and verifies
+fsynced staging files in the output root, then claims the final candidate directory
+with `mkdir(exist_ok=False)`. It no-replace hard-links each staged file into the claim,
+using exclusive-create copy only where hard links are unsupported, fsyncs the claimed
+directory and parent, and never renames a directory over a destination. Any failure
+removes only a directory successfully claimed by this invocation, so a concurrently
+created destination remains untouched. Final readback uses bounded regular-file reads
+for both artifacts, requires exact canonical bytes and strict models, recomputes the
+tool-attestation aggregate, and removes the claimed partial output on mismatch.
 
 `evaluation/final_protocol.json` is the canonical D36 policy template only. The
 external `evaluation_trial_host` accepts exactly one strict independent wire object:

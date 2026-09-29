@@ -1,6 +1,8 @@
 """Deterministically freeze one clean detached D35 candidate checkout."""
 from __future__ import annotations
 
+import ast
+import errno
 import hashlib
 import os
 import platform
@@ -186,6 +188,54 @@ def _load_control(path: Path, expected_sha256: str) -> tuple[CandidateControl, s
     return control, actual
 
 
+def _detect_schema_version(candidate_root: Path) -> int:
+    source = _git(
+        candidate_root,
+        "show",
+        "HEAD:backend/app/migrations/schema.py",
+    ).stdout
+    try:
+        tree = ast.parse(source, filename="backend/app/migrations/schema.py")
+    except SyntaxError as exc:
+        raise ValueError("candidate migration source is malformed") from exc
+    migration_functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "apply_v0_to_v1"
+    ]
+    if len(migration_functions) != 1:
+        raise ValueError("candidate migration source must define apply_v0_to_v1 once")
+    assignments: list[int] = []
+    for node in ast.walk(migration_functions[0]):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        receiver = node.func.value
+        if (
+            node.func.attr != "execute"
+            or not isinstance(receiver, ast.Name)
+            or receiver.id != "connection"
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = node.args[0]
+        if not isinstance(argument, ast.Constant) or not isinstance(argument.value, str):
+            continue
+        if argument.value == "PRAGMA user_version":
+            continue
+        if argument.value.startswith("PRAGMA user_version"):
+            match = re.fullmatch(r"PRAGMA user_version=([0-9]+)", argument.value)
+            if match is None:
+                raise ValueError("candidate migration source has malformed schema version")
+            assignments.append(int(match.group(1)))
+    if len(assignments) != 1:
+        raise ValueError("candidate migration source must declare one schema version")
+    if assignments[0] != 1:
+        raise ValueError("candidate schema version is unsupported")
+    return assignments[0]
+
+
 def _created_at(timestamp: int) -> str:
     try:
         return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -235,7 +285,9 @@ def _path_is_within(path: Path, parent: Path) -> bool:
     return True
 
 
-def _validate_output_root(output_root: Path, candidate_root: Path) -> tuple[Path, bool]:
+def _validate_output_root(
+    output_root: Path, candidate_root: Path, tool_repo_root: Path
+) -> tuple[Path, bool]:
     absolute = output_root.absolute()
     existing = absolute
     while not existing.exists():
@@ -249,23 +301,11 @@ def _validate_output_root(output_root: Path, candidate_root: Path) -> tuple[Path
         raise ValueError("output root must be external to the candidate")
     if absolute.exists():
         _require_directory(absolute, "output root")
-    probe = subprocess.run(
-        ["git", "-C", str(existing), "rev-parse", "--show-toplevel"],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    if probe.returncode == 0:
-        repository = Path(probe.stdout.strip()).resolve(strict=True)
-        if _path_is_within(resolved, repository):
-            ignored = subprocess.run(
-                ["git", "-C", str(repository), "check-ignore", "-q", "--no-index", str(resolved)],
-                check=False,
-                capture_output=True,
-            )
-            if ignored.returncode != 0:
-                raise ValueError("tracked output roots are forbidden; use an ignored external evidence path")
+    release_evidence = tool_repo_root / "release-evidence"
+    if _path_is_within(resolved, tool_repo_root) and not _path_is_within(
+        resolved, release_evidence
+    ):
+        raise ValueError("in-repository output must be under release-evidence")
     created = False
     if not absolute.exists():
         absolute.mkdir(parents=True, exist_ok=False)
@@ -300,16 +340,25 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _publish_directory(temporary: Path, final: Path) -> None:
-    if final.exists():
-        raise ValueError("output destination already exists")
+def _publish_file_no_replace(source: Path, destination: Path, value: bytes) -> None:
     try:
-        os.rename(temporary, final)
+        os.link(source, destination)
     except OSError as exc:
-        if final.exists():
-            raise ValueError("output destination already exists") from exc
-        raise
-    _fsync_directory(final.parent)
+        if exc.errno not in {errno.EACCES, errno.EPERM, errno.EXDEV, errno.ENOTSUP}:
+            raise
+        _write_fsynced(destination, value)
+
+
+def _verify_canonical_attestation(raw: bytes, expected: ToolAttestation) -> None:
+    try:
+        parsed = ToolAttestation.model_validate_json(raw, strict=True)
+    except ValidationError as exc:
+        raise ValueError("published tool attestation is invalid") from exc
+    canonical = canonical_json_bytes(parsed.model_dump(mode="json")) + b"\n"
+    if raw != canonical or parsed != expected:
+        raise ValueError("published tool attestation changed")
+    if aggregate_fingerprints(parsed.files) != parsed.aggregate_sha256:
+        raise ValueError("published tool attestation aggregate mismatch")
 
 
 def freeze_candidate(
@@ -327,6 +376,7 @@ def freeze_candidate(
     initial_snapshot = _snapshot_tree(candidate)
     files = fingerprint_files(candidate)
     aggregate = aggregate_fingerprints(files)
+    schema_version = _detect_schema_version(candidate)
     manifest = FreezeManifest(
         schema_version=1,
         candidate_id=f"{aggregate[:16]}-{commit[:12]}",
@@ -335,7 +385,7 @@ def freeze_candidate(
         candidate_control_sha256=control_sha256,
         created_at=_created_at(timestamp),
         runtime=_runtime_versions(),
-        schema_version_number=1,
+        schema_version_number=schema_version,
         mode_configuration=_MODE_CONFIGURATION,
         files=files,
         aggregate_sha256=aggregate,
@@ -351,30 +401,52 @@ def freeze_candidate(
     attestation_bytes = canonical_json_bytes(attestation.model_dump(mode="json")) + b"\n"
     root: Path | None = None
     created_root = False
-    temporary: Path | None = None
-    published: Path | None = None
+    staging: list[Path] = []
+    claimed: Path | None = None
     try:
-        root, created_root = _validate_output_root(output_root, candidate)
+        root, created_root = _validate_output_root(output_root, candidate, tool_root)
         final = root / manifest.candidate_id
-        if final.exists():
-            raise ValueError("output destination already exists")
-        temporary = root / f".{manifest.candidate_id}.{secrets.token_hex(16)}.tmp"
-        temporary.mkdir(mode=0o700)
-        _write_fsynced(temporary / "freeze-manifest.json", manifest_bytes)
-        _write_fsynced(temporary / "d36-tool-attestation.json", attestation_bytes)
+        token = secrets.token_hex(16)
+        staged_manifest = root / f".{manifest.candidate_id}.{token}.freeze-manifest.tmp"
+        staged_attestation = root / f".{manifest.candidate_id}.{token}.tool-attestation.tmp"
+        staging.extend((staged_manifest, staged_attestation))
+        _write_fsynced(staged_manifest, manifest_bytes)
+        _write_fsynced(staged_attestation, attestation_bytes)
+        if _read_regular_once(
+            staged_manifest, maximum=len(manifest_bytes), label="staged freeze manifest"
+        ) != manifest_bytes:
+            raise ValueError("written freeze manifest failed verification")
+        staged_tool_bytes = _read_regular_once(
+            staged_attestation,
+            maximum=len(attestation_bytes),
+            label="staged tool attestation",
+        )
+        _verify_canonical_attestation(staged_tool_bytes, attestation)
         if FreezeManifest.model_validate_json(manifest_bytes, strict=True) != manifest:
             raise ValueError("written freeze manifest failed verification")
-        if ToolAttestation.model_validate_json(attestation_bytes, strict=True) != attestation:
-            raise ValueError("written tool attestation failed verification")
         rechecked_commit, rechecked_timestamp = _candidate_identity(candidate, control)
         if rechecked_commit != commit or rechecked_timestamp != timestamp:
             raise ValueError("candidate identity changed during freeze")
         if _snapshot_tree(candidate) != initial_snapshot:
             raise ValueError("candidate changed during freeze")
-        _fsync_directory(temporary)
-        _publish_directory(temporary, final)
-        temporary = None
-        published = final
+
+        try:
+            final.mkdir(mode=0o700, exist_ok=False)
+        except FileExistsError as exc:
+            raise ValueError("output destination already exists") from exc
+        claimed = final
+        _fsync_directory(root)
+        _publish_file_no_replace(
+            staged_manifest, final / "freeze-manifest.json", manifest_bytes
+        )
+        _publish_file_no_replace(
+            staged_attestation,
+            final / "d36-tool-attestation.json",
+            attestation_bytes,
+        )
+        _fsync_directory(final)
+        _fsync_directory(root)
+
         published_manifest = _read_regular_once(
             final / "freeze-manifest.json",
             maximum=len(manifest_bytes),
@@ -382,13 +454,24 @@ def freeze_candidate(
         )
         if published_manifest != manifest_bytes:
             raise ValueError("published freeze manifest changed")
-        published = None
+        published_attestation = _read_regular_once(
+            final / "d36-tool-attestation.json",
+            maximum=len(attestation_bytes),
+            label="tool attestation",
+        )
+        _verify_canonical_attestation(published_attestation, attestation)
+        claimed = None
         return manifest
     finally:
-        if temporary is not None and temporary.exists():
-            shutil.rmtree(temporary)
-        if published is not None and published.exists():
-            shutil.rmtree(published)
+        for staged in staging:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+        if claimed is not None and claimed.exists():
+            shutil.rmtree(claimed)
+            if root is not None:
+                _fsync_directory(root)
         if created_root and root is not None and root.exists():
             try:
                 root.rmdir()

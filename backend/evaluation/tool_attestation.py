@@ -4,7 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
+import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 
@@ -101,18 +103,93 @@ def aggregate_fingerprints(files: tuple[FileFingerprint, ...] | list[FileFingerp
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
+def _git(repo_root: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ["git", "-C", str(repo_root), *arguments],
+        check=False,
+        capture_output=True,
+        env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+    )
+    if completed.returncode != 0:
+        raise ValueError("Git repository validation failed")
+    return completed.stdout
+
+
+def validate_git_repository(
+    repo_root: Path, *, expected_commit: str | None = None, require_clean: bool = True
+) -> str:
+    root = repo_root.resolve(strict=True)
+    reported = Path(_git(root, "rev-parse", "--show-toplevel").decode("utf-8").strip()).resolve(
+        strict=True
+    )
+    if reported != root:
+        raise ValueError("repository root does not match the declared root")
+    head = _git(root, "rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise ValueError("repository HEAD is invalid")
+    if expected_commit is not None and head != expected_commit:
+        raise ValueError("declared Git commit does not match repository HEAD")
+    if require_clean and _git(root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("repository must be clean at attestation time")
+
+    tagged = _git(root, "ls-files", "-v", "-z", "--cached").split(b"\0")
+    tracked_count = 0
+    for entry in tagged:
+        if not entry:
+            continue
+        tracked_count += 1
+        if not entry.startswith(b"H "):
+            raise ValueError("repository contains forbidden index flags")
+    debug = _git(root, "ls-files", "--debug", "-z", "--cached")
+    index_flags = re.findall(rb"\tflags: ([0-9]+)\n", debug)
+    if len(index_flags) != tracked_count or any(flag != b"0" for flag in index_flags):
+        raise ValueError("repository contains forbidden index flags")
+    staged = _git(root, "ls-files", "--stage", "-z", "--cached").split(b"\0")
+    for entry in staged:
+        if not entry:
+            continue
+        metadata, separator, _ = entry.partition(b"\t")
+        fields = metadata.split()
+        if (
+            separator != b"\t"
+            or len(fields) != 3
+            or fields[0] not in {b"100644", b"100755"}
+            or fields[2] != b"0"
+        ):
+            raise ValueError("repository contains sparse or special index entries")
+    return head
+
+
+def fingerprint_committed_file(
+    repo_root: Path, git_commit: str, relative_path: str
+) -> FileFingerprint:
+    working = fingerprint_file(repo_root, relative_path)
+    committed = _git(repo_root, "show", f"{git_commit}:{relative_path}")
+    committed_fingerprint = FileFingerprint(
+        path=relative_path,
+        sha256=hashlib.sha256(committed).hexdigest(),
+        size=len(committed),
+    )
+    if working != committed_fingerprint:
+        raise ValueError(f"working file does not match committed blob: {relative_path}")
+    return committed_fingerprint
+
+
 def attest_tool(
     *, repo_root: Path, tool_name: str, git_commit: str, source_paths: tuple[str, ...]
 ) -> ToolAttestation:
     if tuple(sorted(source_paths)) != source_paths or len(source_paths) != len(set(source_paths)):
         raise ValueError("tool source allowlist must be unique and sorted")
-    files = [fingerprint_file(repo_root, path) for path in source_paths]
-    if [fingerprint_file(repo_root, path) for path in source_paths] != files:
+    root = repo_root.resolve(strict=True)
+    head = validate_git_repository(root, expected_commit=git_commit)
+    files = [fingerprint_committed_file(root, head, path) for path in source_paths]
+    validate_git_repository(root, expected_commit=git_commit)
+    if [fingerprint_committed_file(root, head, path) for path in source_paths] != files:
         raise ValueError("tool source changed while attesting")
     return ToolAttestation(
         schema_version=1,
         tool_name=tool_name,
-        git_commit=git_commit,
+        git_commit=head,
         files=files,
         aggregate_sha256=aggregate_fingerprints(files),
     )

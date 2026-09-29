@@ -7,11 +7,13 @@ from pathlib import Path
 from evaluation.tool_attestation import (
     FileFingerprint,
     aggregate_fingerprints,
-    fingerprint_file,
+    fingerprint_committed_file,
+    validate_git_repository,
 )
 
 _REQUIRED_FILES = frozenset(
     {
+        "backend/.env.example",
         "backend/app/core/config.py",
         "backend/app/migrations/schema.py",
         "backend/app/operations/definitions.json",
@@ -129,10 +131,10 @@ def _is_allowlisted(path: str) -> bool:
         return False
     if any(part in _EXCLUDED_PARTS for part in parts):
         return False
-    if parts[-1].startswith(".env") or lowered.endswith(_EXCLUDED_SUFFIXES):
-        return False
     if path in _ROOT_FILES or path in _BACKEND_FILES or path in _FRONTEND_FILES:
         return True
+    if parts[-1].startswith(".env") or lowered.endswith(_EXCLUDED_SUFFIXES):
+        return False
     if path.startswith("backend/app/"):
         return True
     if path.startswith("backend/evaluation/"):
@@ -157,6 +159,7 @@ def _is_allowlisted(path: str) -> bool:
 
 
 def fingerprint_files(repo_root: Path) -> list[FileFingerprint]:
+    commit = validate_git_repository(repo_root)
     tracked = _git_tracked_paths(repo_root)
     missing = sorted(_REQUIRED_FILES.difference(tracked))
     if missing:
@@ -164,7 +167,9 @@ def fingerprint_files(repo_root: Path) -> list[FileFingerprint]:
     paths = [path for path in tracked if _is_allowlisted(path)]
     if not paths:
         raise ValueError("candidate fingerprint allowlist is empty")
-    return [fingerprint_file(repo_root, path) for path in paths]
+    files = [fingerprint_committed_file(repo_root, commit, path) for path in paths]
+    validate_git_repository(repo_root, expected_commit=commit)
+    return files
 
 
 __all__ = ["aggregate_fingerprints", "fingerprint_files"]

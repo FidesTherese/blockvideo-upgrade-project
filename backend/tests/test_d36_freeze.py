@@ -22,8 +22,12 @@ CONTROL_KEYS = {
 }
 REQUIRED_CANDIDATE_FILES = {
     ".gitignore": b".pytest_cache/\nrelease-evidence/\n",
+    "backend/.env.example": b"BLOCKVIDEO_TEST_SETTING=example\n",
     "backend/app/core/config.py": b"LANGUAGE_RETRIEVAL_ALL_TOOLS = True\n",
-    "backend/app/migrations/schema.py": b"CURRENT_SCHEMA_VERSION = 1\n",
+    "backend/app/migrations/schema.py": (
+        b"def apply_v0_to_v1(connection, metadata):\n"
+        b"    connection.execute('PRAGMA user_version=1')\n"
+    ),
     "backend/app/operations/definitions.json": b"[]\n",
     "backend/app/operations/search_scope.json": b"{}\n",
     "backend/app/retrieval/e5-profile.json": b'{"profile":"e5"}\n',
@@ -136,6 +140,26 @@ def _freeze(tmp_path: Path, candidate: Path, commit: str, *, output_name: str = 
     )
 
 
+@pytest.fixture(autouse=True)
+def _clean_committed_tooling_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    freeze, _, _ = _freeze_api()
+    tool_repo = tmp_path / "tool-repo"
+    tool_repo.mkdir()
+    _run("git", "init", "-q", cwd=tool_repo)
+    _run("git", "config", "user.email", "d36@example.invalid", cwd=tool_repo)
+    _run("git", "config", "user.name", "D36 Test", cwd=tool_repo)
+    for relative in freeze._TOOL_SOURCE_PATHS:
+        path = tool_repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"committed {relative}\n".encode("utf-8"))
+    _run("git", "add", ".", cwd=tool_repo)
+    _run("git", "commit", "-q", "-m", "committed tooling", cwd=tool_repo)
+    monkeypatch.setattr(freeze, "_tool_repo_root", lambda: tool_repo)
+    return tool_repo
+
+
 def _tree_snapshot(root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
@@ -182,6 +206,27 @@ def test_same_inputs_produce_byte_identical_manifest_with_commit_time(tmp_path: 
     assert first_bytes.endswith(b"\n")
     assert b"+00:00" not in first_bytes and b".000" not in first_bytes
     assert hashlib.sha256(first_bytes).hexdigest() == hashlib.sha256(second_bytes).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "migration_source",
+    [
+        b"def apply_v0_to_v1(connection, metadata):\n    pass\n",
+        b"def apply_v0_to_v1(connection, metadata):\n    connection.execute('PRAGMA user_version=2')\n",
+        b"def apply_v0_to_v1(connection, metadata):\n    connection.execute('PRAGMA user_version=1')\n    connection.execute('PRAGMA user_version=1')\n",
+        b"def apply_v0_to_v1(:\n    pass\n",
+    ],
+)
+def test_candidate_schema_version_must_be_one_unambiguous_committed_migration(
+    tmp_path: Path, migration_source: bytes
+) -> None:
+    candidate, commit = _make_candidate(
+        tmp_path,
+        extras={"backend/app/migrations/schema.py": migration_source},
+    )
+    with pytest.raises(ValueError, match="schema version|migration source"):
+        _freeze(tmp_path, candidate, commit)
+    assert not (tmp_path / "output").exists()
 
 
 def test_commit_timestamp_changes_created_at_and_manifest_hash(tmp_path: Path) -> None:
@@ -341,6 +386,7 @@ def test_candidate_allowlist_is_sorted_and_excludes_tools_secrets_and_runtime(tm
     files = fingerprints.fingerprint_files(candidate)
     paths = [item.path for item in files]
     assert paths == sorted(paths)
+    assert "backend/.env.example" in paths
     assert "backend/app/core/config.py" in paths
     assert "frontend/src/main.tsx" in paths
     assert "backend/tests/test_candidate.py" in paths
@@ -348,14 +394,60 @@ def test_candidate_allowlist_is_sorted_and_excludes_tools_secrets_and_runtime(tm
     assert not set(excluded).intersection(paths)
 
 
-def test_allowlisted_byte_change_changes_aggregate(tmp_path: Path) -> None:
+def test_candidate_manifest_hashes_committed_bytes_and_reconstructs_from_head(
+    tmp_path: Path,
+) -> None:
     candidate, _ = _make_candidate(tmp_path)
     _, fingerprints, _ = _freeze_api()
-    before = fingerprints.aggregate_fingerprints(fingerprints.fingerprint_files(candidate))
-    path = candidate / "backend/app/core/config.py"
-    path.write_bytes(path.read_bytes() + b"changed\n")
-    after = fingerprints.aggregate_fingerprints(fingerprints.fingerprint_files(candidate))
-    assert before != after
+    files = fingerprints.fingerprint_files(candidate)
+    by_path = {item.path: item for item in files}
+    assert "backend/.env.example" in by_path
+    for relative, item in by_path.items():
+        committed = subprocess.run(
+            ["git", "-C", str(candidate), "show", f"HEAD:{relative}"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert item.size == len(committed)
+        assert item.sha256 == hashlib.sha256(committed).hexdigest()
+
+    reconstructed = tmp_path / "reconstructed"
+    _run(
+        "git",
+        "-c",
+        "core.autocrlf=false",
+        "clone",
+        "-q",
+        "--no-hardlinks",
+        str(candidate),
+        str(reconstructed),
+        cwd=tmp_path,
+    )
+    _run("git", "checkout", "-q", "--detach", "HEAD", cwd=reconstructed)
+    assert fingerprints.fingerprint_files(reconstructed) == files
+
+
+def test_allowlisted_working_byte_change_is_rejected_even_when_index_hides_it(
+    tmp_path: Path,
+) -> None:
+    candidate, _ = _make_candidate(tmp_path)
+    _, fingerprints, _ = _freeze_api()
+    relative = "backend/app/core/config.py"
+    _run("git", "update-index", "--assume-unchanged", relative, cwd=candidate)
+    (candidate / relative).write_bytes(b"changed but hidden\n")
+    with pytest.raises(ValueError, match="index flags|committed blob"):
+        fingerprints.fingerprint_files(candidate)
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_candidate_special_index_flags_are_rejected(
+    tmp_path: Path, flag: str
+) -> None:
+    candidate, _ = _make_candidate(tmp_path)
+    _, fingerprints, _ = _freeze_api()
+    _run("git", "update-index", flag, "backend/app/core/config.py", cwd=candidate)
+    with pytest.raises(ValueError, match="index flags"):
+        fingerprints.fingerprint_files(candidate)
 
 
 @pytest.mark.parametrize(
@@ -440,7 +532,34 @@ def test_candidate_mutation_during_freeze_removes_partial_output(tmp_path: Path,
     assert not (tmp_path / "output").exists()
 
 
-def test_existing_destination_and_tracked_output_root_are_refused(tmp_path: Path) -> None:
+def test_in_repo_output_is_only_allowed_under_release_evidence(
+    tmp_path: Path, _clean_committed_tooling_repo: Path
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    for name in ("storage", ".pytest_cache", "other-ignored"):
+        forbidden = _clean_committed_tooling_repo / name
+        with pytest.raises(ValueError, match="release-evidence"):
+            freeze.freeze_candidate(
+                candidate_root=candidate,
+                candidate_control_path=control_path,
+                expected_candidate_control_sha256=digest,
+                output_root=forbidden,
+            )
+        assert not forbidden.exists()
+
+    allowed = _clean_committed_tooling_repo / "release-evidence" / "d36"
+    manifest = freeze.freeze_candidate(
+        candidate_root=candidate,
+        candidate_control_path=control_path,
+        expected_candidate_control_sha256=digest,
+        output_root=allowed,
+    )
+    assert (allowed / manifest.candidate_id / "freeze-manifest.json").is_file()
+
+
+def test_existing_destination_is_refused_and_external_git_root_is_allowed(tmp_path: Path) -> None:
     candidate, commit = _make_candidate(tmp_path)
     manifest = _freeze(tmp_path, candidate, commit)
     with pytest.raises(ValueError, match="output"):
@@ -458,40 +577,114 @@ def test_existing_destination_and_tracked_output_root_are_refused(tmp_path: Path
     _run("git", "commit", "-q", "-m", "tracked output", cwd=tracked)
     freeze, _, _ = _freeze_api()
     control_path, digest = _write_control(tmp_path / "tracked-control", _control(commit))
-    with pytest.raises(ValueError, match="tracked output"):
+    external_manifest = freeze.freeze_candidate(
+        candidate_root=candidate,
+        candidate_control_path=control_path,
+        expected_candidate_control_sha256=digest,
+        output_root=tracked / "evidence",
+    )
+    assert (
+        tracked / "evidence" / external_manifest.candidate_id / "freeze-manifest.json"
+    ).is_file()
+
+
+def _make_tool_source_repo(root: Path) -> tuple[Path, str]:
+    repository = root / "attestation-repo"
+    repository.mkdir()
+    _run("git", "init", "-q", cwd=repository)
+    _run("git", "config", "user.email", "d36@example.invalid", cwd=repository)
+    _run("git", "config", "user.name", "D36 Test", cwd=repository)
+    (repository / "a.py").write_bytes(b"A = 1\n")
+    (repository / "b.py").write_bytes(b"B = 1\n")
+    _run("git", "add", ".", cwd=repository)
+    _run("git", "commit", "-q", "-m", "tooling", cwd=repository)
+    return repository, _run("git", "rev-parse", "HEAD", cwd=repository)
+
+
+def test_tool_attestation_binds_clean_working_files_to_declared_head(tmp_path: Path) -> None:
+    _, _, attestation = _freeze_api()
+    repository, commit = _make_tool_source_repo(tmp_path)
+    result = attestation.attest_tool(
+        repo_root=repository,
+        tool_name="test_tool",
+        git_commit=commit,
+        source_paths=("a.py", "b.py"),
+    )
+    assert result.git_commit == commit
+    assert result.files[0].sha256 == hashlib.sha256(b"A = 1\n").hexdigest()
+
+
+@pytest.mark.parametrize("condition", ["dirty", "untracked", "assume", "skip", "mismatch"])
+def test_tool_attestation_rejects_uncommitted_or_unbound_source(
+    tmp_path: Path, condition: str
+) -> None:
+    _, _, attestation = _freeze_api()
+    repository, commit = _make_tool_source_repo(tmp_path)
+    if condition == "dirty":
+        (repository / "a.py").write_text("A = 2\n", encoding="utf-8")
+    elif condition == "untracked":
+        (repository / "untracked.py").write_text("X = 1\n", encoding="utf-8")
+    elif condition == "assume":
+        _run("git", "update-index", "--assume-unchanged", "a.py", cwd=repository)
+    elif condition == "skip":
+        _run("git", "update-index", "--skip-worktree", "a.py", cwd=repository)
+    else:
+        (repository / "later.py").write_text("later\n", encoding="utf-8")
+        _run("git", "add", ".", cwd=repository)
+        _run("git", "commit", "-q", "-m", "later", cwd=repository)
+    with pytest.raises(ValueError, match="clean|index flags|HEAD"):
+        attestation.attest_tool(
+            repo_root=repository,
+            tool_name="test_tool",
+            git_commit=commit,
+            source_paths=("a.py", "b.py"),
+        )
+
+
+def test_publication_claims_final_directory_without_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+
+    def forbidden_rename(*_: object) -> None:
+        raise AssertionError("publication must not rename a directory")
+
+    monkeypatch.setattr(freeze.os, "rename", forbidden_rename)
+    manifest = _freeze(tmp_path, candidate, commit)
+    assert (tmp_path / "output" / manifest.candidate_id / "freeze-manifest.json").is_file()
+
+
+def test_concurrent_precreated_destination_is_retained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    original_write = freeze._write_fsynced
+    raced = False
+
+    def race_after_staging(path: Path, value: bytes) -> None:
+        nonlocal raced
+        original_write(path, value)
+        if not raced and path.name.endswith(".freeze-manifest.tmp"):
+            candidate_id = json.loads(value)["candidate_id"]
+            destination = tmp_path / "output" / candidate_id
+            destination.mkdir()
+            (destination / "owner.txt").write_text("other owner", encoding="utf-8")
+            raced = True
+
+    monkeypatch.setattr(freeze, "_write_fsynced", race_after_staging)
+    with pytest.raises((FileExistsError, ValueError)):
         freeze.freeze_candidate(
             candidate_root=candidate,
             candidate_control_path=control_path,
             expected_candidate_control_sha256=digest,
-            output_root=tracked / "evidence",
+            output_root=tmp_path / "output",
         )
-
-
-def test_tool_attestation_rechecks_sources_for_cross_file_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _, _, attestation = _freeze_api()
-    (tmp_path / "a.py").write_text("A = 1\n", encoding="utf-8")
-    (tmp_path / "b.py").write_text("B = 1\n", encoding="utf-8")
-    original = attestation.fingerprint_file
-    calls = 0
-
-    def mutating(root: Path, relative: str) -> Any:
-        nonlocal calls
-        result = original(root, relative)
-        calls += 1
-        if calls == 1:
-            (root / "a.py").write_text("A = 2\n", encoding="utf-8")
-        return result
-
-    monkeypatch.setattr(attestation, "fingerprint_file", mutating)
-    with pytest.raises(ValueError, match="changed while attesting"):
-        attestation.attest_tool(
-            repo_root=tmp_path,
-            tool_name="test_tool",
-            git_commit="a" * 40,
-            source_paths=("a.py", "b.py"),
-        )
+    owners = list((tmp_path / "output").glob("*/owner.txt"))
+    assert len(owners) == 1
+    assert owners[0].read_text(encoding="utf-8") == "other owner"
 
 
 def test_post_publish_verification_failure_removes_atomic_output(
@@ -508,6 +701,29 @@ def test_post_publish_verification_failure_removes_atomic_output(
 
     monkeypatch.setattr(freeze, "_read_regular_once", corrupt_published)
     with pytest.raises(ValueError, match="published freeze manifest changed"):
+        freeze.freeze_candidate(
+            candidate_root=candidate,
+            candidate_control_path=control_path,
+            expected_candidate_control_sha256=digest,
+            output_root=tmp_path / "output",
+        )
+    assert not (tmp_path / "output").exists()
+
+
+def test_published_attestation_mismatch_rolls_back_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    original = freeze._read_regular_once
+
+    def corrupt_attestation(path: Path, *, maximum: int, label: str) -> bytes:
+        value = original(path, maximum=maximum, label=label)
+        return b"{}\n" if label == "tool attestation" else value
+
+    monkeypatch.setattr(freeze, "_read_regular_once", corrupt_attestation)
+    with pytest.raises(ValueError, match="published tool attestation"):
         freeze.freeze_candidate(
             candidate_root=candidate,
             candidate_control_path=control_path,

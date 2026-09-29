@@ -255,7 +255,18 @@ or recorded by Task 1.
 
 D36 derives `FreezeManifest.created_at` solely from the frozen candidate commit's
 integer committer timestamp normalized to UTC, so identical inputs produce
-byte-identical canonical manifest bytes.
+byte-identical canonical manifest bytes. The freeze now rejects candidate or tooling
+index shortcuts (assume-unchanged, skip-worktree, sparse, or other special entries),
+requires every allowlisted working file to equal its declared `HEAD` blob, and hashes
+those committed bytes. `backend/.env.example` is the sole explicit `.env` allowlist
+exception. The schema version is detected from exactly one committed migration AST
+assignment and must be supported version 1. Tool attestation identifies the exact
+repository root, requires a clean committed checkout, and binds each source byte to
+its declared `HEAD`; generation before the tooling commit is refused. In-repository
+output is confined to resolved `release-evidence/**`, while external roots remain
+allowed. Publication atomically claims the final candidate directory without rename,
+adds verified files with no-replace semantics, fsyncs them, and rolls back only the
+claimed directory on any canonical readback or recomputed-attestation mismatch.
 
 Any candidate-behavior change after D35 requires a new candidate and D36 freeze and
 invalidates affected evaluation evidence. A post-candidate tooling-only change keeps
