@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal
@@ -52,6 +53,20 @@ FailureClass = Literal[
 ProjectStatusValue = Literal[
     "pending", "splitting", "planning", "generating", "rendering", "completed", "failed", "cancelled",
 ]
+
+
+class _ModelCallBudget:
+    def __init__(self, remaining: int) -> None:
+        if type(remaining) is not int or not 0 <= remaining <= MODEL_CALL_LIMIT:
+            raise ValueError("model-call budget must be between 0 and 4")
+        self._remaining = remaining
+        self.calls = 0
+
+    async def complete(self, invoke: Callable[[], Awaitable[str]]) -> str:
+        if self.calls >= self._remaining:
+            raise ValueError("budget_exhausted")
+        self.calls += 1
+        return await invoke()
 
 
 class _StrictRecord(BaseModel):
@@ -483,26 +498,42 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
     worker_script = str(Path(__file__).resolve())
     bootstrap = (
         "import runpy,sys;"
-        f"sys.argv=[{worker_script!r},'--candidate-worker'];"
+        f"sys.argv=[{worker_script!r},'--candidate-worker',*sys.argv[1:]];"
         f"runpy.run_path({worker_script!r},run_name='__main__')"
     )
-    command = [sys.executable, "-B", "-c", bootstrap]
+
+    def worker_command(model_call_budget: int) -> list[str]:
+        return [
+            sys.executable,
+            "-B",
+            "-c",
+            bootstrap,
+            "--model-call-budget",
+            str(model_call_budget),
+        ]
+
     event_kind = trial.event.kind
+    first_worker: _WorkerObservation | None = None
     if event_kind == "restart_resend":
         first_output = storage / f"worker-phase1-{secrets.token_hex(16)}.json"
         env = _clean_environment(candidate_backend, storage, worker_input, first_output, mode, model, index, base_url,
                                  phase="restart_prepare")
-        _run_candidate(command, cwd=candidate_backend, env=env, storage=storage)
-        _bounded_bytes(first_output, MAX_WORKER_OUTPUT_BYTES, "invalid candidate observation")
+        _run_candidate(worker_command(MODEL_CALL_LIMIT), cwd=candidate_backend, env=env, storage=storage)
+        first_raw = _bounded_bytes(first_output, MAX_WORKER_OUTPUT_BYTES, "invalid candidate observation")
+        try:
+            first_worker = _WorkerObservation.model_validate_json(first_raw)
+        except (ValidationError, ValueError):
+            raise ValueError("invalid candidate observation") from None
         worker_output = storage / f"worker-observation-{secrets.token_hex(16)}.json"
         env = _clean_environment(candidate_backend, storage, worker_input, worker_output, mode, model, index, base_url,
                                  phase="restart_replay", previous_output=first_output)
-        _run_candidate(command, cwd=candidate_backend, env=env, storage=storage)
+        remaining = MODEL_CALL_LIMIT - first_worker.model_calls
+        _run_candidate(worker_command(remaining), cwd=candidate_backend, env=env, storage=storage)
     else:
         worker_output = storage / f"worker-observation-{secrets.token_hex(16)}.json"
         env = _clean_environment(candidate_backend, storage, worker_input, worker_output, mode, model, index, base_url,
                                  phase="single")
-        _run_candidate(command, cwd=candidate_backend, env=env, storage=storage)
+        _run_candidate(worker_command(MODEL_CALL_LIMIT), cwd=candidate_backend, env=env, storage=storage)
 
     if _candidate_snapshot(candidate_root) != candidate_snapshot_sha256:
         raise ValueError("candidate changed during trial")
@@ -511,6 +542,8 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
         worker = _WorkerObservation.model_validate_json(raw_observation)
     except (ValidationError, ValueError):
         raise ValueError("invalid candidate observation") from None
+    if first_worker is not None and worker.model_calls != first_worker.model_calls + worker.replay.model_calls:
+        raise ValueError("invalid candidate observation")
     observation = TrialObservation(**worker.model_dump(mode="python"), case_sha256=trial.case_sha256,
                                    candidate_snapshot_sha256=candidate_snapshot_sha256,
                                    input_sha256=hashlib.sha256(raw_input).hexdigest(), mode=mode)
@@ -518,7 +551,7 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
     return observation
 
 
-def _candidate_worker() -> int:
+def _candidate_worker(model_call_budget: int) -> int:
     try:
         from fastapi.testclient import TestClient
         from sqlalchemy import select
@@ -548,7 +581,7 @@ def _candidate_worker() -> int:
         settings = get_settings()
         settings.language_model, settings.language_base_url = os.environ["D36_MODEL"], os.environ["D36_BASE_URL"]
         settings.language_retrieval_index = Path(os.environ["D36_INDEX"]) if os.environ["D36_MODE"] == "stateful" else None
-        calls = 0
+        model_budget = _ModelCallBudget(model_call_budget)
         race_applied = False
 
         def apply_external_race() -> None:
@@ -566,14 +599,13 @@ def _candidate_worker() -> int:
                 race_db.commit()
 
         async def counted_complete(self: Any, messages: Any, schema: Any) -> str:
-            nonlocal calls
-            if calls >= MODEL_CALL_LIMIT:
-                raise ValueError("model_call_limit")
-            calls += 1
-            async with LocalChatAdapter(settings.language_base_url, settings.language_model,
-                                        timeout_seconds=PROTOCOL_DEADLINE_SECONDS,
-                                        reasoning_effort=settings.language_reasoning_effort) as adapter:
-                result = await adapter.complete(messages, schema)
+            async def invoke() -> str:
+                async with LocalChatAdapter(settings.language_base_url, settings.language_model,
+                                            timeout_seconds=PROTOCOL_DEADLINE_SECONDS,
+                                            reasoning_effort=settings.language_reasoning_effort) as adapter:
+                    return await adapter.complete(messages, schema)
+
+            result = await model_budget.complete(invoke)
             apply_external_race()
             return result
 
@@ -850,7 +882,7 @@ def _candidate_worker() -> int:
             replay_http: Any | None = None
             replay_response: dict[str, Any] | None = None
             replay_before, replay_after = after_submit, after_submit
-            calls_before_event = calls
+            calls_before_event = model_budget.calls
 
             if phase == "restart_replay":
                 previous = _WorkerObservation.model_validate_json(Path(os.environ["D36_PREVIOUS_OUTPUT"]).read_bytes())
@@ -860,8 +892,8 @@ def _candidate_worker() -> int:
                 )
                 output = previous.model_copy(update={
                     "after": RedactedState.model_validate(redact_state(replay_after)),
-                    "model_calls": previous.model_calls + calls,
-                    "replay": ReplayObservation(attempted=True, model_calls=calls,
+                    "model_calls": previous.model_calls + model_budget.calls,
+                    "replay": ReplayObservation(attempted=True, model_calls=model_budget.calls,
                         state_unchanged=previous.after.state_sha256 == _hash(replay_after),
                         same_response=previous.response.response_sha256 == replay_projection.response_sha256,
                         response=replay_projection, failure_class=None),
@@ -932,8 +964,8 @@ def _candidate_worker() -> int:
                     "receipts": collection_changes["receipts"], "artifacts": collection_changes["artifacts"],
                     "external_calls": collection_changes["external_calls"], "history": collection_changes["history"],
                     "language_records": int(collection_changes["language_requests"] or collection_changes["language_turns"])},
-                "model_calls": calls, "failure_class": None,
-                "replay": {"attempted": replay_projection is not None, "model_calls": calls - calls_before_event,
+                "model_calls": model_budget.calls, "failure_class": None,
+                "replay": {"attempted": replay_projection is not None, "model_calls": model_budget.calls - calls_before_event,
                     "state_unchanged": replay_before == replay_after,
                     "same_response": replay_projection is not None and redacted_response["response_sha256"] == replay_projection["response_sha256"],
                     "response": replay_projection, "failure_class": None},
@@ -956,8 +988,11 @@ def _candidate_worker() -> int:
 
 
 def main() -> int:
-    if sys.argv[1:] == ["--candidate-worker"]:
-        return _candidate_worker()
+    if sys.argv[1:2] == ["--candidate-worker"]:
+        worker_parser = argparse.ArgumentParser(add_help=False)
+        worker_parser.add_argument("--model-call-budget", type=int, choices=range(MODEL_CALL_LIMIT + 1), required=True)
+        worker_args = worker_parser.parse_args(sys.argv[2:])
+        return _candidate_worker(worker_args.model_call_budget)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-root", type=Path, required=True)
     parser.add_argument("--mode", choices=("all_tools", "stateful"), required=True)

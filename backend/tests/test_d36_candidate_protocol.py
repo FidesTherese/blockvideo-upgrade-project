@@ -360,6 +360,101 @@ def test_mode_index_rules_fail_before_candidate_invocation(
     assert not called
 
 
+def test_restart_host_passes_protocol_then_remaining_model_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "candidate"
+    (candidate / "backend").mkdir(parents=True)
+    case = _case()
+    case["event"]["kind"] = "restart_resend"
+    case["case_sha256"] = canonical_case_sha256(case)
+    input_path = tmp_path / "case.json"
+    input_path.write_text(json.dumps(case), encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def completed(argv: list[str], **kwargs: Any) -> None:
+        commands.append(argv)
+        observation = _worker_observation()
+        if kwargs["env"]["D36_WORKER_PHASE"] == "restart_prepare":
+            observation["model_calls"] = 3
+        else:
+            observation["model_calls"] = 4
+            observation["replay"]["model_calls"] = 1
+        Path(kwargs["env"]["D36_WORKER_OUTPUT"]).write_text(
+            json.dumps(observation), encoding="ascii"
+        )
+
+    monkeypatch.setattr("evaluation.scripts.evaluation_trial_host._run_candidate", completed)
+    observation = run_trial_host(
+        candidate_root=candidate,
+        mode="all_tools",
+        input_path=input_path,
+        output_path=tmp_path / "observation.json",
+        storage=tmp_path / "storage",
+        model="test-model",
+    )
+
+    assert [command[-2:] for command in commands] == [
+        ["--model-call-budget", "4"],
+        ["--model-call-budget", "1"],
+    ]
+    assert observation.model_calls == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first_calls", "remaining"), [(3, 1), (4, 0)])
+async def test_restart_model_budget_prevents_over_budget_adapter_calls(
+    first_calls: int, remaining: int
+) -> None:
+    actual_adapter_calls = 0
+
+    async def adapter_call() -> str:
+        nonlocal actual_adapter_calls
+        actual_adapter_calls += 1
+        return "model response"
+
+    first_budget = trial_host._ModelCallBudget(4)
+    for _ in range(first_calls):
+        assert await first_budget.complete(adapter_call) == "model response"
+    restart_budget = trial_host._ModelCallBudget(remaining)
+    for _ in range(remaining):
+        assert await restart_budget.complete(adapter_call) == "model response"
+    with pytest.raises(ValueError, match="^budget_exhausted$"):
+        await restart_budget.complete(adapter_call)
+
+    assert first_budget.calls + restart_budget.calls <= 4
+    assert actual_adapter_calls == first_calls + remaining == 4
+
+
+def test_worker_cli_accepts_only_explicit_budget_zero_through_four(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accepted: list[int] = []
+
+    def worker(model_call_budget: int) -> int:
+        accepted.append(model_call_budget)
+        return 0
+
+    monkeypatch.setattr(trial_host, "_candidate_worker", worker)
+    for budget in (0, 4):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["evaluation_trial_host.py", "--candidate-worker", "--model-call-budget", str(budget)],
+        )
+        assert trial_host.main() == 0
+    assert accepted == [0, 4]
+
+    for budget in (-1, 5):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["evaluation_trial_host.py", "--candidate-worker", "--model-call-budget", str(budget)],
+        )
+        with pytest.raises(SystemExit):
+            trial_host.main()
+
+
 def test_host_uses_candidate_rooted_subprocess_and_writes_redacted_observation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

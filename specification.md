@@ -213,7 +213,12 @@ while preserving their equality relationships. Public observations contain only 
 enums, actual per-event HTTP/status/reason projections, fixed failure classes,
 counts/flags, deterministic redacted hashes, and the pre/post-equal candidate snapshot
 hash; timing and private/model prose are excluded. Candidate workers run with both
-`-B` and `PYTHONDONTWRITEBYTECODE=1`. Candidate/backend/storage/output boundaries
+`-B` and `PYTHONDONTWRITEBYTECODE=1`. The trusted host supplies each worker an
+explicit internal model-call budget in the closed range 0--4: the first process
+receives four and a `restart_resend` replay receives four minus the validated first
+process count. The adapter checks that budget before every model invocation and
+fails with fixed `budget_exhausted` without invoking the model, so the aggregate
+count and actual adapter calls never exceed four. Candidate/backend/storage/output boundaries
 reject symlink and reparse paths, use exclusive fsynced temporary files, publish the
 final output with an atomic no-replace hard link, and monitor file-redirected
 subprocess output with a 2 MiB kill limit. Mode rules remain exact (`stateful`

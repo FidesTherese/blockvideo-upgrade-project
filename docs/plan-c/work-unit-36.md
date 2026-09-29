@@ -31,6 +31,10 @@ including deterministic `created_at`. Any relevant byte change is detected. The 
 For Task 1 trial evidence, equivalent fresh runs MUST produce identical logical-state
 and response projections: timestamps, leases, runtime durations, and generated opaque
 IDs cannot perturb hashes. Every primary, replay, confirmation, and duplicate event
-MUST retain its actual strict HTTP/status/reason projection. The host MUST disable
-bytecode writes, prove a pre/post-equal candidate snapshot, and publish evidence with
+MUST retain its actual strict HTTP/status/reason projection. The trusted host MUST give
+each worker an explicit internal model-call budget from 0 through 4. The first process
+receives 4; a `restart_resend` process receives 4 minus the validated first-process
+count. The adapter MUST return fixed `budget_exhausted` before an over-budget model
+invocation, and reported aggregate calls and actual adapter calls MUST never exceed 4.
+The host MUST disable bytecode writes, prove a pre/post-equal candidate snapshot, and publish evidence with
 an atomic no-replace hard link so a competing destination is never overwritten.

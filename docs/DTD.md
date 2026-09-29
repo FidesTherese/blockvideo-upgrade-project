@@ -986,7 +986,17 @@ requires one regular index directory and `all_tools` rejects an index. Stdout an
 stderr are redirected to external exclusive files; the host actively monitors both,
 kills on timeout or either file exceeding 2 MiB, and never reads them. Restart resend
 runs the first submit and replay in separate candidate processes/apps against the same
-external case database. The host validates one bounded strict worker observation and
+external case database. The host alone appends the internal required worker CLI option
+`--model-call-budget`, validated as an integer in the closed range 0--4; case data,
+public host CLI arguments, and environment variables cannot set it. A single-process
+run and restart phase one receive `4`. Before restart phase two, the host parses and
+strictly validates phase one's bounded `_WorkerObservation`, then supplies
+`4 - first.model_calls`. `_ModelCallBudget.complete()` checks before each
+`LocalChatAdapter` construction/invocation, increments exactly once immediately before
+the call, and raises fixed `ValueError("budget_exhausted")` when no call remains. The
+worker reports calls from this guard, and the host requires the final restart aggregate
+to equal the validated first count plus replay count; neither reported aggregate nor
+actual adapter invocations can exceed four. The host validates one bounded strict worker observation and
 atomically publishes canonical redacted output. Each invocation requires fresh storage
 and refuses a pre-existing non-empty storage directory or output file. Task 1 records
 no future freezer or trial-tool attestation hash because those bytes do not yet exist.
