@@ -1,38 +1,33 @@
-# Plan C Handoff — D35 recovery UI gate verified; D36 has not started
+# Plan C Handoff — D36 exact D35 candidate gate verified
 
-## D35 current result (2026-09-30 JST)
+## D36 current result (2026-09-30 JST)
 
-Read `work-unit-35.md`, `work-report-35.md`, the D35 section of `docs/DTD.md`, and
-`docs/modules/operation-core.md` first. Backend job summaries expose typed recovery
-codes/actions from one project-wide recovery context. Required
-`ProjectDetail.generation_recovery` exposes bounded `busy/wait`,
-`external_outcome_unknown/check_provider`, or `ready/generate` state from one aggregate
-query across all project jobs and unresolved remote-side-effect calls, independent of
-the 100-row history limit. Failed/cancelled rows require `has_active_job=false` before
-showing retry; pending/running siblings map those rows to `wait/wait` with no retry
-button, and pre-action revalidation refuses newly busy state without submission.
-Unknown external outcomes never expose retry.
-`MigrationError.backup_available` becomes true only after verified backup publication;
-startup preserves it and restore guidance depends on it. D35 adds no runtime dependency.
-The only new package is pinned dev-only `@testing-library/user-event` 14.6.7.
+Read `work-unit-36.md`, `work-report-36.md`, the D36 section of `docs/DTD.md`, and
+`docs/implementation-plan-36.md` first. The immutable candidate is the detached clean
+D35 delivery commit `522775516c0797abdb313e3432339a3a444b7ae2`, not the later D36
+tooling commit. Its external canonical control is
+`../blockvideo-d36-control/d35-candidate.json`, with detached and recomputed SHA-256
+`dda5f8b5e1ca95ca0b709122d1fa2826ba647e05d720d829b9e06b4b3f88e833`.
+The reusable detached checkout is `../blockvideo-d35-candidate`; both normal and
+ignored Git status are empty after the complete gate.
 
-The final-review gate passed: backend 1306 with seven existing ONNX skips and one
-existing deprecation warning; Ruff passed; frontend 17 files/157 tests passed; build
-transformed 190 modules; ESLint passed. Installed Chrome plus transient local
-Playwright passed 18/18 synthetic checks across 390x844 and 1440x900: ready, both
-migration-failure backup branches, wait, safe retry, unknown/no-retry, stale refetch,
-duplicate lock, and real Tab/Enter. All captures had no horizontal overflow. Evidence
-is ignored under `release-evidence/d35-browser/`; 18 screenshots, four sanitized logs,
-and one result JSON are covered by manifest SHA-256
-`bffe688169845e9462620568597d1b2e1a1198902a0cba9544884ab181ad5790`.
+A fresh full backend rerun passed **1306 tests with 7 existing ONNX skips** and one
+existing Starlette/httpx deprecation warning; Ruff passed. The first full run had the
+known load-sensitive D22 65 ms deadline failure, which passed immediately in isolation;
+that isolated pass was not counted as the full gate. Frontend source was materialized
+from the exact candidate commit outside the candidate tree: **17 files/157 tests**
+passed, build transformed **190 modules**, and ESLint passed. All 73 tracked frontend
+inputs were byte-equal before execution, with path/content aggregate
+`61b54622a28ee3ae7d00f4e8ba2654d0dd49895a78400a326f1f3d014e1ac7d1`.
 
-This is synthetic automated technical evidence, not human acceptance or independent
-review. No real user database, provider, model, cloud call, release, tag, publication,
-or deployment was used. The completed D35 delivery commit is `561677c`
-(`[DONE] Mission 35 Add recovery-oriented operational UI`). The final D35 blocker
-correction is the commit containing this handoff, identified by the exact subject
-`fix: block D35 retry while sibling work is active`. **D36 has not started and no
-candidate freeze exists.**
+D36-D40 modules are external post-candidate tooling and are separately attested. They
+are absent from candidate behavior and never become part of its content identity. The
+real freezer must run only after the D36 tooling/report commit is committed and pushed,
+then write the exact canonical manifest, tool attestation, and completion marker under
+ignored `release-evidence/d36/<candidate-id>/`. The generated manifest must continue to
+name the D35 candidate, while the attestation names the clean later tooling `HEAD`.
+No held-out evaluation, tag, publication, deployment, or readiness decision is part of
+D36.
 
 ## D34 historical result (2026-09-29 JST)
 
