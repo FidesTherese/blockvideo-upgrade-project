@@ -27,10 +27,17 @@ from app.api.routes_language import router as language_router
 from app.api.routes_language_connection import router as language_connection_router
 from app.api.routes_operations import router as operations_router
 from app.api.routes_projects import router as projects_router
+from app.api.routes_startup import router as startup_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, log
 from app.core.access_logging import protect_access_logs
-from app.db import init_db
+from app.core.startup_status import (
+    StartupStatus,
+    StartupUnavailableError,
+    set_startup_status,
+)
+from app.db import Base, init_db, register_models
+from app.migrations import MigrationError, acquire_database_lease, migrate_database
 from app.services.transactions import WriteBusyError
 from app.services.job_records import ProjectBusyError, UnresolvedExternalWorkError
 from app.workers import operation_dispatcher
@@ -59,18 +66,71 @@ async def lifespan(app: FastAPI):
         version=__version__,
         env=settings.environment,
     )
-    init_db()
-    mark_interrupted_operation_jobs()
-    operation_dispatcher.job_registry.start()
-    dispatcher = asyncio.create_task(run_operation_dispatcher())
+    set_startup_status(
+        StartupStatus(
+            status="starting",
+            reason_code=None,
+            message="起動処理中です。",
+            schema_version=None,
+            backup_available=False,
+        )
+    )
+    register_models()
+    lease = acquire_database_lease(settings.database_url)
+    dispatcher: asyncio.Task[None] | None = None
+    registry_started = False
     try:
+        try:
+            migration = migrate_database(
+                settings.database_url, Base.metadata, lease=lease
+            )
+        except MigrationError as exc:
+            log.error(
+                "database migration failed error_class={error_class} reason_code={reason_code}",
+                error_class=exc.__class__.__name__,
+                reason_code=exc.reason_code,
+            )
+            set_startup_status(
+                StartupStatus(
+                    status="migration_failed",
+                    reason_code=exc.reason_code,
+                    message="データベースの移行に失敗しました。管理者に確認してください。",
+                    schema_version=None,
+                    backup_available=False,
+                )
+            )
+            yield
+            return
+
+        init_db()
+        set_startup_status(
+            StartupStatus(
+                status="ready",
+                reason_code=None,
+                message="起動が完了しました。",
+                schema_version=migration.to_version,
+                backup_available=migration.backup_created,
+            )
+        )
+        mark_interrupted_operation_jobs()
+        operation_dispatcher.job_registry.start()
+        registry_started = True
+        dispatcher = asyncio.create_task(run_operation_dispatcher())
         yield
     finally:
-        operation_dispatcher.job_registry.close()
-        dispatcher.cancel()
-        with suppress(asyncio.CancelledError):
-            await dispatcher
-        await operation_dispatcher.job_registry.shutdown()
+        try:
+            if registry_started:
+                operation_dispatcher.job_registry.close()
+            try:
+                if dispatcher is not None:
+                    dispatcher.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await dispatcher
+            finally:
+                if registry_started:
+                    await operation_dispatcher.job_registry.shutdown()
+        finally:
+            lease.release()
 
 
 def create_app() -> FastAPI:
@@ -101,6 +161,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(health_router, prefix="/api")
+    app.include_router(startup_router, prefix="/api")
     app.include_router(projects_router, prefix="/api")
     app.include_router(blocks_router, prefix="/api")
     app.include_router(operations_router, prefix="/api")
@@ -120,6 +181,21 @@ def create_app() -> FastAPI:
     async def _write_busy(_request, exc: WriteBusyError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": str(exc)},
                             headers={"Retry-After": "1"})
+
+    @app.exception_handler(StartupUnavailableError)
+    async def _startup_unavailable(
+        _request, _exc: StartupUnavailableError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "reason_code": "startup_unavailable",
+                    "message": "データベースを利用できません。起動状態を確認してください。",
+                }
+            },
+            headers={"Retry-After": "5"},
+        )
 
     @app.exception_handler(Exception)
     async def _unhandled(_request, exc: Exception) -> JSONResponse:

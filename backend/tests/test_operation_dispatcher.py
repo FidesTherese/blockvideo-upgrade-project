@@ -128,7 +128,6 @@ def test_repeated_lifespans_reopen_registry_before_dispatcher(
         dispatcher_start_states.append(registry.accepting)
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(main_module, "init_db", lambda: None)
     monkeypatch.setattr(main_module, "mark_interrupted_operation_jobs", lambda: 0)
     monkeypatch.setattr(main_module, "run_operation_dispatcher", controlled_dispatcher)
     monkeypatch.setattr(dispatcher, "job_registry", registry)

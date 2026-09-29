@@ -19,6 +19,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
+from app.core.startup_status import StartupUnavailableError, get_startup_status
 
 
 class Base(DeclarativeBase):
@@ -121,6 +122,8 @@ def get_db() -> Iterator[Session]:
         transaction commit/rollback remains the caller's responsibility.
 
     """
+    if get_startup_status().status != "ready":
+        raise StartupUnavailableError()
     factory = get_session_factory()
     db = factory()
     try:
