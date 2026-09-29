@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Iterable
 from typing import Literal, TypeAlias
 
-from sqlalchemy import MetaData, create_engine
+from sqlalchemy import MetaData, Table, UniqueConstraint, create_engine
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateColumn, CreateIndex, CreateTable
@@ -100,6 +100,83 @@ def _table_info(
     return info
 
 
+IndexColumnSet: TypeAlias = frozenset[str]
+IndexRequirements: TypeAlias = tuple[
+    dict[IndexColumnSet, tuple[str, ...]], dict[IndexColumnSet, tuple[str, ...]]
+]
+
+
+def _metadata_index_requirements(table: Table) -> IndexRequirements:
+    ordinary: dict[IndexColumnSet, tuple[str, ...]] = {}
+    unique: dict[IndexColumnSet, tuple[str, ...]] = {}
+
+    for index in table.indexes:
+        columns = tuple(column.name for column in index.columns)
+        if not columns or len(columns) != len(index.expressions):
+            raise MigrationError("unsupported_legacy_schema")
+        canonical = frozenset(_normalized_identifier(column) for column in columns)
+        target = unique if index.unique else ordinary
+        target.setdefault(canonical, columns)
+
+    for constraint in table.constraints:
+        if not isinstance(constraint, UniqueConstraint):
+            continue
+        columns = tuple(column.name for column in constraint.columns)
+        if not columns:
+            raise MigrationError("unsupported_legacy_schema")
+        canonical = frozenset(_normalized_identifier(column) for column in columns)
+        unique.setdefault(canonical, columns)
+
+    for column in table.columns:
+        if column.unique:
+            columns = (column.name,)
+            unique.setdefault(
+                frozenset({_normalized_identifier(column.name)}), columns
+            )
+    return ordinary, unique
+
+
+def _observed_index_sets(
+    connection: sqlite3.Connection, table: str
+) -> tuple[set[IndexColumnSet], set[IndexColumnSet]]:
+    indexed: set[IndexColumnSet] = set()
+    unique: set[IndexColumnSet] = set()
+    try:
+        rows = connection.execute(f"PRAGMA index_list({_quote(table)})").fetchall()
+        for row in rows:
+            if len(row) > 4 and int(row[4]):
+                continue
+            index_name = str(row[1])
+            info = connection.execute(
+                f"PRAGMA index_info({_quote(index_name)})"
+            ).fetchall()
+            if not info or any(item[2] is None for item in info):
+                continue
+            columns = frozenset(
+                _normalized_identifier(str(item[2])) for item in info
+            )
+            indexed.add(columns)
+            if int(row[2]):
+                unique.add(columns)
+    except sqlite3.Error as exc:
+        raise MigrationError("unsupported_legacy_schema") from exc
+    return indexed, unique
+
+
+def _validate_required_indexes(
+    connection: sqlite3.Connection, metadata: MetaData
+) -> None:
+    observed_tables = _table_name_map(connection)
+    for table in metadata.sorted_tables:
+        actual_table = observed_tables.get(_normalized_identifier(table.name))
+        if actual_table is None:
+            raise MigrationError("unsupported_legacy_schema")
+        required_ordinary, required_unique = _metadata_index_requirements(table)
+        indexed, unique = _observed_index_sets(connection, actual_table)
+        if not set(required_ordinary) <= indexed or not set(required_unique) <= unique:
+            raise MigrationError("unsupported_legacy_schema")
+
+
 def _scratch_schema(metadata: MetaData) -> dict[str, dict[str, tuple[str, int]]]:
     _validate_metadata_identifiers(metadata)
     scratch = sqlite3.connect(":memory:")
@@ -160,6 +237,9 @@ def validate_schema_compatibility(
             ):
                 raise MigrationError("unsupported_legacy_schema")
 
+    if version == 1:
+        _validate_required_indexes(connection, metadata)
+
 
 def classify_v0(connection: sqlite3.Connection, metadata: MetaData) -> None:
     """Validate structural compatibility for an additive version-0 schema."""
@@ -199,6 +279,74 @@ def _create_missing_tables(
             connection.execute(str(CreateIndex(index).compile(dialect=dialect)))
 
 
+def _deterministic_index_name(
+    table: str,
+    columns: tuple[str, ...],
+    *,
+    unique: bool,
+    existing_names: set[str],
+) -> str:
+    kind = "uq" if unique else "ix"
+    descriptor = json.dumps(
+        [kind, table, *columns], ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    digest = hashlib.sha256(descriptor).hexdigest()[:12]
+    base = f"d34_{kind}_{table}_{'_'.join(columns)}_{digest}"
+    candidate = base
+    suffix = 1
+    while _normalized_identifier(candidate) in existing_names:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    existing_names.add(_normalized_identifier(candidate))
+    return candidate
+
+
+def _create_missing_indexes(
+    connection: sqlite3.Connection, metadata: MetaData
+) -> None:
+    observed_tables = _table_name_map(connection)
+    existing_names = {
+        _normalized_identifier(str(row[0]))
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    for table in metadata.sorted_tables:
+        actual_table = observed_tables[_normalized_identifier(table.name)]
+        observed_columns = _identifier_map(_table_info(connection, actual_table))
+        required_ordinary, required_unique = _metadata_index_requirements(table)
+        indexed, unique = _observed_index_sets(connection, actual_table)
+        requirements = (
+            (False, required_ordinary, indexed),
+            (True, required_unique, unique),
+        )
+        for is_unique, required, present in requirements:
+            for column_set, columns in sorted(
+                required.items(), key=lambda item: item[1]
+            ):
+                if column_set in present:
+                    continue
+                actual_columns = tuple(
+                    observed_columns[_normalized_identifier(column)]
+                    for column in columns
+                )
+                index_name = _deterministic_index_name(
+                    table.name,
+                    columns,
+                    unique=is_unique,
+                    existing_names=existing_names,
+                )
+                qualifier = "UNIQUE " if is_unique else ""
+                connection.execute(
+                    f"CREATE {qualifier}INDEX {_quote(index_name)} ON "
+                    f"{_quote(actual_table)} "
+                    f"({', '.join(_quote(column) for column in actual_columns)})"
+                )
+                indexed.add(column_set)
+                if is_unique:
+                    unique.add(column_set)
+
+
 def apply_v0_to_v1(connection: sqlite3.Connection, metadata: MetaData) -> None:
     """Validate and apply only additive current-schema operations."""
     version_row = connection.execute("PRAGMA user_version").fetchone()
@@ -224,6 +372,7 @@ def apply_v0_to_v1(connection: sqlite3.Connection, metadata: MetaData) -> None:
             connection.execute(
                 f"ALTER TABLE {_quote(table_name)} ADD COLUMN {column_ddl}"
             )
+        _create_missing_indexes(connection, metadata)
         connection.execute("PRAGMA user_version=1")
         connection.commit()
     except MigrationError:

@@ -30,7 +30,13 @@ from historical BlockVideo databases.
   reusable version-aware compatibility check. Version 1 requires every registered table
   and column with its scratch affinity. Version 0 may omit tables and additive
   nullable/defaulted columns, but an existing known table missing a non-null column
-  without a server default is unsupported. Match known names with SQLite-compatible
+  without a server default is unsupported. After columns exist, derive exact required
+  ordinary and unique column sets from `Table.indexes`, `UniqueConstraint`, and column
+  `unique` metadata; inspect `PRAGMA index_list/index_info` with the same ASCII-only
+  case folding; and create deterministic quoted named indexes only for missing sets.
+  A unique index may satisfy an ordinary requirement for the same exact set, but an
+  ordinary index never satisfies uniqueness. Preserve every existing index. Version 1
+  rejects a missing required ordinary or unique set. Match known names with SQLite-compatible
   ASCII-only folding (A--Z to a--z, non-ASCII unchanged), preserve unknown extras and
   their actual spellings, and reject ASCII-case-colliding duplicate known identifiers
   before DDL. Semantic-reference presence checks use the same canonical keys; SQL quotes
@@ -71,9 +77,13 @@ of private databases inside repository tests.
 ## Acceptance
 
 Supported historical fixtures upgrade to the current schema without data loss and
-remain usable. Every existing known-column affinity exactly matches scratch current
-metadata; critical row counts and PK identity digests are unchanged; required
-references pass; unknown extras and intentional receipt non-FKs survive. Every backup
+remain usable. Partial v0 fixtures missing `generation_artifacts.job_id`,
+`operation_requests.job_id`, and `language_turns.parent_request_id` regain their
+metadata-defined unique indexes and reject duplicate non-null values. Every existing
+known-column affinity exactly matches scratch current metadata; v1 rejects missing
+required ordinary or unique index sets; critical row counts and PK identity digests
+are unchanged; required references pass; unknown extras, existing indexes, and
+intentional receipt non-FKs survive. Every backup
 has a canonical target-bound metadata sidecar and identical pre/post-publication hash.
 A failed or unsupported migration leaves the source restorable and produces a bounded
 startup error with no secret/path leakage. Lease loss before either publication leaves

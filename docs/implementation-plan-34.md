@@ -1,6 +1,6 @@
 # D34 Versioned Migration and Rollback Compatibility Implementation Plan
 
-**Status:** Complete. The 111-test focused migration/startup gate, full repository checks, artifact/privacy inventory, and D34 documentation are reconciled; D35 has not started.
+**Status:** Complete. The final-review 121-test focused migration/startup gate, full backend checks, artifact/privacy inventory, and D34 documentation are reconciled; D35 has not started.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -15,7 +15,7 @@
 - Follow `docs/plan-c/work-unit-34.md` and the D34 section/roadmap in `docs/DTD.md`.
 - Supported schema versions are exactly 0 and 1; values above 1 fail `schema_too_new`.
 - Support only `sqlite:///` file URLs plus in-memory test setup; no Alembic and no cross-database claim.
-- Preserve unknown extra tables/columns; never drop, rename, or retype a column.
+- Preserve unknown extra tables/columns/indexes; never drop, rename, or retype a column or replace an existing index. Reconcile exact metadata-required ordinary/unique column sets after additive columns exist, and reject incomplete v1 sets.
 - Match known table/column names with SQLite-compatible ASCII-only folding (A--Z to
   a--z; non-ASCII unchanged). Every existing known column must have the same SQLite
   affinity as its scratch counterpart; ASCII-case-colliding

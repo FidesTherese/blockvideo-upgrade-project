@@ -508,8 +508,17 @@ derived from the declared type using SQLite's ordered rules: `INT` -> `INTEGER`;
 with any unequal affinity fails `unsupported_legacy_schema`; aliases, coercible
 runtime values, and SQLAlchemy type-family similarity do not relax the comparison.
 Missing tables are created from current metadata. Missing columns are added only
-when nullable or when a server default can preserve existing rows. No column is
-dropped, renamed, or retyped. The upstream and D30 fixtures are frozen explicit SQL
+when nullable or when a server default can preserve existing rows. After all columns
+exist, required ordinary and unique exact column sets are derived from
+`Table.indexes`, `UniqueConstraint`, and column `unique` metadata. Existing sets are
+read through quoted `PRAGMA index_list` and `PRAGMA index_info`; table, column, and
+index-column comparison uses the same ASCII-only folding. Partial/expression indexes
+do not satisfy a full metadata requirement. A unique index satisfies an ordinary
+requirement for the same exact set, while an ordinary index never satisfies a unique
+requirement. Missing sets receive deterministic, quoted, collision-safe names and are
+created without dropping, renaming, or replacing any existing index. Version 1 must
+contain every required ordinary and unique set. No column is dropped, renamed, or
+retyped. The upstream and D30 fixtures are frozen explicit SQL
 files; they do not call current metadata and do not derive ancestry by dropping current
 columns or tables.
 
@@ -660,9 +669,12 @@ metadata schema version 1, SHA-256 of the normalized canonical target path, sour
 temporary bytes are fsynced, lease-revalidated, atomically published,
 directory-fsynced, and read back exactly. Lease loss before either publication removes
 temporary files and any already published backup so no incomplete pair remains. The
-migration then uses one SQLite transaction for additive DDL and
-`PRAGMA user_version=1`. Post-verification checks integrity, required tables and
-columns, preserved pre-migration identities, and references. Failure rolls back where
+migration then uses one SQLite transaction for additive table/column DDL, exact
+metadata index-set reconciliation, and `PRAGMA user_version=1`. Index reconciliation
+runs only after columns exist; conflicting data that prevents a required unique index
+causes migration failure and rollback. Post-verification checks integrity, required
+tables, columns, ordinary/unique index sets, preserved pre-migration identities, and
+references. Failure rolls back where
 SQLite permits and retains only a complete verified backup/metadata pair. Every
 migration entry point requires a live caller-owned `DatabaseLease` bound to the same
 canonical database path and rejects a missing, released, or mismatched lease before
@@ -725,9 +737,12 @@ reconciliation do not run in degraded state.
 
 #### D34 implementation evidence and limits
 
-D34 is implemented and its focused migration/startup gate collects 111 tests: 97 for
-schema, backup, restore, and lease behavior plus 14 for startup lifecycle/API behavior.
-The gate covers the frozen upstream/D30 fixtures, scratch affinity and ordered-PK
+D34 is implemented and its final-review migration/startup gate collects 121 tests:
+107 for schema, backup, restore, and lease behavior plus 14 for startup lifecycle/API
+behavior. The gate covers the frozen upstream/D30 fixtures, three partial-v0 unique-
+column fixtures, exact metadata ordinary/unique index-set reconciliation, duplicate
+insert rejection, malformed-v1 missing-index rejection, preservation of existing
+indexes, scratch affinity, and ordered-PK
 contracts, the complete nine-table identity set, declared and semantic references,
 intentional receipt non-FKs, canonical target-bound metadata/hash, failure injection,
 non-blocking app/app and app/restore exclusion, stopped-app restore, fresh-pool restart,
@@ -1541,7 +1556,10 @@ independent review gates supply the recorded trust decisions.
   presence checks; actual-spelling quoted SQL; preservation of distinct unknown Unicode
   identifiers; pre-DDL rejection of ASCII-case-colliding duplicate known identifiers;
   scratch-metadata affinity equality for every existing known column and rejection of each affinity
-  mismatch/name collision; preservation of unknown extra tables/columns; nested-path
+  mismatch/name collision; exact metadata-derived ordinary/unique index sets through
+  case-insensitive `index_list/index_info`; additive restoration after each of the three
+  unique columns; duplicate enforcement; malformed-v1 missing ordinary/unique rejection;
+  preservation of weaker and unrelated existing indexes; preservation of unknown extra tables/columns; nested-path
   parent creation before lease; exact scratch-PK order and malformed/missing legacy PK
   rejection; language receipt ownership and explicit-null reciprocal turn checks;
   pre/post-publication backup hash equality, integrity, exact critical-table row counts,
@@ -1660,9 +1678,10 @@ metadata; classify and detect missing known identifiers with SQLite-compatible A
 folding, retain actual spellings for quoted SQL, reject ASCII-case-colliding duplicate
 known metadata before DDL, and require exact affinity for every existing known column. Pass metadata into every critical snapshot, derive exact ordered
 PKs only from scratch current metadata, reject altered/missing legacy PKs, capture and compare
-critical-table row counts and canonical PK identity digests; and validate every
-enumerated ownership/reference ID while preserving intentional receipt non-FKs and
-unknown extras. Move reflective schema mutation from `db.py`; acquire the lease before
+critical-table row counts and canonical PK identity digests; validate every enumerated
+ownership/reference ID; and reconcile exact metadata-defined ordinary/unique index
+sets only after additive columns exist, preserving all existing indexes and rejecting
+incomplete v1 schemas. Preserve intentional receipt non-FKs and unknown extras. Move reflective schema mutation from `db.py`; acquire the lease before
 migration, require it for migration operations, retain it through ready/degraded
 lifespan, and after dispatcher/registry drain mark non-ready, dispose and clear the
 engine/sessionmaker without DDL, then release through an identity/token-validated

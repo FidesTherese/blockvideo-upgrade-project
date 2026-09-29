@@ -120,6 +120,25 @@ def _dump(connection: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(connection.iterdump())
 
 
+def _index_sets(
+    connection: sqlite3.Connection, table: str
+) -> tuple[set[frozenset[str]], set[frozenset[str]]]:
+    indexed: set[frozenset[str]] = set()
+    unique: set[frozenset[str]] = set()
+    for row in connection.execute(f'PRAGMA index_list("{table}")'):
+        if int(row[4]):
+            continue
+        columns = frozenset(
+            str(info[2]).lower()
+            for info in connection.execute(f'PRAGMA index_info("{row[1]}")')
+            if info[2] is not None
+        )
+        indexed.add(columns)
+        if int(row[2]):
+            unique.add(columns)
+    return indexed, unique
+
+
 def _url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
 
@@ -264,6 +283,53 @@ def test_schema_compatibility_rejects_v0_table_missing_required_column(
             validate_schema_compatibility(connection, Base.metadata, version=0)
 
     assert exc_info.value.reason_code == "unsupported_legacy_schema"
+
+
+def test_schema_compatibility_rejects_v1_missing_required_unique_index(
+    tmp_path: Path,
+) -> None:
+    path = build_fixture(
+        "partial_language_parent_v0", tmp_path / "missing-unique.db", Base.metadata
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            'ALTER TABLE language_turns ADD COLUMN "parent_request_id" VARCHAR(128)'
+        )
+        connection.execute("PRAGMA user_version=1")
+        with pytest.raises(MigrationError) as exc_info:
+            validate_schema_compatibility(connection, Base.metadata, version=1)
+
+    assert exc_info.value.reason_code == "unsupported_legacy_schema"
+
+
+def test_schema_compatibility_rejects_v1_missing_required_ordinary_index(
+    tmp_path: Path,
+) -> None:
+    path = build_fixture("current_v1", tmp_path / "missing-index.db", Base.metadata)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP INDEX ix_blocks_project_id")
+        with pytest.raises(MigrationError) as exc_info:
+            validate_schema_compatibility(connection, Base.metadata, version=1)
+
+    assert exc_info.value.reason_code == "unsupported_legacy_schema"
+
+
+def test_schema_compatibility_matches_index_columns_case_insensitively(
+    tmp_path: Path,
+) -> None:
+    path = build_fixture(
+        "partial_language_parent_v0", tmp_path / "mixed-case-index.db", Base.metadata
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            'ALTER TABLE language_turns ADD COLUMN "Parent_Request_ID" VARCHAR(128)'
+        )
+        connection.execute(
+            'CREATE UNIQUE INDEX "Mixed_Case_Parent" '
+            'ON language_turns ("Parent_Request_ID")'
+        )
+        connection.execute("PRAGMA user_version=1")
+        validate_schema_compatibility(connection, Base.metadata, version=1)
 
 
 def test_distinct_unknown_unicode_identifiers_are_preserved(tmp_path: Path) -> None:
@@ -414,6 +480,101 @@ def test_additive_v0_to_v1_matches_scratch_schema_and_preserves_unknown_data(
             assert connection.execute(
                 "SELECT partial_extra FROM projects WHERE id = 101"
             ).fetchone() == ("keep-partial",)
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "table", "column_set", "first_insert", "duplicate_insert"),
+    (
+        (
+            "partial_artifact_job_v0",
+            "generation_artifacts",
+            frozenset({"job_id"}),
+            "INSERT INTO generation_artifacts "
+            "(id, project_id, job_id, video_path, manifest_json, created_at) "
+            "VALUES (1, 101, 900, 'one.mp4', '{}', '2026-01-02 03:04:05')",
+            "INSERT INTO generation_artifacts "
+            "(id, project_id, job_id, video_path, manifest_json, created_at) "
+            "VALUES (2, 101, 900, 'two.mp4', '{}', '2026-01-02 03:04:05')",
+        ),
+        (
+            "partial_operation_job_v0",
+            "operation_requests",
+            frozenset({"job_id"}),
+            "INSERT INTO operation_requests VALUES "
+            "('one', '{}', 'project.status.get', 1, 101, 1, 1, '{}', 0, 900, "
+            "'receipt:one', '{}', '2026-01-02 03:04:05')",
+            "INSERT INTO operation_requests VALUES "
+            "('two', '{}', 'project.status.get', 1, 101, 1, 1, '{}', 0, 900, "
+            "'receipt:two', '{}', '2026-01-02 03:04:05')",
+        ),
+        (
+            "partial_language_parent_v0",
+            "language_turns",
+            frozenset({"parent_request_id"}),
+            "INSERT INTO language_turns "
+            "(request_id, parent_request_id, text) VALUES ('one', 'parent', 'one')",
+            "INSERT INTO language_turns "
+            "(request_id, parent_request_id, text) VALUES ('two', 'parent', 'two')",
+        ),
+    ),
+)
+def test_partial_v0_migration_restores_unique_indexes_and_enforcement(
+    tmp_path: Path,
+    fixture_name: str,
+    table: str,
+    column_set: frozenset[str],
+    first_insert: str,
+    duplicate_insert: str,
+) -> None:
+    path = build_fixture(fixture_name, tmp_path / f"{fixture_name}.db", Base.metadata)
+
+    result = _migrate(path)
+
+    assert result.status == "migrated"
+    with sqlite3.connect(path) as connection:
+        validate_schema_compatibility(connection, Base.metadata, version=1)
+        indexed, unique = _index_sets(connection, table)
+        assert column_set in indexed
+        assert column_set in unique
+        connection.execute(first_insert)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(duplicate_insert)
+
+
+def test_additive_index_reconciliation_preserves_existing_weaker_and_extra_indexes(
+    tmp_path: Path,
+) -> None:
+    path = build_fixture(
+        "partial_artifact_job_v0", tmp_path / "preserve-indexes.db", Base.metadata
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            'ALTER TABLE generation_artifacts ADD COLUMN "job_id" INTEGER'
+        )
+        connection.execute(
+            "CREATE INDEX legacy_artifact_job_lookup "
+            "ON generation_artifacts (job_id)"
+        )
+        connection.execute(
+            "CREATE INDEX legacy_artifact_video_lookup "
+            "ON generation_artifacts (video_path)"
+        )
+
+    _migrate(path)
+
+    with sqlite3.connect(path) as connection:
+        index_names = {
+            str(row[1])
+            for row in connection.execute(
+                'PRAGMA index_list("generation_artifacts")'
+            )
+        }
+        indexed, unique = _index_sets(connection, "generation_artifacts")
+    assert "legacy_artifact_job_lookup" in index_names
+    assert "legacy_artifact_video_lookup" in index_names
+    assert frozenset({"job_id"}) in indexed
+    assert frozenset({"job_id"}) in unique
+    assert frozenset({"video_path"}) in indexed
 
 
 def test_schema_version_v1_is_classified_without_mutation(tmp_path: Path) -> None:

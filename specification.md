@@ -81,7 +81,12 @@ compatibility check requires v1 to contain every registered table and column wit
 its expected affinity. Version 0 may omit tables and additive nullable/defaulted
 columns, but an existing known table missing a non-null column without a server
 default is unsupported. ASCII-case-colliding duplicate known identifiers and
-affinity mismatches fail before DDL. Unknown extra tables/columns retain their
+affinity mismatches fail before DDL. After additive columns exist, migration derives
+required ordinary and unique exact column sets from registered SQLAlchemy indexes and
+unique metadata, compares them with case-insensitive `PRAGMA index_list/index_info`,
+and creates deterministic quoted indexes only for missing sets. Existing indexes are
+never weakened or replaced. Version 1 is structurally invalid when any required
+ordinary or unique set is absent. Unknown extra tables/columns/indexes retain their
 actual spellings and remain untouched. The nine critical tables named in the
 DTD retain exact row counts and canonical PK identity digests using ordered PK columns
 from scratch current metadata, never an altered legacy declaration. Language requests

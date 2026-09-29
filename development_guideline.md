@@ -446,7 +446,7 @@ flowchart TD
 |---|---|---|
 | `app/api/` | HTTP routes, response mapping, and safe artifact path validation | Calls `app.db`, `app.schemas`, workers, and selected services |
 | `app/core/` | Settings, logging, and secret redaction/storage | Imported by almost every backend layer; it must not depend on route code |
-| `app/models/` | SQLAlchemy tables and enum values | Registered by `db.init_db`; referenced by routes, pipeline, and schemas |
+| `app/models/` | SQLAlchemy tables, constraints, indexes, and enum values | Registered into `Base.metadata` before lease-bound migration; referenced by migrations, routes, pipeline, and schemas |
 | `app/providers/` | External-service interfaces and concrete/fake clients | Constructed only through `services/provider_factory.py` and consumed by services |
 | `app/schemas/` | Pydantic HTTP request/response contracts | Defines the API contract; stage-specific LLM contracts live in `services/stage_schemas.py` |
 | `app/services/` | Pure-ish transformation, rendering, audio, subtitle, path, and orchestration code | The pipeline composes these services; services should not import frontend code |
@@ -457,7 +457,8 @@ flowchart TD
 | File | Role |
 |---|---|
 | `app/main.py` | Creates FastAPI, installs CORS, registers routers, initializes logging/database |
-| `app/db.py` | Creates the synchronous SQLite engine/session and performs additive startup schema updates |
+| `app/db.py` | Registers ORM metadata, owns the lease-scoped synchronous engine/session cache, and creates only a migration-approved current schema |
+| `app/migrations/` | Classifies SQLite versions, reconciles additive tables/columns/indexes, verifies backups, and performs offline restore under the database lease |
 | `app/core/config.py` | Loads cached `Settings` and resolves executable paths |
 | `app/core/security.py` | Masks API keys and stores per-project secrets in process memory |
 | `app/core/logging.py` | Configures Loguru and redacts log messages |
@@ -656,7 +657,7 @@ flowchart TD
 | Change video encoding | `ffmpeg_runner.py` | pipeline render stage, duration tests | FFmpeg argv tests and demo if FFmpeg exists |
 | Change storage paths | `paths.py` | artifact routes, model path fields, README | Security/API/integration tests and migration check |
 | Add an external provider | Provider interface first | concrete provider, `provider_factory.py`, fake provider, tests | Fake integration plus provider unit tests |
-| Change database columns | ORM model and `db.init_db` | server defaults, response schemas | Existing-database migration test; never assume `create_all` alters columns |
+| Change database columns, indexes, or uniqueness | ORM model and `app/migrations/schema.py` | server defaults, response schemas, D34 fixtures | Existing-database migration test; never assume `create_all` alters an existing table |
 | Change job behavior | `workers/job_runner.py` | routes, pipeline cancellation/progress | API/integration tests and restart/cancel manual test |
 
 ### Safe implementation rules
@@ -677,7 +678,10 @@ flowchart TD
 - Use `services/paths.py` for every artifact path and keep database paths
   relative to the storage root.
 - When adding a non-null database column, provide a `server_default`; the
-  startup additive migration cannot populate old rows otherwise.
+  versioned additive migration cannot populate old rows otherwise.
+- Declare required ordinary and unique indexes in SQLAlchemy metadata. The v0-to-v1
+  migration reconciles exact column sets after additive columns exist; it preserves
+  all legacy indexes and v1 validation rejects any missing metadata-required set.
 - Remember that the worker is process-local. A backend restart loses running
   task objects, although existing files remain available for later reruns.
 - Update backend schemas and frontend TypeScript mirrors in the same change.
@@ -717,12 +721,19 @@ uv run python ../scripts/lint_script.py ../samples/compose_multiplatform_intro.t
 
 - `app.main.create_app`: constructs FastAPI, configures CORS, registers all
   routers, and installs the catch-all JSON error handler.
-- `app.main.lifespan`: configures logging and initializes the SQLite schema on
-  application startup.
-- `app.db.get_engine` and `get_session_factory`: lazily create shared
-  SQLAlchemy infrastructure. `get_db` creates and closes request sessions.
-- `app.db.init_db`: imports models so SQLAlchemy sees their metadata, creates
-  missing tables, and performs only additive column discovery.
+- `app.main.lifespan`: configures logging, registers models, acquires the
+  application-lifetime database lease, runs migration/verification, initializes the
+  approved schema, and releases the lease only after database shutdown.
+- `app.db.get_engine` and `get_session_factory`: lazily create lease-scoped shared
+  SQLAlchemy infrastructure. `get_db` creates and closes request sessions only while
+  startup is ready.
+- `app.db.register_models`: imports models so SQLAlchemy sees their metadata without
+  opening or mutating the database.
+- `app.db.init_db`: runs `Base.metadata.create_all()` only after migration has
+  approved the database; it does not alter existing tables or reconcile columns.
+- `app.migrations.schema.apply_v0_to_v1`: adds eligible missing tables/columns, then
+  restores metadata-required ordinary/unique index column sets before setting schema
+  version 1. Existing indexes are never dropped or replaced.
 - `app.core.config.get_settings`: returns the cached settings object and
   creates the storage directories. `resolve_ffmpeg`, `resolve_ffprobe`, and
   `resolve_mmdc` select executable paths.

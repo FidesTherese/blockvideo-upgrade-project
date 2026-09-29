@@ -86,6 +86,71 @@ def build_partially_additive_v0(path: Path, metadata: MetaData) -> None:
         )
 
 
+def _quote(identifier: str) -> str:
+    escaped = identifier.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _rebuild_without_column(
+    connection: sqlite3.Connection, table: str, omitted_column: str
+) -> None:
+    columns = [
+        row
+        for row in connection.execute(f"PRAGMA table_info({_quote(table)})")
+        if str(row[1]).lower() != omitted_column.lower()
+    ]
+    definitions = []
+    for _, name, declared_type, not_null, default, primary_key in columns:
+        definition = f"{_quote(str(name))} {declared_type}"
+        if primary_key:
+            definition += " PRIMARY KEY"
+        if not_null:
+            definition += " NOT NULL"
+        if default is not None:
+            definition += f" DEFAULT {default}"
+        definitions.append(definition)
+    replacement = f"__partial_{table}"
+    selected = ", ".join(_quote(str(row[1])) for row in columns)
+    connection.execute(
+        f"CREATE TABLE {_quote(replacement)} ({', '.join(definitions)})"
+    )
+    connection.execute(
+        f"INSERT INTO {_quote(replacement)} ({selected}) "
+        f"SELECT {selected} FROM {_quote(table)}"
+    )
+    connection.execute(f"DROP TABLE {_quote(table)}")
+    connection.execute(
+        f"ALTER TABLE {_quote(replacement)} RENAME TO {_quote(table)}"
+    )
+
+
+def _build_partial_unique_column_v0(
+    path: Path, metadata: MetaData, *, table: str, column: str
+) -> None:
+    _create_current(path, metadata, version=0)
+    with sqlite3.connect(path) as connection:
+        _seed_project(connection)
+        _rebuild_without_column(connection, table, column)
+
+
+def build_partial_artifact_job_v0(path: Path, metadata: MetaData) -> None:
+    _build_partial_unique_column_v0(
+        path, metadata, table="generation_artifacts", column="job_id"
+    )
+
+
+def build_partial_operation_job_v0(path: Path, metadata: MetaData) -> None:
+    _build_partial_unique_column_v0(
+        path, metadata, table="operation_requests", column="job_id"
+    )
+
+
+def build_partial_language_parent_v0(path: Path, metadata: MetaData) -> None:
+    _build_partial_unique_column_v0(
+        path, metadata, table="language_turns", column="parent_request_id"
+    )
+
+
 def build_current_v1(path: Path, metadata: MetaData) -> None:
     _create_current(path, metadata, version=1)
     with sqlite3.connect(path) as connection:
@@ -151,6 +216,9 @@ FIXTURE_BUILDERS: dict[str, FixtureBuilder] = {
     "upstream_v0": build_upstream_v0,
     "d30_v0": build_d30_v0,
     "partially_additive_v0": build_partially_additive_v0,
+    "partial_artifact_job_v0": build_partial_artifact_job_v0,
+    "partial_operation_job_v0": build_partial_operation_job_v0,
+    "partial_language_parent_v0": build_partial_language_parent_v0,
     "current_v1": build_current_v1,
     "newer_v2": build_newer_v2,
 }

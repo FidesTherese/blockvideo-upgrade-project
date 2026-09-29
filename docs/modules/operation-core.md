@@ -125,10 +125,12 @@ lease last, preventing reuse of an offline-restored SQLite inode.
   text, request/model bodies, prompts, private paths, and credentials.
 - D31 adversarial checks compare exact persisted effects with zero journal changes;
   see its report for the bounded dependency and network claims.
-- D34 supports SQLite schema versions 0 and 1 only. Backup/restore and the application
-  mutually exclude through one non-blocking sibling lease; restore requires a stopped
-  application, and stale lease removal is an operator action only after confirming no
-  live application or restore.
+- D34 supports SQLite schema versions 0 and 1 only. Its additive migration reconciles
+  exact SQLAlchemy metadata-defined ordinary/unique index column sets after columns
+  exist, preserves every existing index, and rejects incomplete v1 structures.
+  Backup/restore and the application mutually exclude through one non-blocking sibling
+  lease; restore requires a stopped application, and stale lease removal is an operator
+  action only after confirming no live application or restore.
 - See `docs/plan-c/work-unit-12-15.md` for historical retention/restart behavior,
   `docs/plan-c/work-report-31.md` for D31 evidence, and
   `docs/plan-c/work-report-34.md` for migration/restore evidence and limits.
