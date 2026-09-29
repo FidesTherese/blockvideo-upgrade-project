@@ -122,23 +122,48 @@ def _scratch_schema(metadata: MetaData) -> dict[str, dict[str, tuple[str, int]]]
         engine.dispose()
 
 
-def classify_v0(connection: sqlite3.Connection, metadata: MetaData) -> None:
-    """Reject known table/column collisions with unequal SQLite affinity."""
+def validate_schema_compatibility(
+    connection: sqlite3.Connection, metadata: MetaData, *, version: int
+) -> None:
+    """Validate version-aware table, column, and affinity compatibility."""
+    if version not in (0, 1):
+        raise MigrationError("unsupported_legacy_schema")
+
     expected = _scratch_schema(metadata)
     expected_tables = _identifier_map(expected)
     observed_tables = _table_name_map(connection)
-    for normalized_table in observed_tables.keys() & expected_tables.keys():
-        observed_columns = _table_info(
-            connection, observed_tables[normalized_table]
-        )
-        expected_columns = expected[expected_tables[normalized_table]]
-        observed_names = _identifier_map(observed_columns)
-        expected_names = _identifier_map(expected_columns)
-        for normalized_column in observed_names.keys() & expected_names.keys():
-            observed = observed_columns[observed_names[normalized_column]]
-            current = expected_columns[expected_names[normalized_column]]
-            if sqlite_affinity(observed[0]) != sqlite_affinity(current[0]):
+    for table in metadata.sorted_tables:
+        normalized_table = _normalized_identifier(table.name)
+        expected_table = expected_tables[normalized_table]
+        actual_table = observed_tables.get(normalized_table)
+        if actual_table is None:
+            if version == 1:
                 raise MigrationError("unsupported_legacy_schema")
+            continue
+
+        observed_columns = _table_info(connection, actual_table)
+        observed_names = _identifier_map(observed_columns)
+        expected_columns = expected[expected_table]
+        expected_names = _identifier_map(expected_columns)
+        for column in table.columns:
+            normalized_column = _normalized_identifier(column.name)
+            actual_column = observed_names.get(normalized_column)
+            if actual_column is None:
+                if version == 1 or (
+                    not column.nullable and column.server_default is None
+                ):
+                    raise MigrationError("unsupported_legacy_schema")
+                continue
+            expected_column = expected_names[normalized_column]
+            if sqlite_affinity(observed_columns[actual_column][0]) != sqlite_affinity(
+                expected_columns[expected_column][0]
+            ):
+                raise MigrationError("unsupported_legacy_schema")
+
+
+def classify_v0(connection: sqlite3.Connection, metadata: MetaData) -> None:
+    """Validate structural compatibility for an additive version-0 schema."""
+    validate_schema_compatibility(connection, metadata, version=0)
 
 
 def _missing_columns(
@@ -182,7 +207,7 @@ def apply_v0_to_v1(connection: sqlite3.Connection, metadata: MetaData) -> None:
         raise MigrationError("schema_too_new")
     if version < 0:
         raise MigrationError("unsupported_legacy_schema")
-    classify_v0(connection, metadata)
+    validate_schema_compatibility(connection, metadata, version=version)
     if version == 1:
         return
 

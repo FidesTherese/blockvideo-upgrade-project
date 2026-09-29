@@ -23,12 +23,15 @@ from historical BlockVideo databases.
   before writing backup bytes.
 - Apply ordered additive migrations transactionally where SQLite permits it and only
   while the application owns that lease.
-- Build a scratch current-schema SQLite database from registered metadata and match
-  known table/column names with SQLite-compatible ASCII-only folding (A--Z to a--z,
-  non-ASCII unchanged). Require every existing known column's observed affinity to equal
-  its scratch affinity; preserve unknown extras and their actual spellings, and reject
-  ASCII-case-colliding duplicate known identifiers before DDL. Semantic-reference
-  presence checks use the same canonical keys; SQL quotes observed spellings.
+- Build a scratch current-schema SQLite database from registered metadata and apply one
+  reusable version-aware compatibility check. Version 1 requires every registered table
+  and column with its scratch affinity. Version 0 may omit tables and additive
+  nullable/defaulted columns, but an existing known table missing a non-null column
+  without a server default is unsupported. Match known names with SQLite-compatible
+  ASCII-only folding (A--Z to a--z, non-ASCII unchanged), preserve unknown extras and
+  their actual spellings, and reject ASCII-case-colliding duplicate known identifiers
+  before DDL. Semantic-reference presence checks use the same canonical keys; SQL quotes
+  observed spellings.
 - Freeze upstream and D30 ancestry fixtures as explicit historical SQL rather than
   deriving either schema by subtracting current metadata.
 - For `projects`, `blocks`, `generation_jobs`, `operation_requests`, `external_calls`,
@@ -43,8 +46,9 @@ from historical BlockVideo databases.
   destructive reverse SQL. Offline restore must acquire the same lease non-blocking
   and fail without touching the database when an application process is live. It
   accepts only regular non-symlink backup/metadata files under the exact target sibling
-  `.backups`, validates canonical target binding, hash, schema, critical identity,
-  integrity, and references, then removes stale `-wal`, `-shm`, and `-journal` files
+  `.backups`, validates canonical target binding, hash, version-aware schema
+  compatibility, critical identity, integrity, and references, then removes stale
+  `-wal`, `-shm`, and `-journal` files
   under the lease before atomic replacement and final fsync/reopen verification.
 - Store the exact canonical lease payload at acquisition. Both ownership assertion and
   release read the retained descriptor and current path and require exact acquired bytes

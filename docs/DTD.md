@@ -492,8 +492,14 @@ missing detection, and semantic-reference presence checks use those keys, while 
 quotes each observed identifier's actual spelling. A pair of known metadata table names,
 or known columns within one metadata table, that collide under this normalization fails
 `unsupported_legacy_schema` before scratch creation or legacy DDL. Distinct unknown
-Unicode identifiers remain distinct and are preserved. For every existing column whose table and column name are known to current metadata,
-the observed SQLite affinity must equal the scratch column's affinity. Affinity is
+Unicode identifiers remain distinct and are preserved. One reusable version-aware compatibility validator enforces this structure before DDL,
+during migration verification, and for a copied restore candidate before any target
+sidecar deletion or database replacement. Version 1 must contain every registered
+current table and column. Version 0 may omit whole tables and additive columns that are
+nullable or have a server default; if a known table exists, omission of a non-null
+column without a server default is unsupported. For every existing column whose table
+and column name are known to current metadata, the observed SQLite affinity must equal
+the scratch column's affinity. Affinity is
 derived from the declared type using SQLite's ordered rules: `INT` -> `INTEGER`;
 `CHAR`/`CLOB`/`TEXT` -> `TEXT`; `BLOB` or an empty declaration -> `BLOB`;
 `REAL`/`FLOA`/`DOUB` -> `REAL`; otherwise `NUMERIC`. A known-column name collision
@@ -588,6 +594,10 @@ def create_verified_backup(
     before_publish: Callable[[], None],
 ) -> VerifiedBackup: ...
 
+def validate_schema_compatibility(
+    connection: sqlite3.Connection, metadata: MetaData, *, version: int
+) -> None: ...
+
 def critical_identity_snapshot(
     connection: sqlite3.Connection, metadata: MetaData
 ) -> dict[str, TableIdentity]: ...
@@ -661,10 +671,12 @@ Operational rollback is offline only. `restore_database_backup()` first acquires
 same database lease non-blocking. It accepts only a regular, non-symlink backup and
 regular metadata sidecar directly inside the canonical target sibling `.backups`
 directory. Canonical metadata, target-path binding, caller hash, source schema,
-critical identity, SQLite integrity, structural compatibility, declared foreign keys,
-and semantic references must all validate against the copied/fsynced temporary file.
-Only after every validation passes does restore reassert lease ownership before
-removing each stale target `-wal`, `-shm`, and `-journal` sidecar and before atomically
+critical identity, SQLite integrity, version-aware schema compatibility, declared
+foreign keys, and semantic references must all validate against the copied/fsynced
+temporary file. Version-1 restore candidates missing any known table or column are
+invalid even when their hash and canonical metadata are valid. Only after every
+validation passes does restore reassert lease ownership before removing each stale
+target `-wal`, `-shm`, and `-journal` sidecar and before atomically
 replacing the main database. It fsyncs the final file and parent directory where
 supported, then reopens the target and rechecks exact hash, integrity, schema,
 identity, and references. It releases the lease in `finally`. If an application

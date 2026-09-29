@@ -10,7 +10,6 @@ from contextlib import closing
 from pathlib import Path
 
 from sqlalchemy import MetaData
-from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 
 from app.migrations.backup import (
     backup_metadata_path,
@@ -25,65 +24,13 @@ from app.migrations.lease import DatabaseLease, acquire_database_lease
 from app.migrations.schema import (
     CRITICAL_TABLES,
     apply_v0_to_v1,
-    classify_v0,
     critical_identity_snapshot,
     validate_critical_references,
+    validate_schema_compatibility,
 )
 
-_SQLITE_ASCII_FOLD = str.maketrans(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
-)
 _MAX_METADATA_BYTES = 1024 * 1024
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
-
-
-def _canonical(identifier: str) -> str:
-    return identifier.translate(_SQLITE_ASCII_FOLD)
-
-
-def _quote(identifier: str) -> str:
-    return sqlite_dialect().identifier_preparer.quote(identifier)
-
-
-def _identifier_map(identifiers: list[str]) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for identifier in identifiers:
-        key = _canonical(identifier)
-        if key in result:
-            raise MigrationError("migration_verification_failed")
-        result[key] = identifier
-    return result
-
-
-def _validate_current_schema(
-    connection: sqlite3.Connection, metadata: MetaData
-) -> None:
-    observed_tables = _identifier_map(
-        [
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        ]
-    )
-    for expected_table in metadata.tables.values():
-        actual_table = observed_tables.get(_canonical(expected_table.name))
-        if actual_table is None:
-            raise MigrationError("migration_verification_failed")
-        observed_columns = _identifier_map(
-            [
-                str(row[1])
-                for row in connection.execute(
-                    f"PRAGMA table_info({_quote(actual_table)})"
-                )
-            ]
-        )
-        if any(
-            _canonical(column.name) not in observed_columns
-            for column in expected_table.columns
-        ):
-            raise MigrationError("migration_verification_failed")
 
 
 def _integrity_is_ok(connection: sqlite3.Connection) -> bool:
@@ -97,8 +44,10 @@ def _verify_database(
 ) -> None:
     if not _integrity_is_ok(connection):
         raise MigrationError("migration_verification_failed")
-    classify_v0(connection, metadata)
-    _validate_current_schema(connection, metadata)
+    try:
+        validate_schema_compatibility(connection, metadata, version=1)
+    except MigrationError as exc:
+        raise MigrationError("migration_verification_failed") from exc
     validate_critical_references(connection)
     after = critical_identity_snapshot(connection, metadata)
     for table, identity in before.items():
@@ -131,7 +80,7 @@ def migrate_database(
             if version < 0:
                 raise MigrationError("unsupported_legacy_schema")
 
-            classify_v0(connection, metadata)
+            validate_schema_compatibility(connection, metadata, version=version)
             table_count_row = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -292,7 +241,9 @@ def _validate_restore_candidate(
             version = int(version_row[0]) if version_row else 0
             if version != expected_schema_version:
                 raise MigrationError("backup_invalid")
-            classify_v0(connection, metadata)
+            validate_schema_compatibility(
+                connection, metadata, version=expected_schema_version
+            )
             validate_critical_references(connection)
             if critical_identity_snapshot(connection, metadata) != expected_identities:
                 raise MigrationError("backup_invalid")

@@ -15,7 +15,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, Table, create_engine
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Float,
+    Integer,
+    LargeBinary,
+    MetaData,
+    String,
+    Table,
+    create_engine,
+)
 
 from app.migrations.backup import backup_metadata_path, sha256_file
 from app.migrations.contracts import MigrationError, MigrationResult, TableIdentity
@@ -27,6 +37,7 @@ from app.migrations.schema import (
     critical_identity_snapshot,
     sqlite_affinity,
     validate_critical_references,
+    validate_schema_compatibility,
 )
 from app.db import Base, init_db, register_models, reset_db_for_tests
 from tests.fixtures.migrations.build_fixtures import (
@@ -219,8 +230,40 @@ def test_classify_rejects_each_known_affinity_name_collision(
 def test_classify_accepts_declared_type_aliases_with_equal_affinity(tmp_path: Path) -> None:
     path = tmp_path / "affinity-aliases.db"
     build_matching_affinity_aliases(path, Base.metadata)
+    metadata = MetaData()
+    Table(
+        "projects",
+        metadata,
+        Column("id", Integer),
+        Column("title", String),
+        Column("progress", Float),
+        Column("subtitle_enabled", Boolean),
+    )
+    Table("external_calls", metadata, Column("response_body", LargeBinary))
     with sqlite3.connect(path) as connection:
-        classify_v0(connection, Base.metadata)
+        classify_v0(connection, metadata)
+
+
+@pytest.mark.parametrize("fixture_name", ("upstream_v0", "d30_v0", "partially_additive_v0"))
+def test_schema_compatibility_accepts_supported_v0(
+    tmp_path: Path, fixture_name: str
+) -> None:
+    path = build_fixture(fixture_name, tmp_path / f"{fixture_name}.db", Base.metadata)
+    with sqlite3.connect(path) as connection:
+        validate_schema_compatibility(connection, Base.metadata, version=0)
+
+
+def test_schema_compatibility_rejects_v0_table_missing_required_column(
+    tmp_path: Path,
+) -> None:
+    path = build_fixture("current_v1", tmp_path / "missing-required.db", Base.metadata)
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version=0")
+        connection.execute('ALTER TABLE projects DROP COLUMN "title"')
+        with pytest.raises(MigrationError) as exc_info:
+            validate_schema_compatibility(connection, Base.metadata, version=0)
+
+    assert exc_info.value.reason_code == "unsupported_legacy_schema"
 
 
 def test_distinct_unknown_unicode_identifiers_are_preserved(tmp_path: Path) -> None:
@@ -1358,6 +1401,61 @@ def test_restore_rejects_symlink_and_special_backup_paths(tmp_path: Path) -> Non
         )
     assert symlink_error.value.reason_code == "backup_invalid"
     assert database.read_bytes() == target_before
+
+
+def _replace_backup_with_incompatible_v1(
+    backup: Path, *, mutation_sql: str
+) -> str:
+    source = backup.with_name("source-v1.db")
+    build_fixture("current_v1", source, Base.metadata)
+    with sqlite3.connect(source) as connection:
+        connection.execute(mutation_sql)
+        identities = critical_identity_snapshot(connection, Base.metadata)
+    shutil.copyfile(source, backup)
+
+    backup_hash = sha256_file(backup)
+    metadata_path = backup_metadata_path(backup)
+    metadata = json.loads(metadata_path.read_bytes())
+    metadata["source_schema_version"] = 1
+    metadata["source_critical_identities"] = {
+        table: {
+            "primary_key_columns": list(identity.primary_key_columns),
+            "primary_key_sha256": identity.primary_key_sha256,
+            "row_count": identity.row_count,
+            "table": identity.table,
+        }
+        for table, identity in identities.items()
+    }
+    metadata["backup_sha256"] = backup_hash
+    metadata_path.write_bytes(_canonical_metadata(metadata))
+    return backup_hash
+
+
+@pytest.mark.parametrize(
+    "mutation_sql",
+    (
+        "DROP TABLE project_identities",
+        'ALTER TABLE projects DROP COLUMN "current_artifact_id"',
+    ),
+    ids=("missing-table", "missing-column"),
+)
+def test_restore_rejects_valid_v1_backup_with_incomplete_current_schema_before_mutation(
+    tmp_path: Path, mutation_sql: str
+) -> None:
+    database, backup, _result = _backup_for_restore(tmp_path)
+    expected_hash = _replace_backup_with_incompatible_v1(
+        backup, mutation_sql=mutation_sql
+    )
+    target_before = database.read_bytes()
+    stale_sidecar = Path(f"{database}-journal")
+    stale_sidecar.write_bytes(b"stale")
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(_url(database), backup, expected_hash, Base.metadata)
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == target_before
+    assert stale_sidecar.read_bytes() == b"stale"
 
 
 def test_restore_rejects_incompatible_metadata_schema(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ from app.migrations.schema import (
     critical_identity_snapshot,
     sqlite_affinity,
     validate_critical_references,
+    validate_schema_compatibility,
 )
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "sha256_file",
     "sqlite_affinity",
     "validate_critical_references",
+    "validate_schema_compatibility",
 ]

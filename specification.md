@@ -71,9 +71,13 @@ to retain the acquired inode identity and exact payload bytes. Release atomicall
 tombstones the current path and never deletes a raced replacement owner's lease;
 in-place content tampering is never accepted as owner evidence. Known table and column
 matching uses SQLite-compatible ASCII folding (A--Z to
-a--z only); non-ASCII characters remain unchanged. ASCII-case-colliding duplicate
-known identifiers and affinity mismatches fail before DDL. Unknown extra
-tables/columns retain their actual spellings and remain untouched. The nine critical tables named in the
+a--z only); non-ASCII characters remain unchanged. A reusable version-aware
+compatibility check requires v1 to contain every registered table and column with
+its expected affinity. Version 0 may omit tables and additive nullable/defaulted
+columns, but an existing known table missing a non-null column without a server
+default is unsupported. ASCII-case-colliding duplicate known identifiers and
+affinity mismatches fail before DDL. Unknown extra tables/columns retain their
+actual spellings and remain untouched. The nine critical tables named in the
 DTD retain exact row counts and canonical PK identity digests using ordered PK columns
 from scratch current metadata, never an altered legacy declaration. Language requests
 with an existing core receipt require a non-null matching project owner, reciprocal
@@ -87,7 +91,7 @@ the `.backups` root must be a non-reparse, non-symlink directory whose resolved 
 is exactly the canonical database-parent sibling before any backup bytes are written.
 Offline restore must acquire the same lease non-blocking and fails without database I/O
 while an application process is live. It accepts only regular non-symlink files in the
-exact target `.backups` sibling, validates target binding/hash/schema/identity/references,
+exact target `.backups` sibling, validates target binding/hash/version-aware schema compatibility/identity/references,
 then removes stale SQLite journals under the lease before atomic replacement and final
 fsync/reopen verification.
 
