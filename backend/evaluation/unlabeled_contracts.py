@@ -43,6 +43,8 @@ class UnlabeledSettingsPatch(StrictUnlabeledRecord):
     def not_empty(self) -> Self:
         if not self.model_fields_set:
             raise ValueError("settings patch must contain a consumed field")
+        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("settings patch fields must not be null")
         return self
 
 

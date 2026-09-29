@@ -508,6 +508,55 @@ def test_event_requires_exact_kind_specific_fields() -> None:
         UnlabeledTrialCase.model_validate(value)
 
 
+@pytest.mark.parametrize(
+    "null_field",
+    [
+        "subtitle_font_size",
+        "voicevox_speed_scale",
+        "voicevox_speaker_id",
+        "pronunciation_overrides",
+        "narration_pacing_mode",
+        "narration_sentence_pause_seconds",
+    ],
+)
+def test_revision_race_rejects_each_explicit_null_settings_field_before_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    null_field: str,
+) -> None:
+    value = _case()
+    valid_field = "voicevox_speed_scale" if null_field == "subtitle_font_size" else "subtitle_font_size"
+    valid_value: float | int = 1.0 if valid_field == "voicevox_speed_scale" else 52
+    value["event"] = {
+        "kind": "revision_race",
+        "request": value["event"]["request"],
+        "external_revision": 6,
+        "external_settings": {valid_field: valid_value, null_field: None},
+    }
+    value["case_sha256"] = canonical_case_sha256(value)
+    input_path = tmp_path / "explicit-null.json"
+    input_path.write_text(json.dumps(value), encoding="utf-8")
+    candidate = tmp_path / "candidate"
+    (candidate / "backend").mkdir(parents=True)
+    worker_called = False
+
+    def forbidden_worker(*args: Any, **kwargs: Any) -> None:
+        nonlocal worker_called
+        worker_called = True
+
+    monkeypatch.setattr(trial_host, "_run_candidate", forbidden_worker)
+    with pytest.raises(ValueError, match="invalid unlabeled trial case"):
+        run_trial_host(
+            candidate_root=candidate,
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "output.json",
+            storage=tmp_path / "storage",
+            model="test-model",
+        )
+    assert not worker_called
+
+
 def test_revision_race_rejects_seeded_history_collision() -> None:
     value = _case()
     value["initial"]["history"] = [{

@@ -930,7 +930,12 @@ action/when/then payloads. D37 projects each approved `Case` through an explicit
 allowlist before serialization. Event variants are a discriminated union: normal,
 identical resend, fresh-process restart resend, same-ID changed body, concurrent
 identical submission, revision race, one/two confirmation attempts, and target switch
-accept only their consumed fields. Confirmation uses
+accept only their consumed fields. `UnlabeledSettingsPatch.not_empty()` requires a
+non-empty `model_fields_set` and rejects the whole patch when `getattr(self, field)`
+is `None` for any supplied field. Thus omitted fields remain omitted, at least one
+non-null consumed field is required, and explicit JSON `null` is invalid even beside
+a valid supplied field. This validation occurs during host parsing before candidate
+path setup or `_run_candidate()`. Confirmation uses
 `POST /api/language/requests/{request_id}/execute`. Numeric and string bounds equal
 the candidate contracts. The host recomputes `case_sha256` from compact sorted-key
 ASCII JSON of the case without `case_sha256`; all canonical hashes use the same
@@ -985,8 +990,10 @@ a hash of the remaining allowlisted revision/job projection. Primary, replay,
 confirmation, and duplicate-confirmation requests each retain their own actual
 projection; no secondary event is projected with an assumed HTTP 200.
 
-The host rejects label/review/scoring fields, multiple cases, wrong mode/index
-combinations, or non-empty output before candidate invocation. It performs `lstat`
+The host rejects label/review/scoring fields, multiple cases, explicit-null settings
+patch fields, wrong mode/index combinations, or non-empty output before candidate
+invocation. The D36 contract test parametrizes all six patch fields, pairs each null
+with a valid non-null field, and proves `_run_candidate()` is not called. It performs `lstat`
 before resolution and rejects symlink/reparse/non-regular candidate, backend, index,
 storage, input, output, and temporary-file surfaces as applicable; every resolved
 path is containment-checked again before publication. `_candidate_snapshot()` walks

@@ -224,6 +224,9 @@ and receipt hashes reproducible. A revision-race event must use exactly the prim
 project's next revision, which must remain in bounds and must not collide with a seeded
 primary settings-history revision. `artifact_revisions` are strict integers from 1 through
 the finite revision maximum and cannot exceed the primary project's current revision.
+Every D36 settings patch requires at least one supplied consumed field; omitted
+fields retain patch semantics, but any explicitly supplied `null` field invalidates
+the complete case before worker launch, including when another patch field is valid.
 Candidate workers run with both
 `-B` and `PYTHONDONTWRITEBYTECODE=1`. The trusted host supplies each worker an
 explicit internal model-call budget in the closed range 0--4: the first process
