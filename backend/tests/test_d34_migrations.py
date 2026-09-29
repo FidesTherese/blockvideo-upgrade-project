@@ -6,11 +6,13 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
@@ -1244,6 +1246,66 @@ def test_restore_rejects_backup_outside_exact_target_backup_directory(
     with pytest.raises(MigrationError) as exc_info:
         restore_database_backup(
             _url(database), outside, result.backup_sha256 or "", Base.metadata
+        )
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == target_before
+
+
+@pytest.mark.parametrize("reparse_target", ("root", "backup"))
+def test_restore_rejects_mocked_windows_reparse_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reparse_target: str,
+) -> None:
+    database, backup, result = _backup_for_restore(tmp_path)
+    target_before = database.read_bytes()
+    selected_path = backup.parent if reparse_target == "root" else backup
+    original_lstat = Path.lstat
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    def lstat_with_reparse(path: Path) -> os.stat_result:
+        observed = original_lstat(path)
+        if path != selected_path:
+            return observed
+        return SimpleNamespace(
+            st_mode=observed.st_mode,
+            st_dev=observed.st_dev,
+            st_ino=observed.st_ino,
+            st_size=observed.st_size,
+            st_mtime_ns=observed.st_mtime_ns,
+            st_ctime_ns=observed.st_ctime_ns,
+            st_file_attributes=(
+                getattr(observed, "st_file_attributes", 0) | reparse_flag
+            ),
+        )
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_reparse)
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(
+            _url(database), backup, result.backup_sha256 or "", Base.metadata
+        )
+
+    assert exc_info.value.reason_code == "backup_invalid"
+    assert database.read_bytes() == target_before
+
+
+def test_restore_rejects_redirected_symlink_root_when_supported(tmp_path: Path) -> None:
+    database, backup, result = _backup_for_restore(tmp_path)
+    target_before = database.read_bytes()
+    backup_root = backup.parent
+    redirected = tmp_path / "redirected"
+    backup_root.rename(redirected)
+    try:
+        backup_root.symlink_to(redirected, target_is_directory=True)
+    except OSError:
+        redirected.rename(backup_root)
+        pytest.skip("directory symlink creation is unavailable")
+
+    with pytest.raises(MigrationError) as exc_info:
+        restore_database_backup(
+            _url(database), backup, result.backup_sha256 or "", Base.metadata
         )
 
     assert exc_info.value.reason_code == "backup_invalid"

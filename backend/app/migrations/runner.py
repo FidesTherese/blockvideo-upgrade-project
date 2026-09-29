@@ -179,26 +179,45 @@ def migrate_database(
         raise MigrationError("migration_verification_failed") from exc
 
 
+def _is_reparse_point(value: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(value, "st_file_attributes", 0) & reparse_flag)
+
+
 def _require_regular_file(path: Path) -> os.stat_result:
     try:
         result = path.lstat()
     except OSError as exc:
         raise MigrationError("backup_invalid") from exc
-    if stat.S_ISLNK(result.st_mode) or not stat.S_ISREG(result.st_mode):
+    if (
+        stat.S_ISLNK(result.st_mode)
+        or _is_reparse_point(result)
+        or not stat.S_ISREG(result.st_mode)
+    ):
         raise MigrationError("backup_invalid")
     return result
 
 
-def _validate_backup_location(database_path: Path, backup_path: Path) -> None:
+def _validate_backup_location(
+    database_path: Path, backup_path: Path
+) -> os.stat_result:
     backup_root = database_path.parent / ".backups"
+    expected_root = database_path.parent.resolve() / ".backups"
     try:
         root_stat = backup_root.lstat()
-        if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        if (
+            stat.S_ISLNK(root_stat.st_mode)
+            or _is_reparse_point(root_stat)
+            or not stat.S_ISDIR(root_stat.st_mode)
+            or backup_root.resolve(strict=True) != expected_root
+        ):
             raise MigrationError("backup_invalid")
-        if backup_path.parent.resolve(strict=True) != backup_root.resolve(strict=True):
+        backup_stat = _require_regular_file(backup_path)
+        if backup_path.parent.resolve(strict=True) != expected_root:
             raise MigrationError("backup_invalid")
-        if backup_path.resolve(strict=True).parent != backup_root.resolve(strict=True):
+        if backup_path.resolve(strict=True).parent != expected_root:
             raise MigrationError("backup_invalid")
+        return backup_stat
     except MigrationError:
         raise
     except OSError as exc:
@@ -295,8 +314,7 @@ def restore_database_backup(
     try:
         database_path = lease.database_path
         lease.assert_held_for(database_url)
-        _validate_backup_location(database_path, backup_path)
-        backup_stat = _require_regular_file(backup_path)
+        backup_stat = _validate_backup_location(database_path, backup_path)
         metadata_path = backup_metadata_path(backup_path)
         _require_regular_file(metadata_path)
         parsed = parse_backup_metadata(_read_metadata(metadata_path))
