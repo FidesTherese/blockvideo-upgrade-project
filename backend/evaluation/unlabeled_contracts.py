@@ -54,6 +54,7 @@ class UnlabeledProject(StrictUnlabeledRecord):
         "pending", "splitting", "planning", "generating", "rendering",
         "completed", "failed", "cancelled",
     ]
+    current_artifact_id: int | None = Field(default=None, ge=1, le=MAX_DATABASE_ID)
 
 
 class UnlabeledInitialJob(StrictUnlabeledRecord):
@@ -108,6 +109,26 @@ class UnlabeledInitialReceipt(StrictUnlabeledRecord):
     job_id: int | None = Field(default=None, ge=1, le=MAX_DATABASE_ID)
     canonical_request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     result_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def identity_matches_worker_seed(self) -> Self:
+        canonical_request = {
+            "operation_id": self.operation_id,
+            "operation_version": self.operation_version,
+            "project_id": self.project_id,
+            "base_revision": self.base_revision,
+        }
+        result = {
+            "operation_id": self.operation_id,
+            "project_id": self.project_id,
+            "revision": self.result_revision,
+            "changed": self.result_revision != self.base_revision,
+        }
+        if (hashlib.sha256(_canonical_json_bytes(canonical_request)).hexdigest()
+                != self.canonical_request_sha256
+                or hashlib.sha256(_canonical_json_bytes(result)).hexdigest() != self.result_sha256):
+            raise ValueError("receipt identity mismatch")
+        return self
 
 
 class UnlabeledInitialExternalCall(StrictUnlabeledRecord):
@@ -209,6 +230,12 @@ class UnlabeledInitialPriorTurn(StrictUnlabeledRecord):
     proposal: UnlabeledPriorProposal | None = None
     text: str = Field(min_length=1, max_length=2000, pattern=r"\S")
     relation: Literal["answer", "correction", "dismiss"] | None = None
+    parent_request_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    )
+    successor_request_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    )
 
 
 class UnlabeledInitialState(StrictUnlabeledRecord):
@@ -219,25 +246,30 @@ class UnlabeledInitialState(StrictUnlabeledRecord):
         "pending", "splitting", "planning", "generating", "rendering",
         "completed", "failed", "cancelled",
     ]
+    current_artifact_id: int | None = Field(default=None, ge=1, le=MAX_DATABASE_ID)
     additional_projects: tuple[UnlabeledProject, ...] = Field(default=(), max_length=16, strict=False)
     jobs: tuple[UnlabeledInitialJob, ...] = Field(max_length=32, strict=False)
     history: tuple[UnlabeledInitialHistory, ...] = Field(max_length=32, strict=False)
-    artifact_revisions: tuple[int, ...] = Field(default=(), max_length=32, strict=False)
+    artifact_revisions: tuple[Annotated[int, Field(ge=1, le=MAX_REVISION)], ...] = Field(
+        default=(), max_length=32, strict=False
+    )
     artifacts: tuple[UnlabeledInitialArtifact, ...] = Field(default=(), max_length=32, strict=False)
     receipts: tuple[UnlabeledInitialReceipt, ...] = Field(default=(), max_length=32, strict=False)
     external_calls: tuple[UnlabeledInitialExternalCall, ...] = Field(default=(), max_length=32, strict=False)
     prior_turns: tuple[UnlabeledInitialPriorTurn, ...] = Field(max_length=8, strict=False)
 
     @model_validator(mode="after")
-    def unique_owned_records(self) -> Self:
-        project_ids = [self.project_id, *(item.project_id for item in self.additional_projects)]
-        if len(project_ids) != len(set(project_ids)):
+    def seed_graph_is_consistent(self) -> Self:
+        projects = {
+            self.project_id: (self.revision, self.current_artifact_id),
+            **{
+                item.project_id: (item.revision, item.current_artifact_id)
+                for item in self.additional_projects
+            },
+        }
+        if len(projects) != 1 + len(self.additional_projects):
             raise ValueError("project IDs must be unique")
-        allowed = set(project_ids)
-        if any(item.project_id not in allowed for item in self.jobs):
-            raise ValueError("job references unknown project")
-        if any(item.project_id not in allowed for item in self.artifacts):
-            raise ValueError("artifact references unknown project")
+
         collections = (
             ("job", [item.id for item in self.jobs]),
             ("artifact", [item.id for item in self.artifacts]),
@@ -249,20 +281,166 @@ class UnlabeledInitialState(StrictUnlabeledRecord):
         for name, identities in collections:
             if len(identities) != len(set(identities)):
                 raise ValueError(f"{name} identities must be unique")
+
+        history_ids = {(item.project_id or self.project_id, item.revision) for item in self.history}
+        for item in self.history:
+            owner_id = item.project_id or self.project_id
+            if owner_id not in projects:
+                raise ValueError("history references unknown project")
+            if item.revision > projects[owner_id][0]:
+                raise ValueError("history revision exceeds owner revision")
+            if (item.restored_from_revision is not None
+                    and (owner_id, item.restored_from_revision) not in history_ids):
+                raise ValueError("history restore references unknown revision")
+
         jobs = {item.id: item for item in self.jobs}
-        if any(item.job_id not in jobs for item in self.external_calls):
-            raise ValueError("external call references unknown job")
-        if any(item.job_id is not None and item.job_id not in jobs for item in self.artifacts):
-            raise ValueError("artifact references unknown job")
-        next_artifact_id = max((item.id for item in self.artifacts), default=0) + len(self.artifact_revisions)
-        if next_artifact_id > MAX_DATABASE_ID:
-            raise ValueError("derived artifact IDs exceed database range")
         for item in self.jobs:
-            owner_revision = self.revision if item.project_id == self.project_id else next(
-                project.revision for project in self.additional_projects if project.project_id == item.project_id
-            )
+            if item.project_id not in projects:
+                raise ValueError("job references unknown project")
+            owner_revision = projects[item.project_id][0]
+            if item.input_revision > owner_revision:
+                raise ValueError("job revision exceeds owner revision")
             if item.status in {"pending", "running"} and item.input_revision != owner_revision:
                 raise ValueError("active job input revision must equal owner revision")
+            if item.parent_job_id is not None:
+                parent = jobs.get(item.parent_job_id)
+                if parent is None:
+                    raise ValueError("parent job does not exist")
+                if parent.project_id != item.project_id:
+                    raise ValueError("parent job ownership mismatch")
+        for item in self.jobs:
+            seen: set[int] = set()
+            current: UnlabeledInitialJob | None = item
+            while current is not None:
+                if current.id in seen:
+                    raise ValueError("parent job cycle")
+                seen.add(current.id)
+                current = jobs.get(current.parent_job_id) if current.parent_job_id is not None else None
+
+        next_artifact_id = max((item.id for item in self.artifacts), default=0) + 1
+        derived_ids = list(range(next_artifact_id, next_artifact_id + len(self.artifact_revisions)))
+        if derived_ids and derived_ids[-1] > MAX_DATABASE_ID:
+            raise ValueError("derived artifact IDs exceed database range")
+        artifact_ids = [item.id for item in self.artifacts] + derived_ids
+        if len(artifact_ids) != len(set(artifact_ids)):
+            raise ValueError("artifact identities must be unique across representations")
+        if any(revision > self.revision for revision in self.artifact_revisions):
+            raise ValueError("artifact revision exceeds owner revision")
+        artifacts = {item.id: item for item in self.artifacts}
+        artifacts.update({
+            artifact_id: UnlabeledInitialArtifact(
+                id=artifact_id,
+                project_id=self.project_id,
+                revision=revision,
+            )
+            for artifact_id, revision in zip(derived_ids, self.artifact_revisions, strict=True)
+        })
+        artifact_job_ids = [item.job_id for item in self.artifacts if item.job_id is not None]
+        if len(artifact_job_ids) != len(set(artifact_job_ids)):
+            raise ValueError("artifact job identities must be unique")
+        for item in self.artifacts:
+            if item.project_id not in projects:
+                raise ValueError("artifact references unknown project")
+            if item.revision is not None and item.revision > projects[item.project_id][0]:
+                raise ValueError("artifact revision exceeds owner revision")
+            if item.job_id is not None:
+                job = jobs.get(item.job_id)
+                if job is None:
+                    raise ValueError("artifact references unknown job")
+                if job.project_id != item.project_id:
+                    raise ValueError("artifact job ownership mismatch")
+        for project_id, (_, current_artifact_id) in projects.items():
+            if current_artifact_id is None:
+                continue
+            artifact = artifacts.get(current_artifact_id)
+            if artifact is None:
+                raise ValueError("current artifact does not exist")
+            if artifact.project_id != project_id:
+                raise ValueError("current artifact ownership mismatch")
+
+        receipt_job_ids = [item.job_id for item in self.receipts if item.job_id is not None]
+        if len(receipt_job_ids) != len(set(receipt_job_ids)):
+            raise ValueError("receipt job identities must be unique")
+        for item in self.receipts:
+            if item.project_id not in projects:
+                raise ValueError("receipt references unknown project")
+            if max(item.base_revision, item.result_revision) > projects[item.project_id][0]:
+                raise ValueError("receipt revision exceeds owner revision")
+            if item.job_id is not None:
+                job = jobs.get(item.job_id)
+                if job is None:
+                    raise ValueError("receipt references unknown job")
+                if job.project_id != item.project_id:
+                    raise ValueError("receipt job ownership mismatch")
+
+        call_ids = [(item.job_id, item.fingerprint) for item in self.external_calls]
+        if len(call_ids) != len(set(call_ids)):
+            raise ValueError("external call job fingerprints must be unique")
+        if any(item.job_id not in jobs for item in self.external_calls):
+            raise ValueError("external call references unknown job")
+
+        turns = {item.request_id: item for item in self.prior_turns}
+        explicit_links = any(
+            {"parent_request_id", "successor_request_id"}.intersection(item.model_fields_set)
+            for item in self.prior_turns
+        )
+        if explicit_links:
+            parent_ids = {item.request_id: item.parent_request_id for item in self.prior_turns}
+            successor_ids = {item.request_id: item.successor_request_id for item in self.prior_turns}
+        else:
+            parent_ids = {
+                item.request_id: self.prior_turns[index - 1].request_id if index else None
+                for index, item in enumerate(self.prior_turns)
+            }
+            successor_ids = {
+                item.request_id: (
+                    self.prior_turns[index + 1].request_id
+                    if index + 1 < len(self.prior_turns) else None
+                )
+                for index, item in enumerate(self.prior_turns)
+            }
+        for item in self.prior_turns:
+            if item.project_id not in projects:
+                raise ValueError("prior turn references unknown project")
+            if max(item.base_revision, item.result_revision or 1) > projects[item.project_id][0]:
+                raise ValueError("prior turn revision exceeds owner revision")
+            if isinstance(item.proposal, UnlabeledOperationProposal):
+                proposal_job_id = item.proposal.arguments.job_id
+                if proposal_job_id is not None:
+                    proposal_job = jobs.get(proposal_job_id)
+                    if proposal_job is None:
+                        raise ValueError("prior turn proposal references unknown job")
+                    if proposal_job.project_id != item.project_id:
+                        raise ValueError("prior turn proposal job ownership mismatch")
+                proposal_revision = item.proposal.arguments.revision
+                if (proposal_revision is not None
+                        and (item.project_id, proposal_revision) not in history_ids):
+                    raise ValueError("prior turn proposal references unknown history")
+            parent_id = parent_ids[item.request_id]
+            successor_id = successor_ids[item.request_id]
+            if parent_id is not None and parent_id not in turns:
+                raise ValueError("prior turn parent does not exist")
+            if successor_id is not None and successor_id not in turns:
+                raise ValueError("prior turn successor does not exist")
+        for item in self.prior_turns:
+            parent_id = parent_ids[item.request_id]
+            successor_id = successor_ids[item.request_id]
+            if parent_id is not None and turns[parent_id].project_id != item.project_id:
+                raise ValueError("prior turn link ownership mismatch")
+            if successor_id is not None and turns[successor_id].project_id != item.project_id:
+                raise ValueError("prior turn link ownership mismatch")
+            if parent_id is not None and successor_ids[parent_id] != item.request_id:
+                raise ValueError("prior turn links must be reciprocal")
+            if successor_id is not None and parent_ids[successor_id] != item.request_id:
+                raise ValueError("prior turn links must be reciprocal")
+        for item in self.prior_turns:
+            seen: set[str] = set()
+            current_id: str | None = item.request_id
+            while current_id is not None:
+                if current_id in seen:
+                    raise ValueError("prior turn cycle")
+                seen.add(current_id)
+                current_id = parent_ids[current_id]
         return self
 
 
@@ -345,6 +523,52 @@ class UnlabeledTrialCase(StrictUnlabeledRecord):
     event: UnlabeledEvent
     initial: UnlabeledInitialState
     case_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def case_references_seeded_graph(self) -> Self:
+        projects = {
+            self.initial.project_id: self.initial.revision,
+            **{item.project_id: item.revision for item in self.initial.additional_projects},
+        }
+        request = self.event.request
+        if request.target_project_id is not None:
+            if request.target_project_id not in projects:
+                raise ValueError("request target references unknown project")
+            if request.base_revision is not None and request.base_revision > projects[request.target_project_id]:
+                raise ValueError("request revision exceeds target revision")
+        turns = {item.request_id: item for item in self.initial.prior_turns}
+        if request.request_id in turns:
+            raise ValueError("request would create prior turn cycle")
+        if request.continuation is not None:
+            parent = turns.get(request.continuation.parent_request_id)
+            if parent is None:
+                raise ValueError("continuation parent does not exist")
+            explicit_links = any(
+                {"parent_request_id", "successor_request_id"}.intersection(item.model_fields_set)
+                for item in self.initial.prior_turns
+            )
+            if explicit_links:
+                successor_id = parent.successor_request_id
+            else:
+                parent_index = self.initial.prior_turns.index(parent)
+                successor_id = (
+                    self.initial.prior_turns[parent_index + 1].request_id
+                    if parent_index + 1 < len(self.initial.prior_turns) else None
+                )
+            if successor_id is not None:
+                raise ValueError("continuation parent already has successor")
+            if request.target_project_id is not None and parent.project_id != request.target_project_id:
+                raise ValueError("continuation parent ownership mismatch")
+        if isinstance(self.event, UnlabeledDifferentBodyEvent):
+            replacement_target = self.event.replacement_target_project_id
+            if replacement_target is not None and replacement_target not in projects:
+                raise ValueError("replacement target references unknown project")
+        if isinstance(self.event, UnlabeledSwitchTargetEvent):
+            if self.event.selected_project_id_after not in projects:
+                raise ValueError("selected project references unknown project")
+            if self.event.replacement_target_project_id not in projects:
+                raise ValueError("replacement target references unknown project")
+        return self
 
     @model_validator(mode="after")
     def verify_content_hash(self) -> Self:

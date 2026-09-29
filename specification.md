@@ -215,9 +215,14 @@ counts/flags, deterministic redacted hashes, and the pre/post-equal candidate sn
 hash; timing and private/model prose are excluded. Observation counts remain finite
 while accepting every valid seed and up to four event/model effects: projects 17,
 history 36, jobs 36, artifacts 68 (32 explicit plus 32 revision-derived plus four),
-receipts 36, external calls 36, language requests 12, and language turns 12. Derived
-artifact IDs must remain within the database integer range, so impossible combinations
-are rejected before worker launch. Candidate workers run with both
+receipts 36, external calls 36, language requests 12, and language turns 12. Derived artifact IDs must remain within the database integer range. The host validates
+the complete seed graph before worker launch: every project, revision, history restore,
+job parent, artifact/job, receipt/job, external call, current artifact, prior-turn link,
+and continuation target must exist and retain one project owner; parent and dialogue
+graphs must be acyclic, dialogue links reciprocal, database-unique identities distinct,
+and receipt hashes reproducible. `artifact_revisions` are strict integers from 1 through
+the finite revision maximum and cannot exceed the primary project's current revision.
+Candidate workers run with both
 `-B` and `PYTHONDONTWRITEBYTECODE=1`. The trusted host supplies each worker an
 explicit internal model-call budget in the closed range 0--4: the first process
 receives four and a `restart_resend` replay receives four minus the validated first

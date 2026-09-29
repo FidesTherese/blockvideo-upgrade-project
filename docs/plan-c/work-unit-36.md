@@ -41,6 +41,10 @@ an atomic no-replace hard link so a competing destination is never overwritten.
 `RedactedState` count maxima MUST accept the strict seed maxima plus up to four
 event/model effects: 17 projects, 36 history rows, 36 jobs, 68 artifacts, 36 receipts,
 36 external calls, 12 language requests, and 12 language turns. The 68-artifact bound
-MUST include both independently valid 32-item artifact inputs. Any relationship that
-would make worker seeding impossible, including derived artifact IDs above the database
-integer range, MUST be rejected before candidate invocation.
+MUST include both independently valid 32-item artifact inputs. Any relationship that would make worker seeding impossible MUST be rejected before
+candidate invocation. This includes out-of-range or future artifact revisions, unknown
+project/job/artifact/history/receipt/call/prior-turn/parent/successor references,
+cross-project ownership, cyclic job or dialogue ancestry, non-reciprocal dialogue
+links, duplicate database-unique identities, receipt identity mismatch, current-artifact
+ownership mismatch, and derived artifact IDs above the database integer range. A
+maximum-count graph-valid case MUST seed through the real worker.

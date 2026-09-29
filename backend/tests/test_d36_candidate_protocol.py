@@ -13,7 +13,7 @@ from typing import Any, get_args, get_origin
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from evaluation.unlabeled_contracts import UnlabeledTrialCase, canonical_case_sha256
+from evaluation.unlabeled_contracts import MAX_REVISION, UnlabeledTrialCase, canonical_case_sha256
 from evaluation.scripts import evaluation_trial_host as trial_host
 from evaluation.scripts.evaluation_trial_host import run_trial_host
 
@@ -103,7 +103,7 @@ def _maximum_seed_case() -> dict[str, Any]:
                 "input_settings": settings,
                 "kind": "full",
                 "block_index": None,
-                "parent_job_id": None,
+                "parent_job_id": item_id - 1 if item_id > 1 else None,
             }
             for item_id in range(1, 33)
         ],
@@ -113,7 +113,7 @@ def _maximum_seed_case() -> dict[str, Any]:
                 "revision": revision,
                 "settings": settings,
                 "changed_fields": [],
-                "restored_from_revision": None,
+                "restored_from_revision": 1 if revision > 1 else None,
             }
             for revision in range(1, 33)
         ],
@@ -123,7 +123,7 @@ def _maximum_seed_case() -> dict[str, Any]:
                 "id": item_id,
                 "project_id": 101,
                 "job_id": None,
-                "revision": item_id,
+                "revision": item_id - 99,
                 "file_content_hex": "78",
                 "file_size": 1,
                 "file_sha256": hashlib.sha256(b"x").hexdigest(),
@@ -161,6 +161,8 @@ def _maximum_seed_case() -> dict[str, Any]:
                 "proposal": None,
                 "text": "字幕を変更",
                 "relation": None if item_id == 1 else "answer",
+                "parent_request_id": f"prior-{item_id - 1}" if item_id > 1 else None,
+                "successor_request_id": f"prior-{item_id + 1}" if item_id < 8 else None,
             }
             for item_id in range(1, 9)
         ],
@@ -192,14 +194,111 @@ def _maximum_seed_case() -> dict[str, Any]:
             "base_revision": 100,
             "result_revision": 100,
             "generation_requested": False,
-            "job_id": None,
+            "job_id": item_id,
             "canonical_request_sha256": hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
             "result_sha256": trial_host._hash(result),
         })
     value["initial"]["receipts"] = receipts
+    value["initial"]["current_artifact_id"] = 163
     value["event"]["request"]["base_revision"] = 100
     value["case_sha256"] = canonical_case_sha256(value)
     return value
+
+
+def _seed_graph_case() -> dict[str, Any]:
+    value = _case()
+    settings = value["initial"]["settings"]
+    value["initial"].update({
+        "current_artifact_id": 10,
+        "additional_projects": [{
+            "project_id": 202,
+            "revision": 3,
+            "settings": settings,
+            "project_status": "completed",
+            "current_artifact_id": 20,
+        }],
+        "jobs": [
+            {"id": 1, "project_id": 101, "status": "failed", "input_revision": 4,
+             "cancel_requested": False, "input_settings": settings, "kind": "full",
+             "block_index": None, "parent_job_id": None},
+            {"id": 2, "project_id": 101, "status": "completed", "input_revision": 5,
+             "cancel_requested": False, "input_settings": settings, "kind": "full",
+             "block_index": None, "parent_job_id": 1},
+            {"id": 3, "project_id": 202, "status": "completed", "input_revision": 3,
+             "cancel_requested": False, "input_settings": settings, "kind": "full",
+             "block_index": None, "parent_job_id": None},
+        ],
+        "history": [
+            {"project_id": 101, "revision": 1, "settings": settings,
+             "changed_fields": [], "restored_from_revision": None},
+            {"project_id": 101, "revision": 5, "settings": settings,
+             "changed_fields": [], "restored_from_revision": 1},
+            {"project_id": 202, "revision": 3, "settings": settings,
+             "changed_fields": [], "restored_from_revision": None},
+        ],
+        "artifact_revisions": [4],
+        "artifacts": [
+            {"id": 10, "project_id": 101, "job_id": 2, "revision": 5,
+             "file_content_hex": "78", "file_size": 1,
+             "file_sha256": hashlib.sha256(b"x").hexdigest()},
+            {"id": 20, "project_id": 202, "job_id": 3, "revision": 3,
+             "file_content_hex": "78", "file_size": 1,
+             "file_sha256": hashlib.sha256(b"x").hexdigest()},
+        ],
+        "external_calls": [{
+            "id": 1, "job_id": 2, "fingerprint": "seed-call", "provider": "synthetic",
+            "endpoint": "https://synthetic.invalid/d36", "remote_side_effect": False,
+            "status": "failed", "attempts": 1, "response_status": None,
+            "response_body_hex": None, "response_body_sha256": None,
+            "response_content_type": None, "provider_response_id": None,
+            "error_code": "synthetic_failure",
+        }],
+        "prior_turns": [
+            {"request_id": "prior-1", "project_id": 101, "base_revision": 4,
+             "status": "needs_input", "question": "値は？", "result_revision": None,
+             "settings_saved": False, "proposal": None, "text": "字幕を変更",
+             "relation": None, "parent_request_id": None, "successor_request_id": "prior-2"},
+            {"request_id": "prior-2", "project_id": 101, "base_revision": 5,
+             "status": "needs_input", "question": "値は？", "result_revision": None,
+             "settings_saved": False, "proposal": None, "text": "64px",
+             "relation": "answer", "parent_request_id": "prior-1", "successor_request_id": None},
+        ],
+    })
+    canonical_request = json.dumps({
+        "operation_id": "project.status.get", "operation_version": 1,
+        "project_id": 101, "base_revision": 5,
+    }, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    result = {"operation_id": "project.status.get", "project_id": 101,
+              "revision": 5, "changed": False}
+    value["initial"]["receipts"] = [{
+        "request_id": "seed-receipt", "operation_id": "project.status.get",
+        "operation_version": 1, "project_id": 101, "base_revision": 5,
+        "result_revision": 5, "generation_requested": False, "job_id": 2,
+        "canonical_request_sha256": hashlib.sha256(canonical_request.encode()).hexdigest(),
+        "result_sha256": trial_host._hash(result),
+    }]
+    value["event"]["request"]["continuation"] = {
+        "parent_request_id": "prior-2", "relation": "answer",
+    }
+    value["case_sha256"] = canonical_case_sha256(value)
+    return value
+
+
+def _refresh_receipt_identity(case: dict[str, Any]) -> None:
+    item = case["initial"]["receipts"][0]
+    canonical_request = {
+        "operation_id": item["operation_id"], "operation_version": item["operation_version"],
+        "project_id": item["project_id"], "base_revision": item["base_revision"],
+    }
+    result = {
+        "operation_id": item["operation_id"], "project_id": item["project_id"],
+        "revision": item["result_revision"],
+        "changed": item["result_revision"] != item["base_revision"],
+    }
+    item["canonical_request_sha256"] = hashlib.sha256(json.dumps(
+        canonical_request, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    item["result_sha256"] = trial_host._hash(result)
 
 
 def _worker_observation() -> dict[str, Any]:
@@ -687,6 +786,135 @@ def test_maximum_valid_seed_produces_valid_real_worker_observation(tmp_path: Pat
     assert observation.before.language_request_count == observation.before.language_turn_count == 8
     assert observation.after.receipt_count == 33
     assert observation.after.language_request_count == observation.after.language_turn_count == 9
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda case: case["initial"]["artifact_revisions"].__setitem__(0, 0), "artifact_revisions"),
+        (lambda case: case["initial"]["artifact_revisions"].__setitem__(0, MAX_REVISION + 1), "artifact_revisions"),
+        (lambda case: case["initial"]["artifact_revisions"].__setitem__(0, 6), "artifact revision"),
+        (lambda case: case["initial"]["history"][0].__setitem__("project_id", 999), "history references unknown project"),
+        (lambda case: case["initial"]["history"][0].__setitem__("revision", 6), "history revision exceeds owner revision"),
+        (lambda case: case["initial"]["history"][1].__setitem__("restored_from_revision", 2), "history restore references unknown revision"),
+        (lambda case: case["initial"]["jobs"][0].__setitem__("project_id", 999), "job references unknown project"),
+        (lambda case: case["initial"]["jobs"][0].__setitem__("input_revision", 6), "job revision exceeds owner revision"),
+        (lambda case: case["initial"]["jobs"][1].__setitem__("parent_job_id", 999), "parent job does not exist"),
+        (lambda case: case["initial"]["jobs"][1].__setitem__("parent_job_id", 3), "parent job ownership mismatch"),
+        (lambda case: case["initial"]["jobs"][0].__setitem__("parent_job_id", 2), "parent job cycle"),
+        (lambda case: case["initial"]["artifacts"][0].__setitem__("project_id", 999), "artifact references unknown project"),
+        (lambda case: case["initial"]["artifacts"][0].__setitem__("revision", 6), "artifact revision exceeds owner revision"),
+        (lambda case: case["initial"]["artifacts"][0].__setitem__("job_id", 999), "artifact references unknown job"),
+        (lambda case: (case["initial"]["artifacts"][0].__setitem__("job_id", 3),
+                       case["initial"]["artifacts"][1].__setitem__("job_id", None)), "artifact job ownership mismatch"),
+        (lambda case: (case["initial"]["receipts"][0].__setitem__("project_id", 999),
+                       _refresh_receipt_identity(case)), "receipt references unknown project"),
+        (lambda case: (case["initial"]["receipts"][0].__setitem__("result_revision", 6),
+                       _refresh_receipt_identity(case)), "receipt revision exceeds owner revision"),
+        (lambda case: case["initial"]["receipts"][0].__setitem__("job_id", 999), "receipt references unknown job"),
+        (lambda case: case["initial"]["receipts"][0].__setitem__("job_id", 3), "receipt job ownership mismatch"),
+        (lambda case: case["initial"]["external_calls"][0].__setitem__("job_id", 999), "external call references unknown job"),
+        (lambda case: case["initial"]["prior_turns"][0].__setitem__("project_id", 999), "prior turn references unknown project"),
+        (lambda case: case["initial"]["prior_turns"][1].update(proposal={
+            "kind": "operation", "operation_id": "project.generation.retry",
+            "operation_version": 1, "arguments": {"job_id": 999},
+            "generate_after_save": False,
+        }), "prior turn proposal references unknown job"),
+        (lambda case: case["initial"]["prior_turns"][1].update(proposal={
+            "kind": "operation", "operation_id": "project.settings.restore",
+            "operation_version": 1, "arguments": {"revision": 2},
+            "generate_after_save": False,
+        }), "prior turn proposal references unknown history"),
+        (lambda case: case["initial"]["prior_turns"][0].__setitem__("base_revision", 6), "prior turn revision exceeds owner revision"),
+        (lambda case: case["initial"]["prior_turns"][1].__setitem__("parent_request_id", "missing"), "prior turn parent does not exist"),
+        (lambda case: case["initial"]["prior_turns"][0].__setitem__("successor_request_id", "missing"), "prior turn successor does not exist"),
+        (lambda case: (case["initial"]["prior_turns"][1].__setitem__("project_id", 202),
+                       case["initial"]["prior_turns"][1].__setitem__("base_revision", 3)), "prior turn link ownership mismatch"),
+        (lambda case: case["initial"]["prior_turns"][0].__setitem__("successor_request_id", None), "prior turn links must be reciprocal"),
+        (lambda case: (case["initial"]["prior_turns"][0].update(
+                           parent_request_id="prior-2", successor_request_id="prior-2"),
+                       case["initial"]["prior_turns"][1].update(
+                           parent_request_id="prior-1", successor_request_id="prior-1")), "prior turn cycle"),
+        (lambda case: case["initial"].__setitem__("current_artifact_id", 999), "current artifact does not exist"),
+        (lambda case: case["initial"].__setitem__("current_artifact_id", 20), "current artifact ownership mismatch"),
+        (lambda case: case["initial"]["additional_projects"][0].__setitem__("current_artifact_id", 10), "current artifact ownership mismatch"),
+        (lambda case: case["event"]["request"].__setitem__("target_project_id", 999), "request target references unknown project"),
+        (lambda case: case["event"]["request"].__setitem__("base_revision", 6), "request revision exceeds target revision"),
+        (lambda case: case["event"]["request"].__setitem__("request_id", "prior-1"), "request would create prior turn cycle"),
+        (lambda case: case["event"]["request"]["continuation"].__setitem__("parent_request_id", "missing"), "continuation parent does not exist"),
+        (lambda case: case["event"]["request"]["continuation"].__setitem__("parent_request_id", "prior-1"), "continuation parent already has successor"),
+        (lambda case: (case["event"]["request"].__setitem__("target_project_id", 202),
+                       case["event"]["request"].__setitem__("base_revision", 3)), "continuation parent ownership mismatch"),
+        (lambda case: case["event"].update(
+            kind="same_id_different_body", replacement_text="別の依頼",
+            replacement_target_project_id=999), "replacement target references unknown project"),
+    ],
+    ids=[
+        "artifact-revision-zero", "artifact-revision-max", "artifact-revision-future",
+        "history-project", "history-revision", "history-restored-revision",
+        "job-project", "job-revision", "job-parent", "job-parent-owner", "job-parent-cycle",
+        "artifact-project", "artifact-revision", "artifact-job", "artifact-job-owner",
+        "receipt-project", "receipt-revision", "receipt-job", "receipt-job-owner", "call-job",
+        "turn-project", "turn-proposal-job", "turn-proposal-history", "turn-revision",
+        "turn-parent", "turn-successor", "turn-owner", "turn-reciprocal", "turn-cycle",
+        "current-artifact", "current-artifact-owner", "additional-current-artifact-owner",
+        "request-target", "request-revision", "request-cycle", "continuation-parent",
+        "continuation-superseded", "continuation-owner", "replacement-target",
+    ],
+)
+def test_invalid_seed_graph_is_rejected_before_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: Any,
+    message: str,
+) -> None:
+    case = _seed_graph_case()
+    mutation(case)
+    case["case_sha256"] = canonical_case_sha256(case)
+    input_path = tmp_path / "invalid-seed.json"
+    input_path.write_text(json.dumps(case), encoding="utf-8")
+    candidate = tmp_path / "candidate"
+    (candidate / "backend").mkdir(parents=True)
+    worker_called = False
+
+    def forbidden_worker(*args: Any, **kwargs: Any) -> None:
+        nonlocal worker_called
+        worker_called = True
+
+    with pytest.raises(ValidationError, match=message):
+        UnlabeledTrialCase.model_validate(case)
+    monkeypatch.setattr(trial_host, "_run_candidate", forbidden_worker)
+    with pytest.raises(ValueError, match="invalid unlabeled trial case"):
+        run_trial_host(candidate_root=candidate, mode="all_tools", input_path=input_path,
+            output_path=tmp_path / "output.json", storage=tmp_path / "storage", model="test-model")
+    assert not worker_called
+
+
+@pytest.mark.parametrize(
+    ("collection", "duplicate", "message"),
+    [
+        ("artifacts", lambda item: {**item, "id": 11}, "artifact job identities must be unique"),
+        ("receipts", lambda item: {**item, "request_id": "second-receipt"}, "receipt job identities must be unique"),
+        ("external_calls", lambda item: {**item, "id": 2}, "external call job fingerprints must be unique"),
+    ],
+)
+def test_seed_graph_rejects_database_unique_constraint_collisions(
+    collection: str, duplicate: Any, message: str
+) -> None:
+    case = _seed_graph_case()
+    case["initial"][collection].append(duplicate(case["initial"][collection][0]))
+    case["case_sha256"] = canonical_case_sha256(case)
+    with pytest.raises(ValidationError, match=message):
+        UnlabeledTrialCase.model_validate(case)
+
+
+@pytest.mark.parametrize("field", ["canonical_request_sha256", "result_sha256"])
+def test_seed_graph_rejects_receipt_identity_mismatch(field: str) -> None:
+    case = _seed_graph_case()
+    case["initial"]["receipts"][0][field] = "0" * 64
+    case["case_sha256"] = canonical_case_sha256(case)
+    with pytest.raises(ValidationError, match="receipt identity mismatch"):
+        UnlabeledTrialCase.model_validate(case)
 
 
 def test_derived_artifact_ids_must_fit_database_range() -> None:

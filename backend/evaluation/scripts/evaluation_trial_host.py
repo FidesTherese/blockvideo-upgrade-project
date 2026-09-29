@@ -670,12 +670,20 @@ def _candidate_worker(model_call_budget: int) -> int:
                                                                "file_sha256": item["file_sha256"]})
                     db.add(artifact)
                 db.flush()
-                primary_project = project_map[initial["project_id"]]
-                owned_artifacts = [item for item in artifacts if item["project_id"] == primary_project.id]
-                if owned_artifacts:
-                    current = owned_artifacts[-1]
-                    primary_project.current_artifact_id = current["id"]
-                    primary_project.output_video_path = f"projects/{current['project_id']}/history/d36-{current['id']}/video.mp4"
+                artifact_map = {item["id"]: item for item in artifacts}
+                project_inputs = [primary, *initial.get("additional_projects", [])]
+                for project_input in project_inputs:
+                    project = project_map[project_input["project_id"]]
+                    current_id = project_input.get("current_artifact_id")
+                    if current_id is None and project.id == initial["project_id"]:
+                        owned_artifacts = [item for item in artifacts if item["project_id"] == project.id]
+                        current_id = owned_artifacts[-1]["id"] if owned_artifacts else None
+                    if current_id is not None:
+                        current = artifact_map[current_id]
+                        project.current_artifact_id = current_id
+                        project.output_video_path = (
+                            f"projects/{current['project_id']}/history/d36-{current_id}/video.mp4"
+                        )
                 for item in initial.get("receipts", []):
                     canonical_request = json.dumps({"operation_id": item["operation_id"], "operation_version": item["operation_version"],
                         "project_id": item["project_id"], "base_revision": item["base_revision"]},
@@ -701,9 +709,11 @@ def _candidate_worker(model_call_budget: int) -> int:
                         status=item["status"], attempts=item["attempts"], response_status=item.get("response_status"),
                         response_body=body, response_content_type=item.get("response_content_type"),
                         provider_response_id=item.get("provider_response_id"), error_code=item.get("error_code")))
-                parent: str | None = None
-                previous_turn: LanguageTurn | None = None
-                for turn in initial["prior_turns"]:
+                explicit_turn_links = any(
+                    "parent_request_id" in turn or "successor_request_id" in turn
+                    for turn in initial["prior_turns"]
+                )
+                for index, turn in enumerate(initial["prior_turns"]):
                     proposal = turn.get("proposal")
                     outcome = InterpretationOutcome.model_validate({
                         "status": "proposed" if proposal and proposal["kind"] == "operation" else "needs_input",
@@ -729,13 +739,18 @@ def _candidate_worker(model_call_budget: int) -> int:
                         input_fingerprint="0" * 64, project_id=response.project_id, base_revision=response.base_revision,
                         status=response.status, owner_token="seed", lease_until=0, created_at=0,
                         request_json=None, response_json=response.model_dump(mode="json")))
-                    current_turn = LanguageTurn(request_id=response.request_id, text=turn["text"],
-                        parent_request_id=parent, relation=turn.get("relation"))
-                    db.add(current_turn)
-                    if previous_turn is not None:
-                        previous_turn.successor_request_id = response.request_id
-                    parent = response.request_id
-                    previous_turn = current_turn
+                    parent_request_id = (
+                        turn.get("parent_request_id") if explicit_turn_links
+                        else initial["prior_turns"][index - 1]["request_id"] if index else None
+                    )
+                    successor_request_id = (
+                        turn.get("successor_request_id") if explicit_turn_links
+                        else initial["prior_turns"][index + 1]["request_id"]
+                        if index + 1 < len(initial["prior_turns"]) else None
+                    )
+                    db.add(LanguageTurn(request_id=response.request_id, text=turn["text"],
+                        parent_request_id=parent_request_id, relation=turn.get("relation"),
+                        successor_request_id=successor_request_id))
                 db.commit()
 
         def file_identity(relative: str | None) -> dict[str, Any] | None:

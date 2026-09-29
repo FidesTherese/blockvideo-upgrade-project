@@ -947,13 +947,24 @@ effects: `project_count <= 17`, `history_count <= 36`, `job_count <= 36`,
 `language_request_count <= 12`, and `language_turn_count <= 12`. Projects receive no
 event allowance because events cannot create projects. These are finite acceptance
 bounds rather than expected-effect assertions; actual effects remain separately
-reported. The input validator requires the largest explicit artifact ID plus the
-revision-derived artifact count to fit `2**63 - 1`, preventing a schema-accepted seed
-from failing when the worker assigns derived IDs. The worker derives complete generation snapshots
-and fingerprints with candidate `capture_inputs`/`fingerprint_inputs`, reconstructs
-reciprocal dialogue links in memory before commit and candidate language responses,
-and creates synthetic artifact bytes whose size/hash must match the wire identity. No label model or D24
-contract is imported. Before and after each event, the worker canonicalizes sorted
+reported. The input validator accepts `artifact_revisions` only as strict integers from 1 through
+`10**12`, requires each to be no newer than the primary project, and requires the
+largest explicit artifact ID plus the revision-derived artifact count to fit
+`2**63 - 1`. Before worker launch it builds the complete seeded graph and rejects:
+unknown project, job, artifact, receipt, external-call, history, dialogue-parent, or
+dialogue-successor references; a revision newer than its owning project; cross-project
+job-parent, artifact-job, receipt-job, continuation-parent, or current-artifact links;
+job or dialogue cycles; non-reciprocal dialogue links; missing restore-source revisions;
+and database uniqueness collisions for artifact jobs, receipt jobs, or external-call
+job/fingerprint pairs. Explicit and revision-derived artifact IDs are checked as one
+set. Receipt request/result hashes must equal the exact values reconstructed by the
+worker. `current_artifact_id`, `parent_request_id`, and `successor_request_id` are
+optional for compatibility; when supplied they are seeded exactly, while omitted
+prior-turn links retain the deterministic list-order chain and an omitted primary
+current artifact retains the last-owned-artifact rule. The worker derives complete
+generation snapshots and fingerprints with candidate
+`capture_inputs`/`fingerprint_inputs` and creates synthetic artifact bytes whose
+size/hash must match the wire identity. No label model or D24 contract is imported. Before and after each event, the worker canonicalizes sorted
 records for every project and settings revision; complete job snapshot/fingerprint
 state; receipt request/result values; artifact manifest and file identities; external
 call response hashes; and language request/turn values. `_logical_state()` recursively
