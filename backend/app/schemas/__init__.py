@@ -413,6 +413,24 @@ class BlockPatch(BaseModel):
     visual_plan: dict[str, Any] | None = None
 
 
+RecoveryCode = Literal[
+    "wait",
+    "safe_retry",
+    "external_outcome_unknown",
+    "refresh_required",
+    "cancelled",
+    "completed",
+    "failed",
+]
+RecommendedAction = Literal[
+    "wait",
+    "retry_current",
+    "check_provider",
+    "refresh",
+    "none",
+]
+
+
 class JobSummary(BaseModel):
     """Public progress representation of a background generation job.
 
@@ -440,6 +458,8 @@ class JobSummary(BaseModel):
     recovery_message: str | None = None
     retryable: bool = False
     retry_blocked_reason: str | None = None
+    recovery_code: RecoveryCode
+    recommended_action: RecommendedAction
     plan: dict[str, list[str]] | None = None
 
 

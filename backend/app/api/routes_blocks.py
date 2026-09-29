@@ -18,7 +18,8 @@ from app.models.block import Block, VisualType
 from app.models.project import Project
 from app.models.job import GenerationJob
 from app.models.block import BlockStatus
-from app.schemas import BlockPatch, BlockSummary, GenerateAllResponse, JobSummary
+from app.schemas import BlockPatch, BlockSummary, GenerateAllResponse
+from app.services.job_views import job_summary
 from app.services.transactions import begin_write
 from app.workers.job_runner import (
     enqueue_block_audio_rerun,
@@ -164,17 +165,7 @@ async def regenerate_visual(block_id: int, db: Session = Depends(get_db)) -> Gen
     job = await enqueue_block_visual_rerun(block.project_id, block.index)
     job = db.get(GenerationJob, job.id) or job
     return GenerateAllResponse(
-        job=JobSummary(
-            id=job.id,
-            project_id=job.project_id,
-            current_stage=job.current_stage,
-            status=job.status.value,
-            progress=job.progress,
-            stage_progress=job.stage_progress,
-            started_at=job.started_at.isoformat() if job.started_at else None,
-            finished_at=job.finished_at.isoformat() if job.finished_at else None,
-            error_message=job.error_message,
-        ),
+        job=job_summary(job),
         message="visual regeneration queued",
     )
 
@@ -204,17 +195,7 @@ async def regenerate_audio(block_id: int, db: Session = Depends(get_db)) -> Gene
     job = await enqueue_block_audio_rerun(block.project_id, block.index)
     job = db.get(GenerationJob, job.id) or job
     return GenerateAllResponse(
-        job=JobSummary(
-            id=job.id,
-            project_id=job.project_id,
-            current_stage=job.current_stage,
-            status=job.status.value,
-            progress=job.progress,
-            stage_progress=job.stage_progress,
-            started_at=job.started_at.isoformat() if job.started_at else None,
-            finished_at=job.finished_at.isoformat() if job.finished_at else None,
-            error_message=job.error_message,
-        ),
+        job=job_summary(job),
         message="audio regeneration queued",
     )
 
@@ -250,16 +231,6 @@ async def rerender_block(block_id: int, db: Session = Depends(get_db)) -> Genera
     job = await enqueue_rerender(block.project_id)
     job = db.get(GenerationJob, job.id) or job
     return GenerateAllResponse(
-        job=JobSummary(
-            id=job.id,
-            project_id=job.project_id,
-            current_stage=job.current_stage,
-            status=job.status.value,
-            progress=job.progress,
-            stage_progress=job.stage_progress,
-            started_at=job.started_at.isoformat() if job.started_at else None,
-            finished_at=job.finished_at.isoformat() if job.finished_at else None,
-            error_message=job.error_message,
-        ),
+        job=job_summary(job),
         message="block rerender queued (via project rerender)",
     )

@@ -8,7 +8,7 @@ from sqlalchemy.orm import object_session
 
 from app.models.external_call import ExternalCall
 from app.models.job import GenerationJob, JobStatus
-from app.schemas import JobSummary
+from app.schemas import JobSummary, RecommendedAction, RecoveryCode
 from app.services.generation_plan import STAGE_ORDER
 
 
@@ -46,9 +46,34 @@ def _retry_blocked_reason(job: GenerationJob) -> str | None:
     return None
 
 
+def _recovery_action(
+    job: GenerationJob, blocked_reason: str | None
+) -> tuple[RecoveryCode, RecommendedAction, bool]:
+    if job.cancel_requested or job.status in {JobStatus.pending, JobStatus.running}:
+        return "wait", "wait", False
+    if job.status == JobStatus.unknown:
+        return "external_outcome_unknown", "check_provider", False
+    if job.status == JobStatus.completed:
+        return "completed", "none", False
+    if job.status == JobStatus.failed:
+        if blocked_reason is None:
+            return "safe_retry", "retry_current", True
+        if object_session(job) is None:
+            return "refresh_required", "refresh", False
+        return "external_outcome_unknown", "check_provider", False
+    if job.status == JobStatus.cancelled:
+        if blocked_reason is None:
+            return "safe_retry", "retry_current", True
+        if object_session(job) is not None:
+            return "external_outcome_unknown", "check_provider", False
+        return "cancelled", "none", False
+    return "failed", "none", False
+
+
 def job_summary(job: GenerationJob) -> JobSummary:
     """Expose control metadata without snapshots, provider responses or secrets."""
     blocked_reason = _retry_blocked_reason(job)
+    recovery_code, recommended_action, retryable = _recovery_action(job, blocked_reason)
     raw_stages = (job.plan_json or {}).get("stages", [])
     stages = raw_stages if isinstance(raw_stages, list) else []
     plan = {"stages": [stage for stage in STAGE_ORDER if stage in stages]} if job.plan_json else None
@@ -59,6 +84,6 @@ def job_summary(job: GenerationJob) -> JobSummary:
         error_message=job.error_message, cancel_requested=job.cancel_requested,
         input_revision=job.input_revision, parent_job_id=job.parent_job_id,
         recovery_message=job.recovery_message,
-        retryable=job.status in {JobStatus.failed, JobStatus.cancelled} and blocked_reason is None,
-        retry_blocked_reason=blocked_reason, plan=plan,
+        retryable=retryable, retry_blocked_reason=blocked_reason,
+        recovery_code=recovery_code, recommended_action=recommended_action, plan=plan,
     )

@@ -22,7 +22,10 @@ from app.main import create_app
 from app.migrations import MigrationError, MigrationResult
 from app.migrations.backup import sha256_file
 from app.migrations.runner import restore_database_backup
+from app.models.external_call import ExternalCall
+from app.models.job import GenerationJob, JobStatus
 from app.models.project import Project
+from app.services.job_views import job_summary
 from tests.fixtures.migrations.build_fixtures import build_fixture
 
 
@@ -114,6 +117,135 @@ def _patch_successful_lifecycle(
     monkeypatch.setattr(main_module, "run_operation_dispatcher", dispatch)
     monkeypatch.setattr(main_module.operation_dispatcher, "job_registry", registry)
     return events, lease, registry
+
+
+def test_job_summary_derives_exact_recovery_codes_from_persisted_state_and_journal(
+    temp_storage: Path,
+) -> None:
+    with get_session_factory()() as db:
+        jobs: dict[str, GenerationJob] = {}
+        for name, status, cancel_requested in [
+            ("pending", JobStatus.pending, False),
+            ("running", JobStatus.running, False),
+            ("cancel_requested", JobStatus.running, True),
+            ("failed_retryable", JobStatus.failed, False),
+            ("failed_unknown_call", JobStatus.failed, False),
+            ("unknown", JobStatus.unknown, False),
+            ("cancelled", JobStatus.cancelled, False),
+            ("completed", JobStatus.completed, False),
+            ("detached_failed", JobStatus.failed, False),
+        ]:
+            project = Project(title=f"recovery-{name}", source_script="synthetic")
+            db.add(project)
+            db.flush()
+            job = GenerationJob(
+                project_id=project.id,
+                current_stage="synthetic",
+                status=status,
+                cancel_requested=cancel_requested,
+            )
+            db.add(job)
+            jobs[name] = job
+        db.flush()
+        db.add(
+            ExternalCall(
+                job_id=jobs["failed_unknown_call"].id,
+                fingerprint="f" * 64,
+                provider="synthetic",
+                endpoint="https://provider.invalid/jobs",
+                remote_side_effect=True,
+                status="unknown",
+            )
+        )
+        db.commit()
+
+        detached_failed = jobs.pop("detached_failed")
+        db.refresh(detached_failed)
+        db.expunge(detached_failed)
+        summaries = {name: job_summary(job) for name, job in jobs.items()}
+        summaries["detached_failed"] = job_summary(detached_failed)
+
+    expected = {
+        "pending": ("wait", "wait", False, None),
+        "running": ("wait", "wait", False, None),
+        "cancel_requested": ("wait", "wait", False, None),
+        "failed_retryable": ("safe_retry", "retry_current", True, None),
+        "failed_unknown_call": (
+            "external_outcome_unknown",
+            "check_provider",
+            False,
+            "以前の外部処理の結果が未確定です。外部サービス側の履歴を確認できるまで再実行できません。",
+        ),
+        "unknown": (
+            "external_outcome_unknown",
+            "check_provider",
+            False,
+            "外部処理の結果が未確定です。このアプリでは結果を照会できないため、外部サービス側の履歴を確認してください。",
+        ),
+        "cancelled": ("safe_retry", "retry_current", True, None),
+        "completed": ("completed", "none", False, None),
+        "detached_failed": (
+            "refresh_required",
+            "refresh",
+            False,
+            "現在の状態を再取得してから再実行してください。",
+        ),
+    }
+    assert {
+        name: (
+            summary.recovery_code,
+            summary.recommended_action,
+            summary.retryable,
+            summary.retry_blocked_reason,
+        )
+        for name, summary in summaries.items()
+    } == expected
+
+
+@pytest.mark.parametrize(
+    ("route_name", "enqueue_name"),
+    [
+        ("regenerate_visual", "enqueue_block_visual_rerun"),
+        ("regenerate_audio", "enqueue_block_audio_rerun"),
+        ("rerender_block", "enqueue_rerender"),
+    ],
+)
+def test_block_regeneration_responses_include_required_recovery_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    route_name: str,
+    enqueue_name: str,
+) -> None:
+    from app.api import routes_blocks
+    from app.models.block import Block
+
+    block = Block(id=5, project_id=7, index=0, source_text="synthetic")
+    project = Project(id=7, title="synthetic", source_script="synthetic")
+    job = GenerationJob(
+        id=11,
+        project_id=7,
+        current_stage="queued",
+        status=JobStatus.pending,
+        progress=0.0,
+        stage_progress=0.0,
+        cancel_requested=False,
+    )
+
+    class FakeDb:
+        def get(self, model: type[Any], identifier: int) -> Any:
+            return {Block: block, Project: project, GenerationJob: job}[model]
+
+    async def enqueue(*_args: Any) -> GenerationJob:
+        return job
+
+    monkeypatch.setattr(routes_blocks, "ensure_project_idle", lambda *_args: None)
+    monkeypatch.setattr(routes_blocks, "ensure_render_assets_ready", lambda *_args: None)
+    monkeypatch.setattr(routes_blocks, enqueue_name, enqueue)
+
+    response = asyncio.run(getattr(routes_blocks, route_name)(block.id, FakeDb()))
+
+    assert response.job.recovery_code == "wait"
+    assert response.job.recommended_action == "wait"
+    assert response.job.retryable is False
 
 
 def test_lifespan_registers_leases_migrates_then_initializes_before_database_users(
