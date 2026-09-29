@@ -26,7 +26,7 @@ Thumbs.db
 # so the extension rules are scoped there rather than globally — docs/ needs to
 # carry example screenshots.
 storage/
-release-evidence/
+/release-evidence/
 tools/mermaid/node_modules/
 **/*.mp4
 **/*.wav

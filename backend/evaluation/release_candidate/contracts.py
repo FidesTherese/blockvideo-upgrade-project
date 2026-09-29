@@ -1,0 +1,44 @@
+"""Strict contracts for the deterministic D36 candidate freeze."""
+from __future__ import annotations
+
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from evaluation.tool_attestation import FileFingerprint
+
+CANDIDATE_COMMIT_SUBJECT = "[DONE] Mission 35 Add recovery-oriented operational UI"
+_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+
+
+class CandidateControl(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1]
+    git_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    git_commit_subject: Literal["[DONE] Mission 35 Add recovery-oriented operational UI"]
+    git_tree_clean: Literal[True]
+
+
+class FreezeManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1]
+    candidate_id: Annotated[str, Field(pattern=r"^[0-9a-f]{16}-[0-9a-f]{12}$")]
+    git_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    git_tree_clean: Literal[True]
+    candidate_control_sha256: Annotated[str, Field(pattern=_SHA256_PATTERN)]
+    created_at: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")]
+    runtime: dict[str, str]
+    schema_version_number: Annotated[int, Field(strict=True, ge=1)]
+    mode_configuration: dict[str, object]
+    files: list[FileFingerprint]
+    aggregate_sha256: Annotated[str, Field(pattern=_SHA256_PATTERN)]
+
+    @field_validator("files")
+    @classmethod
+    def validate_files(cls, value: list[FileFingerprint]) -> list[FileFingerprint]:
+        paths = [item.path for item in value]
+        if not paths or paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise ValueError("candidate files must be non-empty, unique, and sorted")
+        return value
