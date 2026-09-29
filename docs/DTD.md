@@ -166,7 +166,7 @@ No new third-party package is selected. Direct in-scope dependencies are:
 | pytest | dev dependency `>=8.3.3` | monkeypatch, temporary directories, process/race matrices |
 | React | 18.3.1 | recovery/status components |
 | TypeScript | project `^5.6.3` | exact frontend mirrors of backend enums |
-| Vitest/Testing Library | Vitest 2.1.9 verified | component and interaction tests |
+| Vitest/Testing Library | Vitest 2.1.9; user-event 14.6.7 | component and interaction tests with real tab/keyboard semantics |
 
 Official sources previously recorded as checked 2026-09-23:
 
@@ -794,8 +794,16 @@ network failure displays fixed text without exception details and a native butto
 that starts a fresh status request. Migration-failure guidance names documented
 backup restoration only when `backup_available` is true; the false branch instead
 directs the operator to stop, restart, and contact support. `GenerationHistory` uses
-the new fields for labels and control visibility. All buttons remain native buttons,
-status text uses `role="status"` or `role="alert"`, and focus order follows DOM order.
+the new fields for labels and control visibility. Project and history fetches, including
+refetches, disable recovery controls. Immediately before retry or cancellation,
+`ProjectDetailPage` refetches both resources, locates the same job, and requires the
+current typed status, `recommended_action`, `retryable`, cancellation flag, and equal
+project/history revisions to authorize that exact action. A failed check executes no
+operation and displays refresh guidance. A synchronous revalidation lock preserves
+duplicate-action exclusion before React state updates. All buttons remain native
+buttons, status text uses `role="status"` or `role="alert"`, and focus order follows DOM
+order. Vitest proves structural narrow-layout containment only; Task 4 must supply real
+browser evidence at 390 px.
 
 ### D36 frozen D35 candidate and external trial boundary
 
@@ -1598,8 +1606,10 @@ independent review gates supply the recorded trust decisions.
   on ready and degraded shutdown; offline restore between lifespans followed by a
   second lifespan reading restored bytes/state instead of the old pooled inode; and
   repeated lifespan startup with a fresh pool.
-- **D35:** API contract tests and Vitest interactions for every code/action, stale
-  refresh, duplicate click, keyboard focus, role/status text, and 390 px layout.
+- **D35:** API contract tests and Vitest interactions for every code/action, immediate
+  action revalidation, stale refresh, duplicate click, DOM-order tab/Enter behavior,
+  role/status text, and structural narrow-layout containment. Task 4 supplies real
+  browser 390 px layout evidence.
 - **D36:** strict canonical candidate control plus detached digest; exact D35
   parent/subject/cleanliness; commit-timestamp-derived UTC `created_at`; byte-identical
   manifest generation on repeated identical inputs; changed allowlisted byte;

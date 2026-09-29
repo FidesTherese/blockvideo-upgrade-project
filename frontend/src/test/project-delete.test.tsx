@@ -7,6 +7,9 @@ import { api, ApiError } from '@/api/client';
 import { projectFixture } from '@/test/project-fixtures';
 
 function page() {
+  vi.spyOn(api, 'startup').mockResolvedValue({
+    status: 'ready', reason_code: null, message: '起動が完了しました。', schema_version: 1, backup_available: false,
+  });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(<QueryClientProvider client={client}><MemoryRouter><ProjectsPage /></MemoryRouter></QueryClientProvider>);
 }

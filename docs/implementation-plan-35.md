@@ -147,16 +147,16 @@ git commit -m "feat: render typed recovery and startup status"
 
 **Interfaces:**
 - `StartupStatus` is mounted once in `Layout` above routed content.
-- Project controls use refreshed `JobSummary.recommended_action`; stale revision/history disables actions until refetch.
+- Project controls disable during project/history fetches and refetches. Retry/cancel callbacks refetch both resources immediately before execution and require the same current job's typed action/status/retryability plus coherent revisions.
 - `GenerationHistory` invokes existing `onRetry(job.id)` and `onCancel(job.id)` callbacks only from enabled native buttons.
 
 - [ ] **Step 1: Add RED interaction tests**
 
-Test stale history -> refresh -> safe retry, unknown external outcome with no retry, cancellation wait, completed state, duplicate retry click while locked, keyboard tab/Enter activation, one live status announcement, and component containment at a 390 px viewport without horizontal overflow.
+Test stale history -> refresh -> safe retry, same-revision transition rejection, query/refetch and revalidation locks, unknown external outcome with no retry, cancellation wait, completed state, duplicate retry activation, `userEvent.tab()` DOM order plus `userEvent.keyboard('{Enter}')` activation, one live status announcement, and structural narrow-layout containment. jsdom does not prove overflow; Task 4 must provide real-browser 390 px evidence.
 
 - [ ] **Step 2: Implement page integration**
 
-Mount `StartupStatus`, preserve current polling/refetch behavior, disable controls while history/project revisions differ, and key action visibility only from typed fields. Do not add automatic resend/retry intervals.
+Mount `StartupStatus`, preserve current polling/refetch behavior, disable controls during project/history fetches or revision mismatch, and key action visibility only from typed fields. Immediately refetch and revalidate the same job before retry/cancel without weakening the duplicate lock. Do not add automatic resend/retry intervals.
 
 - [ ] **Step 3: Run focused frontend and backend contract tests**
 

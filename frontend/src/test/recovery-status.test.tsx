@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '@/api/client';
 import { GenerationHistory } from '@/components/GenerationHistory';
@@ -166,30 +167,36 @@ describe('GenerationHistory recovery controls', () => {
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
-  it('keeps the native retry button keyboard-focusable and activatable', () => {
+  it('follows DOM-order tab navigation and activates retry once with Enter', async () => {
+    const user = userEvent.setup();
     const retry = vi.fn();
-    render(<GenerationHistory
-      jobs={[jobFixture({ recovery_code: 'safe_retry', recommended_action: 'retry_current', retryable: true })]}
-      disabled={false}
-      running={false}
-      onRetry={retry}
-      onCancel={vi.fn()}
-    />);
+    render(<>
+      <button type="button">履歴の前</button>
+      <GenerationHistory
+        jobs={[jobFixture({ recovery_code: 'safe_retry', recommended_action: 'retry_current', retryable: true })]}
+        disabled={false}
+        running={false}
+        onRetry={retry}
+        onCancel={vi.fn()}
+      />
+      <button type="button">履歴の後</button>
+    </>);
 
-    const button = screen.getByRole('button', { name: '現在の設定で再実行' });
-    button.focus();
-    expect(button).toHaveFocus();
-    const keydown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
-    expect(button.dispatchEvent(keydown)).toBe(true);
-    button.click();
+    await user.tab();
+    expect(screen.getByRole('button', { name: '履歴の前' })).toHaveFocus();
+    await user.tab();
+    expect(screen.getByRole('button', { name: '現在の設定で再実行' })).toHaveFocus();
+    await user.keyboard('{Enter}');
     expect(retry).toHaveBeenCalledOnce();
+    await user.tab();
+    expect(screen.getByRole('button', { name: '履歴の後' })).toHaveFocus();
   });
 
-  it('contains long recovery content at a 390px viewport', () => {
-    vi.stubGlobal('innerWidth', 390);
+  it('provides structural narrow-layout containment; Task 4 must verify 390px overflow in a browser', () => {
+    const recoveryMessage = '外部処理の状態を確認する必要があります。'.repeat(20);
     const { container } = render(<GenerationHistory
       jobs={[jobFixture({
-        recovery_message: '外部処理の状態を確認する必要があります。'.repeat(20),
+        recovery_message: recoveryMessage,
         recovery_code: 'external_outcome_unknown',
         recommended_action: 'check_provider',
         retryable: false,
@@ -201,8 +208,8 @@ describe('GenerationHistory recovery controls', () => {
     />);
 
     expect(container.firstElementChild).toHaveClass('max-w-full');
-    expect(container.scrollWidth).toBeLessThanOrEqual(390);
-    vi.unstubAllGlobals();
+    expect(container.querySelector('li')).toHaveClass('min-w-0');
+    expect(screen.getByText(recoveryMessage)).toHaveClass('break-words', 'whitespace-pre-wrap');
   });
 });
 

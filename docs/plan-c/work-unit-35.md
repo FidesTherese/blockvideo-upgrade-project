@@ -26,11 +26,16 @@ startup polling is permitted while the backend explicitly reports `starting`.
 
 Component and browser tests cover every state and stale-view transition. Suggested
 actions match backend permissions, duplicate clicks remain safe, and narrow-screen
-and keyboard operation remain usable. Startup migration guidance mentions restore
+and keyboard operation remain usable. Project/history fetches disable recovery actions.
+Immediately before retry or cancellation, the client refetches both, finds the same job,
+and requires current typed recommendation, retryability, status, cancellation state,
+and coherent revisions to still authorize the action; otherwise it sends no operation
+and shows refresh guidance. Startup migration guidance mentions restore
 only when the backend reports a backup. While startup remains `starting`, the client
 polls only the startup status endpoint at a fixed interval with no overlap, aborts and
 cleans up on unmount, stops on terminal or network failure, and offers an explicit
-native status-refetch button after a network failure.
+native status-refetch button after a network failure. jsdom tests establish only
+structural narrow-layout containment; Task 4 provides real-browser 390 px evidence.
 
 Backend retry guidance MUST use the same project-wide blockers as durable job
 creation: any unknown job or any `remote_side_effect IS TRUE` call in `in_flight` or

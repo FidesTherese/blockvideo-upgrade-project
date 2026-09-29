@@ -129,7 +129,12 @@ remote-side-effect call. The same exact remote-call predicate protects pending-j
 creation, while local unknown calls do not block. List and history responses build
 that typed context once with one bulk aggregate query and reuse it for every job;
 a detached terminal job without context requires refresh rather than guessing.
-Startup status polling performs only bounded, non-overlapping `GET /api/startup`
+Recovery controls are disabled while project/history queries fetch or refetch. Retry
+and cancellation refetch both resources immediately before execution and proceed only
+when the same current job's typed status, recommendation, retryability, cancellation
+flag, and coherent revisions still authorize the requested action; otherwise no
+operation is sent and refresh guidance is shown. A synchronous lock prevents duplicate
+revalidation. Startup status polling performs only bounded, non-overlapping `GET /api/startup`
 requests at a fixed interval while status is `starting`, aborts and clears its timer
 on cleanup, and stops on ready, migration failure, or network failure. Network
 failure exposes an explicit status-refetch button. Migration failure mentions the

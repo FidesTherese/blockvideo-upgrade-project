@@ -1,5 +1,5 @@
 /** Project settings, immutable output history and durable generation controls. */
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Layout } from '@/components/Layout';
 import { useProject, useProjectBlocks, useProjectHistory } from '@/api/hooks';
@@ -28,17 +28,61 @@ function ProjectMonitor({ id }: { id: number }) {
   const history = useProjectHistory(id);
   const command = useProjectOperation(id);
   const language = useLanguageRequest(id);
+  const actionRevalidation = useRef(false);
+  const [revalidatingAction, setRevalidatingAction] = useState(false);
+  const [actionRefreshRequired, setActionRefreshRequired] = useState(false);
   const jobs = history.data?.jobs ?? [];
   const active = jobs.filter((job) => job.recommended_action === 'wait');
   const running = active.length > 0 || ['splitting', 'planning', 'generating', 'rendering'].includes(project.data?.status ?? '');
   const unknown = jobs.some((job) => job.recommended_action === 'check_provider');
   const viewsDiffer = history.data != null && project.data != null && history.data.revision !== project.data.revision;
-  const actionsUnavailable = command.locked || language.locked || !history.data || !!history.error || viewsDiffer;
+  const actionsUnavailable = command.locked || language.locked || project.isFetching || history.isFetching
+    || revalidatingAction || !history.data || !!history.error || viewsDiffer;
   const blocked = running || actionsUnavailable;
   const { refetch: refreshProject } = project;
   const { refetch: refreshBlocks } = blocks;
   const { refetch: refreshHistory } = history;
-  const refreshState = () => Promise.all([refreshProject(), refreshBlocks(), refreshHistory()]);
+  const refreshState = () => {
+    setActionRefreshRequired(false);
+    return Promise.all([refreshProject(), refreshBlocks(), refreshHistory()]);
+  };
+  const revalidateRecoveryAction = async (action: 'retry' | 'cancel', jobId: number) => {
+    if (actionRevalidation.current || command.locked) return;
+    actionRevalidation.current = true;
+    setRevalidatingAction(true);
+    setActionRefreshRequired(false);
+    try {
+      const [currentProject, currentHistory] = await Promise.all([refreshProject(), refreshHistory()]);
+      const currentJob = currentHistory.data?.jobs.find((job) => job.id === jobId);
+      const coherent = !currentProject.isError && !currentHistory.isError
+        && currentProject.data != null && currentHistory.data != null
+        && currentProject.data.revision === currentHistory.data.revision;
+      const authorized = action === 'retry'
+        ? currentJob != null
+          && (currentJob.status === 'failed' || currentJob.status === 'cancelled')
+          && currentJob.recommended_action === 'retry_current'
+          && currentJob.retryable === true
+        : currentJob != null
+          && (currentJob.status === 'pending' || currentJob.status === 'running')
+          && currentJob.recommended_action === 'wait'
+          && currentJob.retryable === false
+          && !currentJob.cancel_requested;
+      if (!coherent || !authorized || currentProject.data == null) {
+        setActionRefreshRequired(true);
+        return;
+      }
+      if (action === 'retry') {
+        command.execute('project.generation.retry', currentProject.data.revision, { job_id: jobId }, '現在の設定での再実行');
+      } else {
+        command.execute('project.generation.cancel', currentProject.data.revision, { job_id: jobId }, 'キャンセル要求');
+      }
+    } catch {
+      setActionRefreshRequired(true);
+    } finally {
+      actionRevalidation.current = false;
+      setRevalidatingAction(false);
+    }
+  };
   const observedRevision = history.data?.revision;
   const observedJobState = jobs.map((job) => `${job.id}:${job.status}:${job.cancel_requested}`).join(',');
 
@@ -77,7 +121,7 @@ function ProjectMonitor({ id }: { id: number }) {
           <button type="button" className="btn-secondary" disabled={blocked || unknown || !p.block_count}
             onClick={() => command.execute('project.generation.start', revision, { kind: 'rerender' }, '動画の再レンダリング')}>レンダリングのみ再実行</button>
           {active[0] && <button type="button" className="btn-danger" disabled={actionsUnavailable || active[0].cancel_requested}
-            onClick={() => command.execute('project.generation.cancel', revision, { job_id: active[0].id }, 'キャンセル要求')}>
+            onClick={() => { void revalidateRecoveryAction('cancel', active[0].id); }}>
             {active[0].cancel_requested ? 'キャンセル要求済み' : '生成をキャンセル'}
           </button>}
         </div>
@@ -100,6 +144,9 @@ function ProjectMonitor({ id }: { id: number }) {
         <p>プロジェクトと生成履歴の版が一致しません。最新の状態を取得するまで操作できません。</p>
         <button type="button" className="btn-secondary mt-2" onClick={() => { void refreshState(); }}>最新の状態を再取得</button>
       </div>}
+      {actionRefreshRequired && <p role="status" className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+        状態が変わりました。最新の状態を確認してから、表示された操作を選び直してください。
+      </p>}
       {p.error_message && <p role="alert" className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
         {p.error_message}
       </p>}
@@ -116,8 +163,8 @@ function ProjectMonitor({ id }: { id: number }) {
         <SettingsHistory versions={history.data.settings_versions} revision={revision} disabled={blocked}
           onRestore={(selectedRevision) => command.execute('project.settings.restore', revision, { revision: selectedRevision }, '設定の復元')} />
         <GenerationHistory jobs={jobs} running={running} disabled={actionsUnavailable}
-          onCancel={(jobId) => command.execute('project.generation.cancel', revision, { job_id: jobId }, 'キャンセル要求')}
-          onRetry={(jobId) => { if (!running) command.execute('project.generation.retry', revision, { job_id: jobId }, '現在の設定での再実行'); }} />
+          onCancel={(jobId) => { void revalidateRecoveryAction('cancel', jobId); }}
+          onRetry={(jobId) => { void revalidateRecoveryAction('retry', jobId); }} />
       </>}
       <section className="mt-6">
         <h2 className="text-base font-semibold text-slate-800">ブロック ({blocks.data?.length ?? 0})</h2>
