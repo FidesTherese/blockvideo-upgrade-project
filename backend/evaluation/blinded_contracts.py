@@ -1,0 +1,188 @@
+"""Strict blinded-evaluation protocol and approval contracts."""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import re
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Literal, Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from evaluation.contracts import Case, ReviewLedger
+from evaluation.corpus import eligibility
+
+if TYPE_CHECKING:
+    from evaluation.result_contracts import ExcludedCaseToken
+
+MAX_PROTOCOL_CASES = 65_535
+_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+_CASE_ID_PATTERN = re.compile(r"^D24-[DH]\d{3}$")
+_CASE_DOMAIN = b"blockvideo-case-v1\0"
+_CATEGORY_DOMAIN = b"blockvideo-category-v1\0"
+
+OpaqueToken = Annotated[str, Field(pattern=_SHA256_PATTERN)]
+Sha256 = Annotated[str, Field(pattern=_SHA256_PATTERN)]
+ProtocolCount = Annotated[int, Field(strict=True, ge=1, le=MAX_PROTOCOL_CASES)]
+ResultCount = Annotated[int, Field(strict=True, ge=0, le=MAX_PROTOCOL_CASES)]
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class CaseCategoryBinding(_StrictModel):
+    case_token: OpaqueToken
+    category_token: OpaqueToken
+
+
+def _identifier_bytes(value: str, *, case_id: bool) -> bytes:
+    if not value or "\0" in value or (case_id and _CASE_ID_PATTERN.fullmatch(value) is None):
+        raise ValueError("invalid D24 case ID" if case_id else "invalid category ID")
+    try:
+        return value.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("token identifiers must be ASCII") from None
+
+
+def _opaque_token(key: bytes | bytearray, domain: bytes, identifier: bytes) -> str:
+    if len(key) != 32:
+        raise ValueError("token key must contain exactly 32 raw bytes")
+    return hmac.new(key, domain + identifier, hashlib.sha256).hexdigest()
+
+
+def opaque_case_token(key: bytes, case_id: str) -> OpaqueToken:
+    return _opaque_token(key, _CASE_DOMAIN, _identifier_bytes(case_id, case_id=True))
+
+
+def opaque_category_token(key: bytes, category_id: str) -> OpaqueToken:
+    return _opaque_token(key, _CATEGORY_DOMAIN, _identifier_bytes(category_id, case_id=False))
+
+
+@contextmanager
+def token_key(path: Path) -> Iterator[bytearray]:
+    """Read one exact external key and erase the mutable buffer after use."""
+    with path.open("rb", buffering=0) as stream:
+        key = bytearray(stream.read(33))
+    if len(key) != 32:
+        for index in range(len(key)):
+            key[index] = 0
+        raise ValueError("token key must contain exactly 32 raw bytes")
+    try:
+        yield key
+    finally:
+        for index in range(len(key)):
+            key[index] = 0
+
+
+def case_category_bindings(
+    cases: Sequence[Case], key: bytes | bytearray
+) -> tuple[CaseCategoryBinding, ...]:
+    if not 1 <= len(cases) <= MAX_PROTOCOL_CASES:
+        raise ValueError("protocol corpus size is outside the supported range")
+    bindings = []
+    for case in cases:
+        if case.split != "held_out" or not case.tags:
+            raise ValueError("protocol cases must be held-out D24 cases with tags")
+        bindings.append(
+            CaseCategoryBinding(
+                case_token=opaque_case_token(key, case.case_id),
+                category_token=opaque_category_token(key, case.tags[0]),
+            )
+        )
+    bindings.sort(key=lambda item: (item.case_token, item.category_token))
+    if len({item.case_token for item in bindings}) != len(bindings):
+        raise ValueError("protocol case tokens must be unique")
+    return tuple(bindings)
+
+
+def approval_partition(
+    cases: Sequence[Case],
+    human: ReviewLedger,
+    independent: ReviewLedger,
+    key: bytes | bytearray,
+) -> tuple[tuple[OpaqueToken, ...], tuple[ExcludedCaseToken, ...]]:
+    from evaluation.result_contracts import ExcludedCaseToken
+
+    case_list = list(cases)
+    gate = eligibility(case_list, human, independent)
+    eligible_ids = set(gate["eligible_case_ids"])
+    human_decisions = {entry.case_id: entry.decision for entry in human.entries}
+    independent_decisions = {entry.case_id: entry.decision for entry in independent.entries}
+    included = []
+    excluded = []
+    for case in case_list:
+        case_token = opaque_case_token(key, case.case_id)
+        if case.case_id in eligible_ids:
+            included.append(case_token)
+            continue
+        human_approved = human_decisions[case.case_id] == "approved"
+        independent_approved = independent_decisions[case.case_id] == "approved"
+        if not human_approved and not independent_approved:
+            reason = "both_not_approved"
+        elif not human_approved:
+            reason = "human_not_approved"
+        else:
+            reason = "independent_not_approved"
+        excluded.append(ExcludedCaseToken(case_token=case_token, reason=reason))
+    included.sort()
+    excluded.sort(key=lambda item: item.case_token)
+    return tuple(included), tuple(excluded)
+
+
+class EvaluationProtocol(_StrictModel):
+    schema_version: Literal[1]
+    candidate_id: Annotated[str, Field(min_length=1, max_length=128)]
+    modes: tuple[Literal["all_tools"], Literal["stateful"]]
+    per_call_deadline_seconds: Literal[180]
+    maximum_model_calls: Literal[4]
+    isolation: Literal["fresh_case_state_under_source_group"]
+    corpus_sha256: Sha256
+    human_approval_sha256: Sha256
+    independent_approval_sha256: Sha256
+    freeze_sha256: Sha256
+    d36_trial_tool_sha256: Sha256
+    d37_evaluator_tool_sha256: Sha256
+    model_configuration_sha256: Sha256
+    stateful_index_sha256: Sha256
+    category_count: ProtocolCount
+    category_tokens: Annotated[
+        tuple[OpaqueToken, ...], Field(min_length=1, max_length=MAX_PROTOCOL_CASES)
+    ]
+    case_count: ProtocolCount
+    case_tokens: Annotated[
+        tuple[OpaqueToken, ...], Field(min_length=1, max_length=MAX_PROTOCOL_CASES)
+    ]
+    case_categories: Annotated[
+        tuple[CaseCategoryBinding, ...], Field(min_length=1, max_length=MAX_PROTOCOL_CASES)
+    ]
+
+    @model_validator(mode="after")
+    def validate_topology(self) -> Self:
+        if self.modes != ("all_tools", "stateful"):
+            raise ValueError("evaluation modes must use the exact canonical order")
+        if self.case_tokens != tuple(sorted(set(self.case_tokens))):
+            raise ValueError("protocol case tokens must be unique and sorted")
+        if self.category_tokens != tuple(sorted(set(self.category_tokens))):
+            raise ValueError("protocol category tokens must be unique and sorted")
+        if self.case_count != len(self.case_tokens):
+            raise ValueError("protocol case count does not match its tokens")
+        if self.category_count != len(self.category_tokens):
+            raise ValueError("protocol category count does not match its tokens")
+        if self.category_count > self.case_count:
+            raise ValueError("protocol category count cannot exceed case count")
+        binding_pairs = tuple(
+            (binding.case_token, binding.category_token) for binding in self.case_categories
+        )
+        if binding_pairs != tuple(sorted(set(binding_pairs))):
+            raise ValueError("case/category bindings must be unique and sorted")
+        bound_cases = tuple(binding.case_token for binding in self.case_categories)
+        if len(bound_cases) != len(set(bound_cases)) or tuple(sorted(bound_cases)) != self.case_tokens:
+            raise ValueError("every protocol case must have exactly one category binding")
+        if tuple(sorted({binding.category_token for binding in self.case_categories})) != (
+            self.category_tokens
+        ):
+            raise ValueError("binding categories must equal the protocol category set")
+        return self
