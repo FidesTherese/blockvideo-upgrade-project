@@ -1,6 +1,37 @@
-# Plan C Handoff — D36 exact D35 candidate gate verified
+# Plan C Handoff — D37 evaluator tooling delivered; real run deferred
 
-## D36 current result (2026-09-30 JST)
+## D37 current result
+
+Read `work-unit-37.md`, `work-report-37.md`, the D37 section of `docs/DTD.md`, and
+`docs/implementation-plan-37.md` first. The immutable candidate remains exact clean
+D35 commit `522775516c0797abdb313e3432339a3a444b7ae2`, candidate ID
+`26933fe07103c402-522775516c07`. D37 is external tooling and does not alter candidate
+behavior.
+
+The official complete 164-file D37 source closure aggregate is
+`54e3f5f21836ca1959855c0e2f8fa016831c576f766d24a8b6cce4ec2679ea51`, computed from
+clean committed source at `77ce86d7d16e2a31cd14f98fc88a469d64c99ec4`. The final
+delivery changes only documentation, which is outside that closure; the evaluator must
+still recompute it from the exact clean pushed tooling `HEAD` before a real run.
+Verification uses repository-owned synthetic material only. No real held-out corpus,
+review ledger, token key, private evidence, or D37 output is available to the
+implementation process. The real evaluator command uses placeholders documented in
+`work-report-37.md`; execution remains evaluator-controlled and deferred.
+
+D38 may accept only the immutable canonical `<output>/protocol.json` emitted before the
+first trial and the SHA-256 of those exact bytes recorded as `protocol_sha256` in
+`<output>/result-bundle.json`. D36 `final_protocol.json` is an input policy template,
+not a D38 run protocol.
+
+D36 trial-host/projection tooling was revised during D37, so the ignored D36 freeze
+evidence made against the prior tooling attestation is stale. After final D37 push it
+must be regenerated from the exact clean pushed tooling `HEAD` against the detached
+D35 candidate and external control, then accepted by the official reader as exactly
+three files with no staging remainder. This tooling-only regeneration does not change
+the D35 candidate ID. No real evaluation, D38 import, tag, publication, deployment, or
+readiness decision is authorized.
+
+## D36 historical result (2026-09-30 JST)
 
 Read `work-unit-36.md`, `work-report-36.md`, the D36 section of `docs/DTD.md`, and
 `docs/implementation-plan-36.md` first. The immutable candidate is the detached clean
