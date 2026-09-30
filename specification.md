@@ -27,7 +27,8 @@ missing approval determines the reason. Every declared category has at least one
 included token in each mode. D38 accepts only a detached-hash-verified, identity-bound
 aggregate after proving token uniqueness, disjointness, exact union, non-vacuous
 count/category accounting, typed exclusion reasons, and hashes without raw IDs, text, or
-labels.
+labels. Blinded token/key/protocol primitives never import result contracts; the
+result-contract module imports those primitives and owns approval partitioning.
 D39 first uses a separate external materializer to create and attest a verified
 read-only runtime. D39 tooling independently rechecks those immutable bytes and
 derives exactly three fresh external writable sandboxes: the final verifier owns one

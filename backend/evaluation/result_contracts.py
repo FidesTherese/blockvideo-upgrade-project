@@ -1,6 +1,7 @@
 """Canonical D37-D40 blinded evaluation result contract."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Literal, Self
 
@@ -13,7 +14,10 @@ from evaluation.blinded_contracts import (
     ProtocolCount,
     ResultCount,
     Sha256,
+    opaque_case_token,
 )
+from evaluation.contracts import Case, ReviewLedger
+from evaluation.corpus import eligibility
 
 _COUNT_FIELDS = (
     "included",
@@ -87,6 +91,38 @@ class ExcludedCaseToken(_StrictModel):
         "human_not_approved",
         "independent_not_approved",
     ]
+
+
+def approval_partition(
+    cases: Sequence[Case],
+    human: ReviewLedger,
+    independent: ReviewLedger,
+    key: bytes | bytearray,
+) -> tuple[tuple[OpaqueToken, ...], tuple[ExcludedCaseToken, ...]]:
+    case_list = list(cases)
+    gate = eligibility(case_list, human, independent)
+    eligible_ids = set(gate["eligible_case_ids"])
+    human_decisions = {entry.case_id: entry.decision for entry in human.entries}
+    independent_decisions = {entry.case_id: entry.decision for entry in independent.entries}
+    included = []
+    excluded = []
+    for case in case_list:
+        case_token = opaque_case_token(key, case.case_id)
+        if case.case_id in eligible_ids:
+            included.append(case_token)
+            continue
+        human_approved = human_decisions[case.case_id] == "approved"
+        independent_approved = independent_decisions[case.case_id] == "approved"
+        if not human_approved and not independent_approved:
+            reason = "both_not_approved"
+        elif not human_approved:
+            reason = "human_not_approved"
+        else:
+            reason = "independent_not_approved"
+        excluded.append(ExcludedCaseToken(case_token=case_token, reason=reason))
+    included.sort()
+    excluded.sort(key=lambda item: item.case_token)
+    return tuple(included), tuple(excluded)
 
 
 class EvaluationResultBundle(_StrictModel):

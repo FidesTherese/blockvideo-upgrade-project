@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -8,8 +10,8 @@ import pytest
 from pydantic import ValidationError
 
 from evaluation.blinded_contracts import (
+    MAX_PROTOCOL_CASES,
     EvaluationProtocol,
-    approval_partition,
     case_category_bindings,
     opaque_case_token,
     opaque_category_token,
@@ -17,8 +19,13 @@ from evaluation.blinded_contracts import (
 )
 from evaluation.contracts import Case
 from evaluation.corpus import eligibility, load_cases, load_review
-from evaluation.result_contracts import EvaluationResultBundle
-from evaluation.tool_attestation import aggregate_fingerprints, fingerprint_file
+from evaluation.result_contracts import (
+    CategoryResult,
+    EvaluationResultBundle,
+    ModeResult,
+    approval_partition,
+)
+from evaluation.tool_attestation import attest_tool
 
 FIXTURES = Path(__file__).parent / "fixtures" / "blinded"
 SYNTHETIC_KEY = bytes(range(32))
@@ -59,6 +66,29 @@ HASHES = {
 
 def _cases() -> list[Case]:
     return load_cases(FIXTURES / "synthetic-held-out.jsonl")
+
+
+def _git(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _tool_repository(root: Path) -> tuple[Path, str]:
+    repository = root / "tool-repository"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.email", "d37@example.invalid")
+    _git(repository, "config", "user.name", "D37 Test")
+    (repository / "a.py").write_bytes(b"A = 1\n")
+    (repository / "b.py").write_bytes(b"B = 1\n")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-q", "-m", "tool source")
+    return repository, _git(repository, "rev-parse", "HEAD")
 
 
 def _protocol_data() -> dict[str, Any]:
@@ -143,6 +173,13 @@ def _bundle_data() -> dict[str, Any]:
         "sealed_evidence_sha256": "a" * 64,
         "modes": (_mode("all_tools"), _mode("stateful")),
     }
+
+
+def test_blinded_contracts_do_not_depend_on_result_contracts() -> None:
+    source = (Path(__file__).parents[1] / "evaluation" / "blinded_contracts.py").read_text(
+        encoding="utf-8"
+    )
+    assert "result_contracts" not in source
 
 
 def test_protocol_tokens_are_domain_separated_lowercase_hmac_sha256() -> None:
@@ -311,6 +348,192 @@ def test_approval_bundle_rejects_broken_shared_invariants(mutation: str, value: 
         EvaluationResultBundle.model_validate(data)
 
 
+@pytest.mark.parametrize("field", ["case_count", "category_count"])
+@pytest.mark.parametrize("value", [-1, MAX_PROTOCOL_CASES + 1])
+def test_protocol_rejects_every_out_of_range_count(field: str, value: int) -> None:
+    data = _protocol_data()
+    data[field] = value
+    with pytest.raises(ValidationError):
+        EvaluationProtocol.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "included",
+        "completed",
+        "task_complete",
+        "unauthorized_effects",
+        "unauthorized_replays",
+        "secret_disclosures",
+    ],
+)
+@pytest.mark.parametrize("value", [-1, MAX_PROTOCOL_CASES + 1])
+def test_category_result_rejects_every_out_of_range_count(field: str, value: int) -> None:
+    data = _category_results()[0]
+    data[field] = value
+    with pytest.raises(ValidationError):
+        CategoryResult.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "included",
+        "completed",
+        "task_complete",
+        "unauthorized_effects",
+        "unauthorized_replays",
+        "secret_disclosures",
+        "transport_failures",
+        "deadline_failures",
+    ],
+)
+@pytest.mark.parametrize("value", [-1, MAX_PROTOCOL_CASES + 1])
+def test_mode_result_rejects_every_out_of_range_count(field: str, value: int) -> None:
+    data = _mode("all_tools")
+    data[field] = value
+    with pytest.raises(ValidationError):
+        ModeResult.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["protocol_case_count", "protocol_category_count", "included_count", "excluded_count"],
+)
+@pytest.mark.parametrize("value", [-1, MAX_PROTOCOL_CASES + 1])
+def test_bundle_rejects_every_out_of_range_count(field: str, value: int) -> None:
+    data = _bundle_data()
+    data[field] = value
+    with pytest.raises(ValidationError):
+        EvaluationResultBundle.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "completed",
+        "task_complete",
+        "unauthorized_effects",
+        "unauthorized_replays",
+        "secret_disclosures",
+    ],
+)
+def test_category_result_rejects_every_count_above_its_protocol_denominator(field: str) -> None:
+    data = _category_results()[0]
+    data[field] = data["included"] + 1
+    with pytest.raises(ValidationError):
+        CategoryResult.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "completed",
+        "task_complete",
+        "unauthorized_effects",
+        "unauthorized_replays",
+        "secret_disclosures",
+        "transport_failures",
+        "deadline_failures",
+    ],
+)
+def test_mode_result_rejects_every_count_above_its_protocol_denominator(field: str) -> None:
+    data = _mode("all_tools")
+    data[field] = data["included"] + 1
+    with pytest.raises(ValidationError):
+        ModeResult.model_validate(data)
+
+
+def test_results_reject_task_complete_above_completed_within_included_denominator() -> None:
+    category = _category_results()[0]
+    category["included"] = 2
+    category["completed"] = 1
+    category["task_complete"] = 2
+    with pytest.raises(ValidationError):
+        CategoryResult.model_validate(category)
+
+    mode = _mode("all_tools")
+    mode["completed"] = 1
+    mode["task_complete"] = 2
+    mode["transport_failures"] = 1
+    with pytest.raises(ValidationError):
+        ModeResult.model_validate(mode)
+
+
+@pytest.mark.parametrize("failure_field", ["transport_failures", "deadline_failures"])
+def test_mode_result_rejects_completion_and_failure_sum_above_included(
+    failure_field: str,
+) -> None:
+    data = _mode("all_tools")
+    data["completed"] = data["included"]
+    data[failure_field] = 1
+    with pytest.raises(ValidationError):
+        ModeResult.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "partition_failure", ["duplicate_included", "duplicate_excluded", "overlap", "missing"]
+)
+def test_approval_bundle_rejects_duplicate_overlap_or_missing_partition_tokens(
+    partition_failure: str,
+) -> None:
+    data = _bundle_data()
+    if partition_failure == "duplicate_included":
+        data["included_case_tokens"] = (INCLUDED[0], INCLUDED[0])
+    elif partition_failure == "duplicate_excluded":
+        data["excluded_cases"] = (EXCLUDED[0], EXCLUDED[0], EXCLUDED[2])
+    elif partition_failure == "overlap":
+        data["excluded_cases"] = (
+            {"case_token": INCLUDED[0], "reason": "human_not_approved"},
+            *EXCLUDED,
+        )
+        data["excluded_count"] = 4
+    else:
+        data["excluded_cases"] = EXCLUDED[:-1]
+        data["excluded_count"] = 2
+    with pytest.raises(ValidationError):
+        EvaluationResultBundle.model_validate(data)
+
+
+def test_bundle_rejects_counts_above_protocol_denominators() -> None:
+    for field in ("included_count", "excluded_count"):
+        data = _bundle_data()
+        data[field] = data["protocol_case_count"] + 1
+        with pytest.raises(ValidationError):
+            EvaluationResultBundle.model_validate(data)
+
+    data = _bundle_data()
+    data["modes"][0]["included"] = data["included_count"] + 1
+    with pytest.raises(ValidationError):
+        EvaluationResultBundle.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "coverage_failure", ["missing_category", "duplicate_category", "wrong_denominator"]
+)
+def test_approval_bundle_rejects_per_category_coverage_failures(
+    coverage_failure: str,
+) -> None:
+    data = _bundle_data()
+    if coverage_failure == "missing_category":
+        data["included_case_tokens"] = (CASE_TOKENS[0],)
+        data["included_count"] = 1
+        data["excluded_cases"] = (
+            *EXCLUDED,
+            {"case_token": CASE_TOKENS[4], "reason": "human_not_approved"},
+        )
+        data["excluded_count"] = 4
+    elif coverage_failure == "duplicate_category":
+        for mode in data["modes"]:
+            mode["categories"][1]["category_token"] = CATEGORY_TOKENS[0]
+    else:
+        for mode in data["modes"]:
+            mode["categories"][0]["included"] = 2
+    with pytest.raises(ValidationError):
+        EvaluationResultBundle.model_validate(data)
+
+
 def test_approval_bundle_rejects_vacuous_category_or_invalid_mode_equations() -> None:
     vacuous = _bundle_data()
     vacuous["included_case_tokens"] = [CASE_TOKENS[0]]
@@ -334,15 +557,40 @@ def test_approval_bundle_rejects_vacuous_category_or_invalid_mode_equations() ->
         EvaluationResultBundle.model_validate(bool_count)
 
 
-def test_attestation_hash_changes_when_a_tool_byte_changes(tmp_path: Path) -> None:
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    first.mkdir()
-    second.mkdir()
-    (first / "tool.py").write_bytes(b"VALUE = 1\n")
-    (second / "tool.py").write_bytes(b"VALUE = 2\n")
-    first_fingerprint = fingerprint_file(first, "tool.py")
-    second_fingerprint = fingerprint_file(second, "tool.py")
-    assert aggregate_fingerprints([first_fingerprint]) != aggregate_fingerprints(
-        [second_fingerprint]
+def test_attest_tool_binds_clean_committed_bytes_and_changes_with_a_commit(
+    tmp_path: Path,
+) -> None:
+    repository, first_commit = _tool_repository(tmp_path)
+    first = attest_tool(
+        repo_root=repository,
+        tool_name="d37_test_tool",
+        git_commit=first_commit,
+        source_paths=("a.py", "b.py"),
     )
+    assert first.git_commit == first_commit
+    assert first.files[0].sha256 == hashlib.sha256(b"A = 1\n").hexdigest()
+
+    (repository / "a.py").write_bytes(b"A = 2\n")
+    _git(repository, "add", "a.py")
+    _git(repository, "commit", "-q", "-m", "change tool byte")
+    second_commit = _git(repository, "rev-parse", "HEAD")
+    second = attest_tool(
+        repo_root=repository,
+        tool_name="d37_test_tool",
+        git_commit=second_commit,
+        source_paths=("a.py", "b.py"),
+    )
+    assert second.aggregate_sha256 != first.aggregate_sha256
+
+
+@pytest.mark.parametrize("dirty_path", ["a.py", "untracked.py"])
+def test_attest_tool_rejects_dirty_or_untracked_bytes(tmp_path: Path, dirty_path: str) -> None:
+    repository, commit = _tool_repository(tmp_path)
+    (repository / dirty_path).write_bytes(b"changed\n")
+    with pytest.raises(ValueError, match="clean"):
+        attest_tool(
+            repo_root=repository,
+            tool_name="d37_test_tool",
+            git_commit=commit,
+            source_paths=("a.py", "b.py"),
+        )

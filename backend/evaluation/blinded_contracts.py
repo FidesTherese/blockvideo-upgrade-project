@@ -7,15 +7,11 @@ import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from evaluation.contracts import Case, ReviewLedger
-from evaluation.corpus import eligibility
-
-if TYPE_CHECKING:
-    from evaluation.result_contracts import ExcludedCaseToken
+from evaluation.contracts import Case
 
 MAX_PROTOCOL_CASES = 65_535
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -96,40 +92,6 @@ def case_category_bindings(
     if len({item.case_token for item in bindings}) != len(bindings):
         raise ValueError("protocol case tokens must be unique")
     return tuple(bindings)
-
-
-def approval_partition(
-    cases: Sequence[Case],
-    human: ReviewLedger,
-    independent: ReviewLedger,
-    key: bytes | bytearray,
-) -> tuple[tuple[OpaqueToken, ...], tuple[ExcludedCaseToken, ...]]:
-    from evaluation.result_contracts import ExcludedCaseToken
-
-    case_list = list(cases)
-    gate = eligibility(case_list, human, independent)
-    eligible_ids = set(gate["eligible_case_ids"])
-    human_decisions = {entry.case_id: entry.decision for entry in human.entries}
-    independent_decisions = {entry.case_id: entry.decision for entry in independent.entries}
-    included = []
-    excluded = []
-    for case in case_list:
-        case_token = opaque_case_token(key, case.case_id)
-        if case.case_id in eligible_ids:
-            included.append(case_token)
-            continue
-        human_approved = human_decisions[case.case_id] == "approved"
-        independent_approved = independent_decisions[case.case_id] == "approved"
-        if not human_approved and not independent_approved:
-            reason = "both_not_approved"
-        elif not human_approved:
-            reason = "human_not_approved"
-        else:
-            reason = "independent_not_approved"
-        excluded.append(ExcludedCaseToken(case_token=case_token, reason=reason))
-    included.sort()
-    excluded.sort(key=lambda item: item.case_token)
-    return tuple(included), tuple(excluded)
 
 
 class EvaluationProtocol(_StrictModel):

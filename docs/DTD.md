@@ -1227,6 +1227,13 @@ Resume requires the same existing bytes. Mutation, replacement, regeneration, or
 of D36 `final_protocol.json` as the result protocol fails closed. D38 validates this
 run artifact; D40 consumes its identity only through D38-accepted evidence.
 
+`evaluation/blinded_contracts.py` owns only token, key, case/category-binding, and
+protocol primitives and MUST NOT import `evaluation.result_contracts`, including from
+function-local imports. `evaluation/result_contracts.py` imports those blinded types
+and owns `approval_partition(cases, human, independent, key)`, including its dependency
+on the existing corpus `eligibility()` gate and approval-ledger types. This one-way
+edge prevents a contract cycle.
+
 `evaluation/result_contracts.py` is owned by D37 and is the only D37–D40 aggregate
 schema. Every model is frozen/strict with `extra="forbid"`; D38 and D40 import these
 models unchanged and may not redeclare, subclass, normalize, infer omissions, or

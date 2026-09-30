@@ -131,6 +131,12 @@ class ExcludedCaseToken(BaseModel):
         "independent_not_approved",
     ]
 
+# Owned by result_contracts so blinded_contracts never imports result types.
+def approval_partition(
+    cases: Sequence[Case], human: ReviewLedger,
+    independent: ReviewLedger, key: bytes | bytearray,
+) -> tuple[tuple[OpaqueToken, ...], tuple[ExcludedCaseToken, ...]]: ...
+
 class EvaluationResultBundle(BaseModel):
     schema_version: Literal[1]
     candidate_id: str
@@ -160,7 +166,10 @@ class ToolAttestation(BaseModel):
     files: list[FileFingerprint]
     aggregate_sha256: str
 
-attest_tool_source(repo_root: Path, files: Sequence[Path], tool_name: str) -> ToolAttestation
+def attest_tool(
+    *, repo_root: Path, tool_name: str, git_commit: str,
+    source_paths: tuple[str, ...],
+) -> ToolAttestation: ...
 ```
 
 - [ ] **Step 1: Write RED protocol, exported-aggregate, and approval tests**
@@ -193,7 +202,7 @@ Expected: FAIL because contracts/attestation do not exist.
 
 - [ ] **Step 3: Implement strict protocol and exported aggregate contracts; reuse D36 source attestation**
 
-Import D36's `ToolAttestation` and `attest_tool_source` unchanged. Attest only later-tool files explicitly supplied by each CLI, using repository-relative POSIX paths, SHA-256/size, sorted canonical JSON, and current tool Git commit. Never combine this hash with `FreezeManifest.aggregate_sha256`. Aggregate validation requires non-empty bounded evaluator identity supplied explicitly
+Import D36's `ToolAttestation` and `attest_tool` unchanged. Attest only later-tool files explicitly supplied by each CLI through the existing keyword-only `repo_root`, `tool_name`, `git_commit`, and sorted `source_paths` interface, using repository-relative POSIX paths, SHA-256/size, sorted canonical JSON, and current tool Git commit. Never combine this hash with `FreezeManifest.aggregate_sha256`. Aggregate validation requires non-empty bounded evaluator identity supplied explicitly
 by CLI, not inferred from Git, OS account, environment, or review records. Read the
 HMAC key bytes from an evaluator-owned external `--token-key-file`; the CLI contains
 only its path, never key bytes. Require exactly 32 raw random bytes by reading at most 33 bytes once; reject shorter
