@@ -12,16 +12,19 @@ The final-review correction restores D24 D029 replay semantics, hardens stored-m
 identity and candidate-output suppression, enforces response-mode equality, aligns
 maximum protocol/result serialization caps, and extracts `blinded_io.py` plus
 `blinded_runtime.py` from orchestration. The exact D35 candidate is unchanged. Read the
-final correction report at
-`.superpowers/sdd/implementation-plan-37/final-fix-report.md`; no real evaluation or
-D38 work has started.
+current evidence in `work-report-37.md`. Independent spec and quality/security review
+through `ad0529933e1db063530296e16d372c5a28cf20a7` approved the tooling. Backend:
+**1795 passed, 11 skipped**; controller critical-path rerun: **51 passed**; Ruff and
+frontend checks passed. Genuine exact-D35 synthetic index/worker integration now
+covers both modes and replay, rather than relying on the earlier stub alone.
 
-The historical pre-correction 164-file D37 source closure aggregate is
-`54e3f5f21836ca1959855c0e2f8fa016831c576f766d24a8b6cce4ec2679ea51`, computed from
-clean committed source at `77ce86d7d16e2a31cd14f98fc88a469d64c99ec4`. It is not the
-post-correction tool hash and MUST NOT be used for a new run. The original
-delivery changed only documentation outside that historical closure; the evaluator must
-recompute the new closure from the exact clean committed tooling `HEAD` before a real run.
+The audited parser, linear accounting and streamed fingerprints enforce 64/128 MiB
+artifact caps and the proven 8,000,000-token limit. Official source attestation at that
+commit covers **167 files**, aggregate
+`f0377a0b3757f4ad9b84566fac0998b066c8c3cec418e3761f0d4da72dc1ad04`.
+Later evaluation-source additions change the closure. Attest the final clean committed
+tooling before real execution, and use a new run directory after any source mismatch.
+No real evaluation or D38 source work has started at this gate.
 Verification uses repository-owned synthetic material only. No real held-out corpus,
 review ledger, token key, private evidence, or D37 output is available to the
 implementation process. The real evaluator command uses placeholders documented in
@@ -34,11 +37,14 @@ not a D38 run protocol.
 
 D36 trial-host/projection tooling was revised during D37, so the ignored D36 freeze
 evidence made against the prior tooling attestation is stale. After final D37 push it
-must be regenerated from the exact clean pushed tooling `HEAD` against the detached
-D35 candidate and external control, then accepted by the official reader as exactly
-three files with no staging remainder. This tooling-only regeneration does not change
-the D35 candidate ID. No real evaluation, D38 import, tag, publication, deployment, or
-readiness decision is authorized.
+must be regenerated in a new ignored output root from the exact clean pushed tooling
+`HEAD` against the detached D35 candidate/control, then accepted by the official
+reader as exactly three files with no staging remainder. Preserve historical evidence.
+This changes no D35 bytes or candidate ID. D38 tooling may proceed with synthetic
+inputs; real aggregate transfer remains evaluator-controlled. The frozen README
+prerequisite mismatch is a known D39 documentation gate failure, not permission to
+edit the candidate. No real evaluation, tag, publication, deployment, or release
+approval is implied.
 
 ## D36 historical result (2026-09-30 JST)
 

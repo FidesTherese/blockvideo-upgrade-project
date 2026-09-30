@@ -7,19 +7,17 @@ evaluation. The immutable release candidate remains the clean D35 commit
 `522775516c0797abdb313e3432339a3a444b7ae2`, candidate ID
 `26933fe07103c402-522775516c07`. D37 does not change candidate behavior.
 
-The source hash and test totals below are historical evidence from the original D37
-delivery and are superseded for the final-review fix wave until its final sequential
-gates complete. The final fix keeps the exact D35 candidate unchanged.
+Independent review through `ad0529933e1db063530296e16d372c5a28cf20a7` passed
+both specification and quality/security checks. This approves the tooling within its
+stated trust model, not real evaluation or release readiness.
 
-The historical complete D37 source closure contains every tracked
-`backend/evaluation/**/*.py` and `backend/app/**/*.py` file plus
-`backend/app/operations/definitions.json`, `backend/pyproject.toml`,
-`backend/uv.lock`, and `backend/scripts/run_blinded_evaluation.py`. Computed from
-clean committed source at `77ce86d7d16e2a31cd14f98fc88a469d64c99ec4`, its 164-file aggregate is
-`54e3f5f21836ca1959855c0e2f8fa016831c576f766d24a8b6cce4ec2679ea51`.
-This report and handoff are outside that source closure, so the aggregate is unchanged
-by the documentation-only D37 delivery commit. The real evaluator MUST recompute and
-validate the attestation from the exact clean pushed tooling `HEAD`.
+The complete D37 source closure contains tracked `backend/evaluation/**/*.py` and
+`backend/app/**/*.py` plus operation definitions, backend manifests/lock, and the runner
+CLI. Official attestation from that clean commit covered **167 files**, aggregate
+`f0377a0b3757f4ad9b84566fac0998b066c8c3cec418e3761f0d4da72dc1ad04`.
+This documentation is outside the closure. Later source additions invalidate that
+aggregate; the evaluator MUST attest the final clean committed tooling before a real
+run, using a new run directory rather than changing existing evidence.
 
 ## Final-review correction
 
@@ -34,41 +32,38 @@ Filesystem/publication and platform runtime responsibilities now live in
 `blinded_io.py` and `blinded_runtime.py`; `blinded_runner.py` retains orchestration and
 its public API. The D37 attestation closure discovers both helpers automatically.
 
-Final correction verification is recorded in the task's
-`.superpowers/sdd/implementation-plan-37/final-fix-report.md`. No candidate, production
-app, frontend, held-out input, real token key, or evaluator evidence changed.
+The audited prerequisites add a pure canonical evidence parser, bounded streamed
+index/source fingerprints, linear category accounting, and paired operator-only
+loopback embedding configuration. Pydantic literal coercion is rejected without
+normalizing bytes. The maximum valid bundle needs **4,980,838 tokens**; the proven
+8,000,000-token limit now admits it within the 64/128 MiB protocol/result byte caps.
+No candidate, production app, frontend, held-out input, real token key, or private
+real evaluator evidence changed.
 
-## Historical synthetic verification
+## Synthetic verification
 
-Only repository-owned synthetic tests were executed. No real held-out corpus, review
-ledger, token key, private detailed evidence, or real D37 evaluation output was read or
-created.
+Only repository-owned synthetic material and fake loopback providers were used:
 
-The first full backend attempt ran after creating this report and therefore correctly
-failed the D36 CLI clean-tooling precondition: **1696 passed, 11 skipped, 1 failed**.
-The failure was `test_cli_writes_completed_publication_contract`; the CLI rejected the
-intentionally dirty documentation checkout. The two documentation files were stashed
-without touching ignored evidence, making the tooling checkout clean, and a fresh full
-sequential gate then produced:
+- final full backend: **1795 passed, 11 skipped**;
+- controller rerun of parser, maximum topology, D22 repair and pinned-D35 integration:
+  **51 passed**; full Ruff passed;
+- frontend verification: **157 tests**, build/typecheck and lint passed; subsequent
+  changes affected tooling and tests only;
+- genuine pinned-D35 integration: **7 passed**, covering both modes, restart replay,
+  original-target replay and stale/missing index refusal.
 
-- backend full suite: **1697 passed, 11 skipped**, one existing Starlette/httpx
-  deprecation warning, in 682.48 s;
-- Ruff: passed;
-- frontend tests: **17 files, 157 tests** passed;
-- frontend build: passed, **190 modules transformed**;
-- frontend lint: passed;
-- explicit synthetic external-runner isolation: **1 passed** in 37.92 s.
+The integration harness verifies all 433 exact D35 tracked blobs in an external
+archive, builds/loads a real source/profile-bound synthetic index in candidate-rooted
+subprocesses, proves actual stateful retrieval rather than fallback, and checks source,
+index, budget and persisted effects. Earlier stub tests remain unit coverage only.
+The flaky D22 wall-clock assumption was replaced by deterministic control of the real
+shared timeout; a per-attempt-timer mutation fails. Production and pinned test bytes
+were not edited.
 
-The implementation-plan test selector had been renamed during Task 4, so its stale
-name collected zero tests. The executed current equivalent was
-`test_external_runner_uses_attested_host_detached_candidate_and_redacted_aggregate`;
-it exercises the external host, detached synthetic candidate, redacted aggregate, and
-candidate non-mutation in one test.
-
-The detached real D35 checkout had empty tracked and ignored status before the full
-gate, immediately before the explicit isolation test, and after that test. The explicit
-test uses only temporary synthetic corpus, approvals, candidate-host stub,
-stateful-index stub, and output.
+Checks ran sequentially; sampled task workload stayed below 2.4 GiB against the
+16 GiB hard aggregate limit. Four platform-specific and seven optional NumPy/ONNX
+checks were skipped, not counted as passes. The existing Starlette/httpx warning
+remains. Fresh-install/browser/ONNX lanes are D39 work, not claimed here.
 
 ## Evaluator-controlled command
 
@@ -110,9 +105,9 @@ D38 remains unstarted.
 D36 trial-host and projection tooling was revised during D37. The ignored D36 freeze
 evidence generated against the earlier tooling attestation is stale even though the
 D35 candidate commit and candidate ID are unchanged. After the final D37 delivery is
-pushed, only that stale candidate evidence and D36 staging created by this task are
-removed; D36 freeze evidence is then regenerated from the exact clean pushed tooling
-`HEAD` against the detached candidate/control and validated with the official reader.
+pushed, fresh D36 evidence is generated in a new ignored output root from that clean
+tooling `HEAD`, against the detached candidate/control, and validated with the official
+reader. Historical publications are preserved; no completed evidence is overwritten.
 A valid publication contains exactly `freeze-manifest.json`,
 `d36-tool-attestation.json`, and `.d36-publication-state`, with no staging remainder.
 
@@ -120,5 +115,8 @@ A valid publication contains exactly `freeze-manifest.json`,
 
 D37 synthetic verification proves contracts, isolation, privacy-preserving public
 shape, bounded execution, teardown, resume, immutable publication, and source
-attestation behavior. It is not a held-out quality result, human approval, independent
-review result, release-readiness decision, tag, publication, deployment, or D38 start.
+attestation behavior. It is not a held-out quality result, human-operation approval,
+independent evaluator result, release-readiness decision, tag, publication or deployment.
+The frozen README prerequisite mismatch remains an explicit D39 documentation blocker;
+no candidate correction or gate waiver is implied. D38 implementation may follow this
+approved tooling gate, using synthetic aggregates only.
