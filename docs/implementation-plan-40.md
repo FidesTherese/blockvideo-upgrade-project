@@ -6,7 +6,10 @@
 
 **Architecture:** Later decision tooling strictly loads and cross-binds evidence, computes exact integer-ratio gates, selects the mode under the approved safety/performance policy, and writes canonical JSON plus Markdown. Its source hash is separately attested and never treated as behavior of the D35 candidate named by D36.
 
-**Tech Stack:** Python 3.12, Pydantic 2, `fractions.Fraction`, canonical JSON/SHA-256, pytest.
+**Tech Stack:** Verified Python 3.12.12 / Pydantic 2.13.4, `fractions.Fraction`,
+shared strict canonical JSON/SHA-256, existing pytest. This is a future plan, not an
+implemented decision or independent approval. Follow the 2026-09-30 DTD audit and
+its blocked-integration facts before source work.
 
 ## Global Constraints
 
@@ -34,6 +37,23 @@ other skip leaves the denominator.
   against a detached expected SHA-256, and rehash those files in the decision CLI.
   `ReadinessDecision.decision_tool_sha256` is assigned only from that validated
   aggregate; no caller-supplied tool-hash argument/API value exists.
+- The separate attestation operation uses existing keyword-only `attest_tool` and
+  actual committed project-root validation; there is no `attest_tool_source` API.
+  The decision operation performs only bounded local reads, fixed streamed rehashes,
+  gate computation and output writes: no Git, network or subprocess, including
+  indirect calls to Git validation/attestation helpers. From backend both CLIs use
+  `--repo-root ..`, never `.`.
+- D39 evidence must match the updated exact nine argv/deadlines, native executable/
+  launcher hashes and versions, bounded output sizes/completed outcomes, and six
+  typed embedded receipts with complete canonical bytes/hashes/sizes and summaries.
+  Six arbitrary hashes do not prove smoke; a failure-prefix manifest cannot pass.
+- D38 validation has exactly twenty bool-true checks including sealed_evidence_hash_syntax.
+  It explicitly records protocol model/index hashes committed by accepted bundle
+  protocol_sha256; no direct model/index bundle fields exist. D40 does not pretend
+  to recompute either external model or index without those inputs.
+- All input readers use DTD pre-parse caps (accepted bundle 128 MiB, metadata 16 MiB,
+  reviews 64 KiB, limitations 1 MiB), duplicate/nonfinite/primitive guards and exact LF
+  bytes. Protocol/model schemas are imported unchanged. No normalization is permitted.
 - The decision CLI performs no Git operation, network call, commit, push, tag, publication, release creation, or deployment. The surrounding repository delivery workflow may commit and push D40 tooling/documentation after verification; it still must not tag, publish, create a release, or deploy.
 - Final delivery commit is `[DONE] Mission 40 Emit evidence-based readiness decision`.
 
@@ -92,21 +112,21 @@ class ReadinessDecision(BaseModel):
     input_sha256: dict[str, str]
     decision_tool_sha256: str
 
-load_d38_accepted_evidence(
+def load_d38_accepted_evidence(
     *, accepted_result_path: Path, accepted_result_expected_sha256: str,
     validation_path: Path, validation_expected_sha256: str,
     d38_tool_attestation_path: Path, d38_tool_attestation_expected_sha256: str,
     freeze: FreezeManifest,
-) -> tuple[EvaluationResultBundle, ImportValidation, ToolAttestation, dict[str, str]]
+) -> tuple[EvaluationResultBundle, ImportValidation, ToolAttestation, dict[str, str]]: ...
 
-load_d39_verification_evidence(
+def load_d39_verification_evidence(
     *, verification_path: Path, verification_expected_sha256: str,
     verifier_tool_attestation_path: Path,
     verifier_tool_attestation_expected_sha256: str,
     freeze: FreezeManifest,
-) -> tuple[VerificationManifest, ToolAttestation, dict[str, str]]
+) -> tuple[VerificationManifest, ToolAttestation, dict[str, str]]: ...
 
-decide_readiness(
+def decide_readiness(
     *, freeze: FreezeManifest, aggregate: EvaluationResultBundle | None,
     import_validation: ImportValidation | None,
     d38_tool_attestation: ToolAttestation | None,
@@ -117,15 +137,15 @@ decide_readiness(
     human: ReviewEvidence | None, independent: ReviewEvidence | None,
     limitation_approvals: tuple[AcceptedNonSafetyLimitation, ...],
     decision_tool_attestation: ToolAttestation,
-) -> ReadinessDecision
+) -> ReadinessDecision: ...
 
-attest_and_validate_decision_tool(
+def attest_and_validate_decision_tool(
     *, repo_root: Path, output_path: Path, expected_sha256: str,
-) -> ToolAttestation
+) -> ToolAttestation: ...
 
-load_decision_tool_attestation(
+def load_decision_tool_attestation(
     *, repo_root: Path, attestation_path: Path, expected_sha256: str,
-) -> tuple[ToolAttestation, str]
+) -> tuple[ToolAttestation, str]: ...
 ```
 
 - [ ] **Step 1: Write RED D38 integrity, threshold, and safety tests**
@@ -178,24 +198,39 @@ git commit -m "feat: compute strict D40 readiness gates"
 
 **Interfaces:**
 
-CLI (Git Bash):
+CLI (Git Bash, from `backend/`; future template, not executed by this audit):
 
 ```bash
-python -m evaluation.scripts.attest_release_decision --repo-root . --output ../release-evidence/d40/decision-tool-attestation.json --expected-sha256 <DETACHED_D40_DECISION_TOOL_AGGREGATE_SHA256>
-python -m scripts.decide_release_readiness --decision-tool-attestation ../release-evidence/d40/decision-tool-attestation.json --decision-tool-expected-sha256 <DETACHED_D40_DECISION_TOOL_AGGREGATE_SHA256> --freeze "$(find ../release-evidence/d36 -mindepth 2 -maxdepth 2 -name freeze-manifest.json -print -quit)" --aggregate ../release-evidence/d38/accepted-result.json --aggregate-expected-sha256 <DETACHED_ACCEPTED_RESULT_SHA256> --import-validation ../release-evidence/d38/validation.json --import-validation-expected-sha256 <DETACHED_VALIDATION_SHA256> --d38-tool-attestation ../release-evidence/d38/d38-tool-attestation.json --d38-tool-attestation-expected-sha256 <DETACHED_D38_TOOL_ATTESTATION_SHA256> --verification ../release-evidence/d39/verification-manifest.json --verification-expected-sha256 <DETACHED_D39_VERIFICATION_MANIFEST_SHA256> --verifier-tool-attestation ../release-evidence/d39/verifier-tool-attestation.json --verifier-tool-attestation-expected-sha256 <DETACHED_D39_VERIFIER_TOOL_ATTESTATION_SHA256> --human ../release-evidence/reviews/human-operation.json --independent ../release-evidence/reviews/independent-review.json --limitations ../release-evidence/reviews/non-safety-limitations.json --output ../release-evidence/d40
+python -m evaluation.scripts.attest_release_decision --repo-root .. --output ../release-evidence/d40/decision-tool-attestation.json --expected-sha256 <DETACHED_D40_DECISION_TOOL_AGGREGATE_SHA256>
+python -m scripts.decide_release_readiness --repo-root .. --decision-tool-attestation ../release-evidence/d40/decision-tool-attestation.json --decision-tool-expected-sha256 <DETACHED_D40_DECISION_TOOL_AGGREGATE_SHA256> --freeze "$(find ../release-evidence/d36 -mindepth 2 -maxdepth 2 -name freeze-manifest.json -print -quit)" --aggregate ../release-evidence/d38/accepted-result.json --aggregate-expected-sha256 <DETACHED_ACCEPTED_RESULT_SHA256> --import-validation ../release-evidence/d38/validation.json --import-validation-expected-sha256 <DETACHED_VALIDATION_SHA256> --d38-tool-attestation ../release-evidence/d38/d38-tool-attestation.json --d38-tool-attestation-expected-sha256 <DETACHED_D38_TOOL_ATTESTATION_SHA256> --verification ../release-evidence/d39/verification-manifest.json --verification-expected-sha256 <DETACHED_D39_VERIFICATION_MANIFEST_SHA256> --verifier-tool-attestation ../release-evidence/d39/verifier-tool-attestation.json --verifier-tool-attestation-expected-sha256 <DETACHED_D39_VERIFIER_TOOL_ATTESTATION_SHA256> --human ../release-evidence/reviews/human-operation.json --independent ../release-evidence/reviews/independent-review.json --limitations ../release-evidence/reviews/non-safety-limitations.json --output ../release-evidence/d40
 ```
 
-The source-attestation CLI covers exactly `evaluation/release_decision.py`,
-`evaluation/result_contracts.py`, `evaluation/result_import.py`,
-`evaluation/release_verification.py`, `evaluation/tool_attestation.py`,
-`evaluation/scripts/attest_release_decision.py`, and
-`scripts/decide_release_readiness.py`. It allows no caller path list, glob, omission,
-extra, or duplicate; it computes the shared canonical aggregate and validates the
-out-of-band expected aggregate before atomic output. The decision CLI rehashes the
-same exact list and requires artifact/current/expected equality before loading
-readiness evidence. There is no `--decision-tool-sha256` option.
+The CLI covers exactly the sorted project-root-relative `DECISION_SOURCE_PATHS`
+in DTD D40, including current shared-result/protocol import closure, app contract/
+corpus/fixture dependencies, planned evidence_json/blinded_io/blinded_runtime,
+runtime_materialization and pure smoke_contracts, dependency manifests and both D40
+CLIs. Do not use the obsolete seven-file subset, omit backend/ prefixes, or import
+D39 smoke/browser execution into the decision process. Every new behavior-affecting
+import requires an explicit allowlist/DTD update before coding; a closure test includes
+function-local imports and package initializers.
 
-After the decision source attestation has passed its pre-decision gate, readiness evidence arguments except `--freeze` may point to absent files; the CLI then emits Not ready and lists each missing mandatory input. Each D38 and D39 file requires its corresponding detached expected hash argument; a missing digest, malformed digest, or present file with a mismatched digest is a named blocker and must not be replaced by a hash read from any evidence file. Review files are strict canonical `ReviewEvidence`: malformed files, completed records without an exact lowercase 64-hex artifact hash, and pending/not-performed records carrying any artifact become named blockers while still permitting a valid Not ready output. `--limitations` absent means no accepted limitations. When present, it must contain only canonical `AcceptedNonSafetyLimitation` records whose approval artifact/content hashes and candidate ID validate; free-text limitation arrays are rejected.
+Generation calls `attest_tool(repo_root=..., tool_name="d40_release_decision",
+git_commit=verified_head, source_paths=DECISION_SOURCE_PATHS)` after committed root/
+HEAD/clean-byte validation. Decision loading never calls that Git-using function:
+rehash the same fixed files locally and recompute their no-LF fingerprint aggregate,
+require artifact/current/detached equality, then load readiness inputs. The durable
+attestation-file hash includes LF and is distinct from the source aggregate. No
+caller-provided tool hash or unverified metadata hash map is proof. There is no
+`--decision-tool-sha256` option.
+
+After the decision source attestation has passed its pre-decision gate, readiness evidence arguments except `--freeze` may point to absent files; the CLI then emits Not ready and lists each missing mandatory input. Each D38 and D39 file requires its corresponding detached expected hash argument; a missing digest, malformed digest, or present file with a mismatched digest is a named blocker and must not be replaced by a hash read from any evidence file. Review files are strict canonical `ReviewEvidence`: malformed files, completed records without an exact lowercase 64-hex artifact hash, and pending/not-performed records carrying any artifact become named blockers while still permitting a valid Not ready output. `--limitations` absent means no accepted limitations. When supplied, it is one canonical JSON array parsed explicitly as
+`TypeAdapter(tuple[AcceptedNonSafetyLimitation, ...]).validate_json(..., strict=True)`
+after shared raw/canonical checks, at most 256 uniquely identified records. Missing/
+malformed explicitly supplied limitation files block; omit the option for no approvals.
+The Python API input is a tuple; ReadinessDecision gates/blockers/accepted_limitations
+are deterministic Python lists / JSON arrays. Strict Python list-to-tuple coercion is
+not used. Content/approval hashes and candidate IDs must validate; free-text arrays
+are rejected.
 
 - [ ] **Step 1: Write RED CLI/output tests**
 
@@ -250,13 +285,15 @@ cd frontend && npx -y pnpm@10.18.3 lint
 - [ ] **Step 2: Prove mandatory missing inputs emit Not ready**
 
 ```bash
-rm -rf release-evidence/d40-missing
 cd backend
-python -m uv run python -m evaluation.scripts.attest_release_decision --repo-root . --output ../release-evidence/d40-missing/decision-tool-attestation.json --expected-sha256 <DETACHED_D40_DECISION_TOOL_AGGREGATE_SHA256>
-python -m uv run python -m scripts.decide_release_readiness --decision-tool-attestation ../release-evidence/d40-missing/decision-tool-attestation.json --decision-tool-expected-sha256 <DETACHED_D40_DECISION_TOOL_AGGREGATE_SHA256> --freeze "$(find ../release-evidence/d36 -mindepth 2 -maxdepth 2 -name freeze-manifest.json -print -quit)" --aggregate ../release-evidence/missing/accepted-result.json --aggregate-expected-sha256 <DETACHED_ACCEPTED_RESULT_SHA256> --import-validation ../release-evidence/missing/validation.json --import-validation-expected-sha256 <DETACHED_VALIDATION_SHA256> --d38-tool-attestation ../release-evidence/missing/d38-tool-attestation.json --d38-tool-attestation-expected-sha256 <DETACHED_D38_TOOL_ATTESTATION_SHA256> --verification ../release-evidence/missing/verification-manifest.json --verification-expected-sha256 <DETACHED_D39_VERIFICATION_MANIFEST_SHA256> --verifier-tool-attestation ../release-evidence/missing/verifier-tool-attestation.json --verifier-tool-attestation-expected-sha256 <DETACHED_D39_VERIFIER_TOOL_ATTESTATION_SHA256> --human ../release-evidence/missing/human-operation.json --independent ../release-evidence/missing/independent-review.json --limitations ../release-evidence/missing/non-safety-limitations.json --output ../release-evidence/d40-missing
+python -m uv run --no-sync python -m evaluation.scripts.attest_release_decision --repo-root .. --output ../release-evidence/d40-missing/decision-tool-attestation.json --expected-sha256 <DETACHED_D40_DECISION_TOOL_AGGREGATE_SHA256>
+python -m uv run --no-sync python -m scripts.decide_release_readiness --repo-root .. --decision-tool-attestation ../release-evidence/d40-missing/decision-tool-attestation.json --decision-tool-expected-sha256 <DETACHED_D40_DECISION_TOOL_AGGREGATE_SHA256> --freeze "$(find ../release-evidence/d36 -mindepth 2 -maxdepth 2 -name freeze-manifest.json -print -quit)" --aggregate ../release-evidence/missing/accepted-result.json --aggregate-expected-sha256 <DETACHED_ACCEPTED_RESULT_SHA256> --import-validation ../release-evidence/missing/validation.json --import-validation-expected-sha256 <DETACHED_VALIDATION_SHA256> --d38-tool-attestation ../release-evidence/missing/d38-tool-attestation.json --d38-tool-attestation-expected-sha256 <DETACHED_D38_TOOL_ATTESTATION_SHA256> --verification ../release-evidence/missing/verification-manifest.json --verification-expected-sha256 <DETACHED_D39_VERIFICATION_MANIFEST_SHA256> --verifier-tool-attestation ../release-evidence/missing/verifier-tool-attestation.json --verifier-tool-attestation-expected-sha256 <DETACHED_D39_VERIFIER_TOOL_ATTESTATION_SHA256> --human ../release-evidence/missing/human-operation.json --independent ../release-evidence/missing/independent-review.json --output ../release-evidence/d40-missing
 ```
 
-Expected: exit code 2 and valid Not ready output naming all seven missing mandatory evidence groups. The six placeholder digests represent separately supplied detached values; tests also cover omitted/malformed digest arguments as distinct blockers. On PowerShell, run the command without `rm -rf` after removing the ignored directory through `Remove-Item -Recurse -Force release-evidence/d40-missing`.
+Expected: exit code 2 and valid Not ready output naming all seven missing mandatory evidence groups. The six placeholder digests represent separately supplied detached values; tests also cover omitted/malformed digest arguments as distinct blockers. Use a new evidence ID/directory for this baseline; if d40-missing already exists,
+select a new name instead of deleting or overwriting previous evidence. Limitations
+are omitted in this seven-missing-input baseline, not supplied as an absent optional
+file. These are future execution templates; the design audit generates none.
 
 - [ ] **Step 3: Run the actual decision without external side effects**
 
@@ -264,11 +301,16 @@ The D40 source aggregate, three D38 digests, and two D39 digest variables below 
 
 ```bash
 cd backend
-python -m uv run python -m evaluation.scripts.attest_release_decision --repo-root . --output ../release-evidence/d40/decision-tool-attestation.json --expected-sha256 "$D40_DECISION_TOOL_AGGREGATE_SHA256"
-python -m uv run python -m scripts.decide_release_readiness --decision-tool-attestation ../release-evidence/d40/decision-tool-attestation.json --decision-tool-expected-sha256 "$D40_DECISION_TOOL_AGGREGATE_SHA256" --freeze "$(find ../release-evidence/d36 -mindepth 2 -maxdepth 2 -name freeze-manifest.json -print -quit)" --aggregate ../release-evidence/d38/accepted-result.json --aggregate-expected-sha256 "$D38_ACCEPTED_RESULT_SHA256" --import-validation ../release-evidence/d38/validation.json --import-validation-expected-sha256 "$D38_VALIDATION_SHA256" --d38-tool-attestation ../release-evidence/d38/d38-tool-attestation.json --d38-tool-attestation-expected-sha256 "$D38_TOOL_ATTESTATION_SHA256" --verification ../release-evidence/d39/verification-manifest.json --verification-expected-sha256 "$D39_VERIFICATION_MANIFEST_SHA256" --verifier-tool-attestation ../release-evidence/d39/verifier-tool-attestation.json --verifier-tool-attestation-expected-sha256 "$D39_VERIFIER_TOOL_ATTESTATION_SHA256" --human ../release-evidence/reviews/human-operation.json --independent ../release-evidence/reviews/independent-review.json --limitations ../release-evidence/reviews/non-safety-limitations.json --output ../release-evidence/d40
+python -m uv run --no-sync python -m evaluation.scripts.attest_release_decision --repo-root .. --output ../release-evidence/d40/decision-tool-attestation.json --expected-sha256 "$D40_DECISION_TOOL_AGGREGATE_SHA256"
+python -m uv run --no-sync python -m scripts.decide_release_readiness --repo-root .. --decision-tool-attestation ../release-evidence/d40/decision-tool-attestation.json --decision-tool-expected-sha256 "$D40_DECISION_TOOL_AGGREGATE_SHA256" --freeze "$(find ../release-evidence/d36 -mindepth 2 -maxdepth 2 -name freeze-manifest.json -print -quit)" --aggregate ../release-evidence/d38/accepted-result.json --aggregate-expected-sha256 "$D38_ACCEPTED_RESULT_SHA256" --import-validation ../release-evidence/d38/validation.json --import-validation-expected-sha256 "$D38_VALIDATION_SHA256" --d38-tool-attestation ../release-evidence/d38/d38-tool-attestation.json --d38-tool-attestation-expected-sha256 "$D38_TOOL_ATTESTATION_SHA256" --verification ../release-evidence/d39/verification-manifest.json --verification-expected-sha256 "$D39_VERIFICATION_MANIFEST_SHA256" --verifier-tool-attestation ../release-evidence/d39/verifier-tool-attestation.json --verifier-tool-attestation-expected-sha256 "$D39_VERIFIER_TOOL_ATTESTATION_SHA256" --human ../release-evidence/reviews/human-operation.json --independent ../release-evidence/reviews/independent-review.json --limitations ../release-evidence/reviews/non-safety-limitations.json --output ../release-evidence/d40
 ```
 
-If any mandatory file is absent, preserve the emitted Not ready result. Do not create synthetic completion evidence to change it.
+Actual baseline remains Not ready while a real independent aggregate or required
+human/independent review is absent. Do not read restricted evidence to fill that gap,
+create completion evidence, or count a synthetic decision as acceptance. Pin final
+committed D38–D40 tooling and refresh D36 before any actual D37 evaluation; later
+source/Git identity mismatch requires a new evidence/run ID. Preserve every prior
+published result, including Not ready.
 
 - [ ] **Step 4: Inspect and write the final work report**
 

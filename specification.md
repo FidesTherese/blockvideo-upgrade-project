@@ -88,6 +88,57 @@ always Not ready and never a vacuous pass. All Tools
 remains default unless stateful also passes and has an equal or higher exact overall
 quality ratio.
 
+### Stack and tooling-contract audit (2026-09-30; design only)
+
+Canonical implementation details remain in `docs/DTD.md`; plans 37–40 and unit
+contracts refer to it. No D38–D40 source, candidate, lock or release evidence changed
+in this audit. D35 remains immutable; D37 integration/final independent acceptance
+is not inferred from previous synthetic reports.
+
+- **Evidence boundaries:** a planned pure canonical JSON parser and existing bounded
+  filesystem helper reject duplicates, nonfinite values, bool/int Literal coercion,
+  noncanonical bytes and oversize input before acceptance. Protocol/result caps are
+  64/128 MiB across writers/readers; large index/media/source blobs are stream-hashed.
+  Durable file hashes include exactly one LF; source/configuration aggregates do not.
+- **D38:** imports current protocol/result models unchanged, preserves accepted bytes,
+  requires exactly twenty bool-true validation checks, and never opens sealed data.
+  Model/index hashes are bound through exact protocol_sha256 and recorded in import
+  validation; the bundle has no direct fields for them. Model configuration currently
+  pins an identifier, not immutable provider weights; independent provenance is
+  required before a real evaluator run.
+- **D39:** the operational lane is Python 3.12.12 / uv 0.12.15 / Node 24.11.1 (24.x
+  >=24) / pnpm 10.18.3 with exact D35 locks. Fresh locked backend install selects both
+  optional dev/retrieval extras; later commands use its sandbox interpreter directly.
+  Frozen frontend dev install ignores dependency lifecycle scripts; native Node+npx
+  launcher identities are recorded separately from logical argv. Group-local caches,
+  low worker counts, fixed deadlines/output caps and owned descendant teardown are
+  mandatory. Exactly six typed smoke receipts bind outcomes, versions, complete
+  artifact hashes/sizes and candidate/runtime identity; six arbitrary hashes cannot
+  prove smoke. Automated documentation checks do not prove human review.
+- **D40:** separate committed-root attestation may use Git; decision execution only
+  reads/rehashes fixed local inputs and writes its decision, with no Git/network/
+  subprocess. Its allowlist covers the full behavior-affecting import closure.
+  Optional limitation input is a Python tuple / JSON array; decision collections are
+  deterministic Python lists / JSON arrays. Missing real aggregate or reviews keeps
+  actual readiness Not ready.
+- **Acceptance still pending:** fresh installs/native builds, Windows launcher/tree
+  roundtrip, owned browser/CDP roundtrip, and exact-D35 real worker with a genuine
+  candidate-format synthetic index and fake loopback adapters. Current host drops
+  synthetic embedding-profile settings; the DTD defines the narrow external
+  configuration prerequisite rather than pretending a dummy index verifies stateful.
+  No model weights, paid service or restricted input is needed for these probes.
+  Pinned D35 demo settings also ignore profile/endpoint env overrides; smoke must use
+  its existing public seams through an external bootstrap, not change source. Pinned
+  README's Python 3.13+/Node 20+ claims are a known mandatory documentation-gate
+  blocker. A successor candidate or explicit policy change needs separately authorized
+  scope; this audit neither edits D35 nor waives the gate.
+
+Final real evaluation follows the final committed/pinned tooling checkout and refreshed
+D36 freeze/trial-tool attestation. Later source mismatch requires a new run/evidence
+ID, never in-place normalization/regeneration. All probes are sequential and share
+hard aggregate RAM <=16 GiB (target <=12); directory handles protect root identity,
+not contents/ancestors or malicious same-user mutation.
+
 Implementation remains layered: production `app` code never imports evaluation
 tooling; migrations own schema upgrades/backups; UI consumes explicit backend
 reason codes; test failpoints cannot be selected by public requests. D31 development

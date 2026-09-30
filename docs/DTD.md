@@ -4,16 +4,23 @@
 
 ### Document control
 
-- **Status:** Implementation-ready
-- **Delivery mode:** High-Risk for D31 security, D32 concurrency, and D34 migration;
-  Standard for the remaining units
+- **Status:** Contracts reconciled; D37–D40 integration acceptance partially blocked
+- **Delivery mode:** High-Risk for D31 security, D32 concurrency, D34 migration,
+  and D37–D40 tooling integrity, privacy, and resource ownership
 - **Specification:** `specification.md`, `docs/plan-c/work-unit-31.md` through
   `docs/plan-c/work-unit-40.md`
 - **DTD:** `docs/DTD.md`
-- **Updated:** 2026-09-29
-- **Scope:** sequential hardening, blinded evaluation, and release-readiness decision
-- **Open decisions:** none for implementation. Held-out case content and independent
-  evaluator identity remain intentionally outside the implementation process.
+- **Updated:** 2026-10-01 (host time; audit began 2026-09-30)
+- **Scope:** sequential hardening, blinded evaluation, and release-readiness decision.
+  This amendment is design-only; it implements no D38–D40 tooling and generates no
+  candidate or evaluation evidence.
+- **Blocked facts:** a clean extras installation, native Windows launcher/descendant
+  roundtrip, and pinned-D35 real-worker/stateful-index roundtrip are not yet verified.
+  Independent model-weight provenance, real aggregate, and human/independent acceptance
+  remain evaluator/operator inputs, not facts inferred by implementation. Pinned
+  D35 README advertises Python 3.13+ / Node 20+; this does not describe the audited
+  3.12.12 / Node-24 lane and is a known documentation-gate blocker, not an install
+  success or permission to edit the candidate.
 
 ### Technical scope and fixed decisions
 
@@ -79,15 +86,26 @@ The following choices resolve implementation ambiguities:
 11. When approval ledgers exclude a case, the reason is deterministic:
     `both_not_approved` when both approvals are absent, otherwise
     `human_not_approved` or `independent_not_approved` for the sole absent approval.
-12. D40 generates and validates a canonical decision-source attestation before
-    loading decision evidence. Its aggregate is computed from the exact allowlisted
-    decision, shared-contract, verification-contract, attestation-contract, and CLI
-    source files; `ReadinessDecision.decision_tool_sha256` is derived only from that
-    validated aggregate and is never accepted as a caller-provided value.
+12. D40 source attestation is a separate, Git-using operation on clean committed
+    tooling. The decision operation rehashes its fixed source closure using bounded
+    local reads only; it invokes no Git, network, or subprocess. Its source aggregate,
+    attestation-file hash, and upstream detached input hashes are distinct.
+13. D38 accepts exactly the twenty named checks below with raw booleans `true`.
+    Model/index identity is committed through the bundle's exact `protocol_sha256`,
+    not through nonexistent direct bundle fields. Neither D38 nor D40 forks D37 models.
+14. Actual D37 evaluation waits until D38–D40 source and host prerequisites are
+    committed and the final tooling checkout is pinned. Refresh D36 freeze/trial-tool
+    attestation at that boundary. A later evaluation-source change alters D37's
+    conservative aggregate; a docs-only commit can still alter tool Git identity and
+    attestation bytes. Any mismatch requires a new run/evidence ID, never in-place
+    regeneration, normalization, or relabeling of published evidence.
 
-Runtime remains Windows 11 compatible, Python `>=3.12`, Node `>=20`, local SQLite,
-and the existing single-server worker. No cloud call, new runtime dependency, or
-private held-out file is required by implementation tests.
+Application metadata remains Python `>=3.12`, Windows 11, local SQLite, and the
+existing single-server worker. The verification lane is Python 3.12.12, uv 0.12.15,
+Node 24.11.1 (24.x, `>=24`), and pnpm exactly 10.18.3. Generic Node `>=20` is not
+sufficient for these locks. No Node-26-only runtime API is assumed from `@types/node`.
+No cloud call, weights download, new candidate dependency, or private held-out file
+is required by implementation tests.
 
 ### Architecture and dependency direction
 
@@ -163,12 +181,12 @@ Direct in-scope dependencies are:
 | Dependency | Version/constraint | Symbols and role |
 |---|---|---|
 | Python standard library | Python 3.12.12 verified | `unicodedata.normalize`, `re`, `hashlib.sha256`, `hmac.new`, `json`, `sqlite3.connect`, `sqlite3.Connection.backup`, `os.open`, `os.close`, `os.fstat`, `os.fsync`, `os.link`, `os.replace`, `os.scandir`, `os.killpg`, `stat.S_ISREG`, `secrets.token_hex`, `shutil.disk_usage`, `subprocess.run`, `subprocess.CREATE_NEW_PROCESS_GROUP`, `asyncio.create_subprocess_exec`, `pathlib.Path` |
-| SQLAlchemy | locked by `uv.lock`; project `>=2.0.36` | existing `Session`, `select`, `inspect`, `text`; ORM and writer transactions |
-| Pydantic | locked by `uv.lock`; project `>=2.9.0` | `BaseModel`, `ConfigDict`, `Field`, validators; strict manifests and API DTOs |
-| FastAPI | locked by `uv.lock`; project `>=0.115.0` | `APIRouter`, `Depends`, `HTTPException`; startup status transport |
-| pytest | dev dependency `>=8.3.3` | monkeypatch, temporary directories, process/race matrices |
+| SQLAlchemy | 2.0.51 in exact D35 lock; project `>=2.0.36` | existing `Session`, `select`, `inspect`, `text`; ORM and writer transactions |
+| Pydantic | 2.13.4 in exact D35 lock; project `>=2.9.0` | `BaseModel`, `ConfigDict`, `Field`, validators; strict manifests and API DTOs |
+| FastAPI | 0.139.2 in exact D35 lock; project `>=0.115.0` | `APIRouter`, `Depends`, `HTTPException`; startup status transport |
+| pytest / Ruff | 9.1.1 / 0.15.22 in D35 lock; optional `dev` extra | monkeypatch, temporary directories, process/race matrices |
 | React | 18.3.1 | recovery/status components |
-| TypeScript | project `^5.6.3` | exact frontend mirrors of backend enums |
+| TypeScript | locked 5.9.3; project `^5.6.3` | exact frontend mirrors of backend enums |
 | Vitest/Testing Library | Vitest 2.1.9; existing component-test packages | component tests |
 | `@testing-library/user-event` | exactly 14.6.7; dev-only | realistic tab and keyboard interaction tests; not shipped at runtime |
 
@@ -196,6 +214,136 @@ disposes and clears the database caches, and only then releases the lease. Migra
 and application startup are single-threaded. Offline restore owns a separate lease
 for only its stopped-app operation. Existing async model/provider clients retain
 their present ownership and deadlines.
+
+#### Stack audit evidence and implementation consequences
+
+The read-only/synthetic probes in the 2026-09-30–2026-10-01 host session verified
+Python 3.12.12, Windows build
+26200, SQLite 3.51.1, the versions above, Node 24.11.1, Git 2.50.0.windows.1, and
+cached pnpm 10.18.3 help. Current `backend/pyproject.toml`, `backend/uv.lock`,
+`frontend/package.json`, and `frontend/pnpm-lock.yaml` equal the exact D35 Git blobs
+byte-for-byte. This is manifest evidence, not proof of a fresh install. NumPy,
+ONNXRuntime, tokenizers, and uv are absent from the existing backend venv; outer
+Python provides uv 0.12.15. Retrieval locks are NumPy 2.5.3, ONNXRuntime 1.30.0,
+and tokenizers 0.23.2. The native Node installation probed here has npm 11.6.2;
+other installed npm copies must not be mistaken for the selected launcher.
+
+| Primary reference | Version / verification in the 2026-09-30–2026-10-01 session | Consequence |
+|---|---|---|
+| <https://docs.python.org/3.12/library/subprocess.html> | Python 3.12 docs, captured in audit `primary-sources/python-subprocess.txt` | Native absolute executables, bounded pipe draining; Windows batch files can invoke a shell even with `shell=False` |
+| <https://docs.pydantic.dev/latest/concepts/strict_mode/> | Captured strict-mode docs; installed 2.13.4 behavior separately probed | Strict JSON arrays become tuples; strict Python lists do not. `Literal[True]` accepts `1`, and `Literal[1]` accepts `true`; raw/model canonical equality is mandatory |
+| <https://docs.astral.sh/uv/concepts/projects/sync/> and <https://docs.astral.sh/uv/concepts/projects/dependencies/> | Captured official docs and installed uv 0.12.15 help | Optional extras are not default dev groups; select both extras, use `--locked`, then direct sandbox Python (no resync) |
+| <https://pnpm.io/10.x/cli/install> and <https://pnpm.io/10.x/settings> | Version-10 pages retrieved live; cached 10.18.3 CLI help probed | Frozen dev install with ignored lifecycle scripts; v10 `onlyBuiltDependencies`, not later `allowBuilds` / `--allow-build` policy |
+| <https://nodejs.org/docs/latest-v24.x/api/cli.html> | Version-24 page retrieved live; installed 24.11.1 probed | Use APIs/options available in 24.11.1, not the supplied latest-v26 capture |
+| <https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew> and <https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects> | Official captures read; Windows stdlib has no `os.open(dir_fd=...)` | Retain existing directory handles and trusted stdin-gated Job Object bootstrap; no new suspended native launcher |
+
+The supplied latest pnpm page contains v11/v12 flags and the Node capture describes
+v26. Neither is authority for those newer options on the selected lane. The locked
+`eslint-visitor-keys` 5.0.1 requires `^20.19.0 || ^22.13.0 || >=24`, and jest-dom
+6.10.0 requires Node `>=22`; Node 24.11.1 satisfies both. `frontend/pnpm-workspace.yaml`
+uses `allowBuilds`, while `.pnpm-allow.json` contains `onlyBuiltDependencies`; do not
+assume either grants scripts under 10.18.3. Candidate bytes stay unchanged. D39's
+explicit `--ignore-scripts` bypasses dependency lifecycle authorization and checks the
+locked native esbuild binary before build. Missing native support fails the lane;
+there is no automatic rebuild, v12 flag, lock repair, or candidate-config rewrite.
+A future narrow v10 authorization needs a new documented, version-probed tooling
+contract and new run; it is not part of the current nine-command inventory.
+
+#### Shared evidence parsing and resource contract (planned prerequisite)
+
+Add `backend/evaluation/evidence_json.py` as a pure parser, importing only stdlib,
+Pydantic, and `canonical_json_bytes` from `tool_attestation`. It imports no runner,
+application, filesystem executor, or result/protocol model. `blinded_io` remains
+filesystem-only; callers supply the model and explicit cap. Dependencies stay
+`tool_attestation -> evidence_json -> boundary callers` and
+`blinded_io -> boundary callers`; these arrows mean provider to consumer.
+
+```python
+TModel = TypeVar("TModel", bound=BaseModel)
+
+def parse_canonical_model(
+    raw: bytes, model_type: type[TModel], *, maximum: int,
+) -> TModel: ...
+```
+
+1. Read regular no-follow bytes through `blinded_io.read_regular(path, maximum=cap)`
+   with `cap + 1` detection and descriptor/path identity checks. For detached inputs,
+   validate the exact lowercase 64-hex expected digest and actual bytes before parse.
+2. Before JSON construction, a bounded string-aware lexical scan rejects depth over
+   32, more than 4,000,000 tokens, and string tokens over 8,192 encoded bytes. Object
+   keys count as tokens. Then `json.loads` uses a duplicate-rejecting
+   `object_pairs_hook` and a rejecting `parse_constant` (NaN/Infinity/-Infinity).
+   Reject malformed UTF-8, BOM, surrogate strings, and nonfinite/overflowing numbers.
+3. Require `canonical_json_bytes(decoded) + b"\n" == raw`; no whitespace, key order,
+   duplicate, spelling, escape, or newline normalization is accepted. Durable files
+   have exactly one LF; hash it. In-memory configuration and fingerprint-list
+   aggregates use `canonical_json_bytes(value)` without LF. This is project
+   canonicalization, not RFC 8785.
+4. Invoke `model_type.model_validate_json(raw, strict=True)`, not strict Python
+   validation of JSON lists. Compare the model's canonical durable bytes to the same
+   raw bytes again: coercible `Literal` primitive values must fail, never become a
+   normalized accepted artifact. New Python-facing models additionally check raw
+   `type(value) is bool/int/str` before literal validation. Existing D37 result and
+   protocol classes are imported unchanged; strict direct-call entry points must
+   reject primitive coercions before constructing models.
+5. Enforce schema-specific array/map/string limits and all topology/accounting
+   invariants. Protocol/result arrays retain 65,535 maxima, candidate/evaluator
+   names 128 characters, UTC seconds 20 characters. New file inventories cap at
+   8,192 entries with lexical paths <=512 characters; command argv <=64 arguments
+   of <=1,024 characters; version strings <=256; gate details <=256; reviews and
+   limitations <=256 entries with identifiers <=128. Never log rejected input.
+
+| Artifact | Pre-parse maximum (including LF) |
+|---|---|
+| D37 `protocol.json`, every D38 protocol reader | 64 MiB (`MAX_PROTOCOL_BYTES`) |
+| D37 bundle / D38 accepted bundle / D40 accepted reader | 128 MiB (`MAX_RESULT_BUNDLE_BYTES`) |
+| Freeze, source attestation, materialization, validation, verification | 16 MiB |
+| One smoke stage receipt | 64 KiB |
+| Complete smoke manifest / D40 decision JSON | 1 MiB |
+| One review / complete limitation array | 64 KiB / 1 MiB |
+| Ownership marker | 4 KiB |
+
+Large blobs are not JSON inputs. Hash source, media, and index files in 1 MiB chunks
+with pre/open/post identity/size checks, finite inventory counts and total bytes;
+never apply the 16 MiB JSON default to an index blob. Candidate index limits are
+64,000 bytes for `manifest.json` and 64,000,000 bytes for a bundle (decimal, not MiB).
+D37 `_fingerprint_directory` currently calls the 16 MiB reader; replace that hash-only
+path with streamed fingerprints as a prerequisite, without changing index bytes or
+protocol/result schemas. Tool-source files cap at 8 MiB each / 512 MiB total; index
+inventory cap is 4,096 files / 512 MiB total. Parse large artifacts sequentially and
+release raw/decoded duplicates once hashes and validated models are retained.
+Maximum-topology byte arithmetic is proven; maximum-size parse time/memory is not.
+A bounded single-pass category denominator tally must replace quadratic recounting
+before claiming full-range operational acceptance; names, fields, and thresholds stay
+unchanged.
+
+All agent/controller descendants share hard aggregate RAM <=16 GiB; target <=12 GiB,
+reserve runtime headroom, and start no nontrivial process at >=14 GiB. One command or
+smoke group runs at a time. No browser/model/download/build/test is run during this
+audit. Future execution uses one pytest worker, one Vitest worker, one compiler/build
+child, and NumPy/ONNX thread limits of one; it measures working sets and aborts only
+owned jobs on memory pressure. All child output is bounded and every started child
+has an owner and teardown deadline.
+
+#### Executable-probe blueprint and acceptance checklist (not executed here)
+
+| Order / owner | Action | Exact acceptance / failure |
+|---|---|---|
+| 1 / shared tooling | Add parser; exercise duplicate keys, NaN, float/boolean literals, BOM, LF, cap+1, depth/string/count limits; strict JSON tuple roundtrip | Rejection before output for each negative; unchanged shared field inventory and exact canonical positive bytes |
+| 2 / D37 host prerequisite | Stream index hash; supply a synthetic loopback profile through explicit host/runner settings described below; pin complete committed tooling and refresh D36 | No candidate writes, no weights download; differing source/protocol/index aborts with fixed reason and new run ID |
+| 3 / D39 bootstrap | Fresh external backend sync with both extras; prove executable/base interpreter, uv, lock hashes, module origins; fresh native pnpm frozen dev install | Python 3.12.12 / uv 0.12.15 / Node 24.11.1 / pnpm 10.18.3, all declared modules group-local, no skips caused by missing NumPy, no resync/global fallback; failure stops and cleans |
+| 4 / process owner | Native node+npx launcher under the existing gated Windows Job Object; harmless synthetic child/grandchild with parent early exit and inherited pipe | No child work before assignment; terminate descendants on normal exit, timeout, flood and cancellation; 1 s drain grace, 10 s confirmed teardown. Assignment failure never releases gate |
+| 5 / D37 integration harness | Exact committed D35 bytes in a verified external sandbox, genuine catalog/profile-bound synthetic index, fake loopback chat+embeddings; both modes and restart resend | Real candidate imports only in candidate-rooted workers, not stub candidate/host or dummy index. Exact expected response/effects, <=4 actual model calls, same source/index hashes before/after, fresh case storage; no default fallback accepted as stateful success |
+| 6 / D39–D40 | Six typed receipts, exact command/native-binding inventory, failure-prefix and cleanup tests, all detached inputs, Not-ready baseline | Rehash every receipt's complete canonical bytes/size and artifact hash/size; reject arbitrary six hashes, wrong bindings, stale attestation, missing inputs, and unconfirmed cleanup; no inferred human review |
+
+Orders 3–6 require real lightweight integration execution in the later implementation
+phase, not additional design-time assertions. Fresh-install/native build availability,
+browser executable provenance/automation roundtrip, and the exact pinned-worker
+integration remain **Blocked facts** until those probes pass. Existing D37 E2E uses
+stub candidate/host/index; existing D36 real-worker tests use the current tree. Neither
+is exact-D35 stateful proof. Do not repeat broad debug loops: fail the first unmet
+prerequisite, record its fixed reason, update this contract only if evidence disproves
+it, and resume from that dependency boundary.
 
 ### Intended repository structure
 
@@ -232,8 +380,11 @@ backend/evaluation/
 │   ├── freeze_candidate.py            # D36 external CLI
 │   ├── materialize_candidate_runtime.py # D39 materialize/cleanup CLI
 │   ├── d39_smoke.py                   # external candidate smoke orchestration
+│   ├── d39_candidate_smoke.py         # planned internal candidate-rooted bootstrap
 │   ├── verify_release_candidate.py    # D39 final external verifier CLI
 │   └── attest_release_decision.py     # D40 source-attestation generate/validate CLI
+├── evidence_json.py                   # planned pure strict canonical parser
+├── smoke_contracts.py                 # planned six typed smoke receipts; no execution
 ├── blinded_contracts.py
 ├── blinded_io.py                    # bounded no-follow reads and crash-safe publication
 ├── blinded_runtime.py               # candidate anchors and process-tree supervision
@@ -243,6 +394,7 @@ backend/evaluation/
 ├── result_contracts.py                # one D37-owned D37–D40 bundle schema
 ├── result_import.py
 ├── runtime_materialization.py         # read-only runtime copy/evidence/cleanup
+├── browser_smoke.py                   # planned owned CDP browser helper, smoke only
 ├── release_verification.py
 └── release_decision.py
 backend/scripts/
@@ -952,7 +1104,7 @@ On POSIX the anchor is an `os.open()` descriptor with
 `O_RDONLY|O_DIRECTORY|O_NOFOLLOW`; its directory type and `(st_dev, st_ino)` identity
 come from `os.fstat()`. Every fixed child is created with `os.open(name, ..., dir_fd=
 anchor_fd)`, and all truncate/write/fsync/readback operations use retained child
-descriptors. On Windows the anchor is a `CreateFileW` directory handle opened with
+descriptors. On Windows the existing D36 anchor is a `CreateFileW` directory handle opened with
 `GENERIC_READ`, `FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT`, and sharing
 `FILE_SHARE_READ|FILE_SHARE_WRITE` but not `FILE_SHARE_DELETE`.
 `GetFileInformationByHandle` supplies the volume/file-index
@@ -1369,10 +1521,58 @@ class EvaluationResultBundle(BaseModel):
     modes: tuple[ModeResult, ModeResult]
 ```
 
-This field inventory is exhaustive. No combined approval digest, exclusion-summary
-aggregate, or alternate reduced safety/count representation is permitted. The shared
-models above are the canonical serialization contract for D37 output, D38 acceptance,
-and D40 consumption.
+This field inventory is exhaustive and matches the existing source. No combined
+approval digest, exclusion-summary aggregate, direct model/index bundle fields, or
+alternate reduced safety/count representation is permitted. The bundle commits the
+model configuration and index indirectly: SHA-256 of exact LF-terminated protocol
+bytes equals `bundle.protocol_sha256`; those protocol bytes contain both hashes.
+D38 verifies that chain and records the two protocol values in `ImportValidation`.
+D40 cross-binds the validation record's protocol identity to the accepted bundle; it
+does not claim to recompute model/index hashes without the protocol/files.
+
+Currently `_model_configuration_sha256(model)` hashes no-LF canonical `{"model": model}`
+only: this pins an identifier, not immutable chat weights, endpoint, decoding settings,
+or provider state. The supported host identifier is nonempty, untrimmed, <=128
+characters; the runner's current 256 bound is not an expanded host capability. A
+provider changing weights under the same ID is an evaluator operational risk. Before
+a real run, independent provenance must bind the local provider's actual weights and
+configuration; no remote provider or fabricated weights digest is selected here.
+
+The synthetic integration prerequisite extends `run_trial_host` with optional
+keyword-only `embedding_profile: Path | None = None` and
+`embedding_base_url: str | None = None`, and threads the same optional parameters
+through the runner/CLI. Existing defaults and case/event wire fields remain unchanged.
+
+```python
+async def run_blinded_evaluation(
+    *, candidate_root: Path, freeze_manifest: Path, corpus: Path,
+    human_review: Path, independent_review: Path, output_root: Path,
+    model: str, index: Path, evaluator_name: str, token_key_file: Path,
+    embedding_profile: Path | None = None,
+    embedding_base_url: str | None = None,
+) -> EvaluationResultBundle: ...
+
+def write_run_protocol_exclusive(output_root: Path, protocol: EvaluationProtocol) -> Path: ...
+```
+
+Only stateful accepts these paired overrides: a regular non-link external <=16,000-byte
+`EmbeddingProfile` with `transport="local-openai-embeddings-v1"`, plus a validated
+loopback `/v1` URL. The host's clean environment explicitly sets
+`LANGUAGE_RETRIEVAL_PROFILE` and `LANGUAGE_EMBEDDING_BASE_URL` from these trusted
+operator parameters, never case data or inherited ambient settings. Include the
+profile's parent in protected-root/output checks. Profile identity is already inside
+the genuine index manifest/hash; endpoint identity is operational, not a weights claim.
+The worker sets candidate Settings from those explicit values before service creation.
+Current `_clean_environment` drops both settings and defaults to the ONNX E5 profile:
+the loopback synthetic route is **not implemented** or verified yet. Tests use a
+profile clearly named synthetic, fixed normalized vectors, and synthetic identity
+bytes; they must never represent them as real model provenance. Build/load that index
+through pinned candidate `load_sources`, `publish_index`, and `load_index` in a
+candidate-rooted subprocess; reject stale catalog/scope/profile and missing-bundle
+cases before accepting stateful success.
+
+Shared model names/fields above remain the D37 output, D38 acceptance, and D40
+consumption contract.
 
 The evaluator name is explicit, non-empty, and bounded; `executed_at` is canonical
 UTC evidence time. The bundle repeats the complete protocol topology so D40 can
@@ -1517,6 +1717,16 @@ working bytes, normal index entries, deterministic sorted unique paths, and stab
 pre/post validation. Tests, generated evidence, `.env` files, secrets, and held-out
 material are not admitted.
 
+The no-delete directory handle protects the opened directory's own name/identity,
+not its contents or unanchored ancestors. Existing D37 uses metadata-only desired
+access `0`; D36's current GENERIC_READ variant is documented above, not silently
+claimed to match it. Future shared anchors use the existing D37 form only after the
+native compatibility probe. Parent directories are operator-owned/trusted and are
+not concurrently relocated; content hashes and component checks remain required.
+A hostile same-user principal (including WMI launches, deliberate breakaway, or
+process-memory tampering) is outside the trust boundary, not prevented by these
+handles or readonly chmod bits.
+
 The candidate root itself and every supplied ancestor/component are checked without
 following links; symlink and Windows reparse/junction roots fail. D37 resolves the root
 once and retains its directory identity until final run cleanup. Windows opens a
@@ -1603,6 +1813,12 @@ D36 `final_protocol.json`, equivalent regenerated policy, a
 protocol outside the run output, non-canonical bytes, and symlinks are rejected.
 
 ```python
+def import_evaluation_result(
+    *, bundle_path: Path, expected_sha256: str, freeze_manifest_path: Path,
+    protocol_path: Path, d36_trial_tool_attestation_path: Path,
+    d37_tool_attestation_path: Path, output_dir: Path, repo_root: Path,
+) -> ImportValidation: ...
+
 class ImportValidation(BaseModel):
     schema_version: Literal[1]
     status: Literal["accepted"]
@@ -1616,11 +1832,19 @@ class ImportValidation(BaseModel):
     freeze_sha256: str
     d36_trial_tool_sha256: str
     d37_evaluator_tool_sha256: str
+    model_configuration_sha256: str
+    stateful_index_sha256: str
     d38_import_tool_sha256: str
     checks: dict[str, Literal[True]]
 ```
 
-`checks` has exactly these keys, all `true`, with no extras:
+All fields use frozen strict extra-forbid models and the shared raw-byte parser.
+`model_configuration_sha256` and `stateful_index_sha256` are copied only from the
+verified protocol, not compared against invented bundle properties. `source_bundle_sha256`
+and `accepted_bundle_sha256` both equal the detached-verified original canonical
+bundle bytes (including LF); acceptance preserves those bytes unchanged.
+
+`checks` has exactly these twenty keys, all raw `type(value) is bool` and `true`, with no extras:
 `bundle_detached_sha256`, `bundle_canonical`, `protocol_canonical`,
 `protocol_sha256`, `candidate_binding`, `corpus_binding`, `approval_bindings`,
 `freeze_binding`, `tool_bindings`, `token_syntax`, `token_unique_sorted`,
@@ -1628,12 +1852,34 @@ class ImportValidation(BaseModel):
 `nonempty_coverage`, `exclusion_reasons`, `category_accounting`, `mode_accounting`, and
 `sealed_evidence_hash_syntax`.
 
+The D38 module-owned source tuple is the exact D40 `DECISION_SOURCE_PATHS` inventory
+below minus `backend/evaluation/blinded_runtime.py`, `release_decision.py`,
+`release_verification.py`, `runtime_materialization.py`, `smoke_contracts.py`,
+`backend/evaluation/scripts/attest_release_decision.py`, and
+`backend/scripts/decide_release_readiness.py`, plus
+`backend/scripts/import_evaluation_result.py` (all evaluation basenames carry the
+`backend/evaluation/` prefix). Spell that sorted literal tuple in D38, do not import
+D40's constant or depend on an unimplemented later unit. It contains 25 paths and
+covers the existing model/fixture/app-contract imports and freeze reader. An import-
+closure test rejects new unlisted behavior dependencies before generation.
+
 The importer revalidates all accounting invariants above, evaluator identity/time,
-and exact two-mode/category symmetry without normalization. It atomically writes the
-canonical shared-schema `accepted-result.json`, `validation.json`, and a separate
+and exact two-mode/category symmetry without normalization. It imports both
+`EvaluationProtocol` and `EvaluationResultBundle` unchanged and uses their respective
+64/128 MiB caps, never the generic 16 MiB default. The run-artifact provenance check
+requires regular `protocol.json` beside the source `result-bundle.json`, not an
+unrelated copied policy. No parser can prove original physical location from a hash
+alone; the operator's declared evaluator run root is trusted provenance input.
+
+It constructs the accepted triplet in a new importer-owned staged directory, validates
+and fsyncs all three canonical files, and publishes the directory no-replace. No partial
+triplet is accepted and no prior run is replaced. It writes the unchanged canonical
+shared-schema `accepted-result.json`, `validation.json`, and a separate
 `d38-tool-attestation.json`. `validation.accepted_bundle_sha256` hashes the exact
 accepted bytes; `validation.d38_import_tool_sha256` equals the importer attestation's
-aggregate hash. It never opens, enumerates, or reconstructs sealed detailed evidence.
+aggregate hash. D38 source generation uses fixed `tool_name="d38_result_importer"`; D40 checks that
+name and the exact source tuple as well as its aggregate. It never opens, enumerates,
+or reconstructs sealed detailed evidence.
 
 ### D39 external exact-candidate verification
 
@@ -1650,6 +1896,19 @@ def cleanup_candidate_runtime(
     *, runtime_root: Path, work_root: Path, materialization_path: Path,
     expected_materialization_sha256: str,
 ) -> None: ...
+
+def run_candidate_smokes(
+    *, candidate_root: Path, freeze_manifest_path: Path,
+    runtime_root: Path, materialization_path: Path,
+    expected_materialization_sha256: str, work_root: Path, output_dir: Path,
+) -> SmokeManifest: ...
+
+def verify_release_candidate(
+    *, candidate_root: Path, freeze_manifest_path: Path,
+    runtime_root: Path, materialization_path: Path,
+    expected_materialization_sha256: str, work_root: Path,
+    output_dir: Path, smoke_manifest_path: Path,
+) -> VerificationManifest: ...
 ```
 
 `python -m evaluation.scripts.materialize_candidate_runtime` verifies the D36 raw
@@ -1670,6 +1929,18 @@ never absolute paths. Its canonical bytes are hashed for downstream evidence. Th
 runtime contains no environment, cache, dependency install, output, database, media,
 browser profile, log, or evidence directory. Because existing build tools may write
 beside source, no command executes directly in the read-only runtime.
+
+The materializer creates a 4 KiB-capped canonical ownership marker beside its evidence,
+not inside runtime source. It binds the runtime instance, actual directory identity,
+work-root alias, exact materialization-file hash, and lifecycle `building`, `active`,
+`cleaning`, or `cleaned`. Create marker/root exclusively before copying; retain the
+root identity during construction. On failure remove only this owned partial object;
+if ownership is lost, retain it and report `cleanup_failed`, never delete a replacement.
+The final marker binds the published materialization hash before any execution group.
+Cleanup is single-use/idempotent: only the same detached hash and marker can resume
+`active`/`cleaning` or confirm `cleaned` with the runtime absent. Missing marker or an
+unexplained missing/replaced active root is not successful cleanup. Keep the bounded
+marker/cleanup receipt in external evidence; no environments or media are retained.
 
 The D39 workflow uses exactly three execution groups, each under a new random,
 non-symlink tooling-owned temporary root outside both candidate and runtime. The
@@ -1715,14 +1986,28 @@ replace per-command argv, cwd alias, exit code, timestamps, or bounded stdout/st
 hashes. The verifier also proves the original candidate and immutable runtime remain
 unchanged.
 
+`ToolExecutionBinding` is owned by `smoke_contracts`; `release_verification` imports it.
+
 ```python
+class ToolExecutionBinding(BaseModel):
+    role: str
+    version: str
+    executable: FileFingerprint  # lexical alias, complete streamed size/SHA-256
+    launcher: FileFingerprint | None
+
 class CommandEvidence(BaseModel):
     name: str
-    argv: tuple[str, ...]
+    argv: tuple[str, ...]  # canonical logical inventory, not a claim of native argv
+    resolved_argv: tuple[str, ...]  # actual native argv with owned path aliases
+    tool_bindings: tuple[ToolExecutionBinding, ...]
     cwd: str
-    exit_code: int
+    deadline_seconds: int
+    outcome: Literal["completed", "launch_failed", "timeout", "output_limit", "memory_limit", "teardown_failed"]
+    exit_code: int | None
     started_at: str
     finished_at: str
+    stdout_size: int
+    stderr_size: int
     stdout_sha256: str
     stderr_sha256: str
 
@@ -1740,6 +2025,7 @@ class SmokeManifest(BaseModel):
     stateful_startup_sha256: str
     browser_sha256: str
     ffmpeg_sha256: str
+    stage_receipts: tuple[SmokeStageReceipt, ...]  # exactly six, in fixed order
 
 class VerificationManifest(BaseModel):
     schema_version: Literal[1]
@@ -1748,18 +2034,18 @@ class VerificationManifest(BaseModel):
     freeze_sha256: str
     verifier_tool_sha256: str
     status: Literal["passed", "failed"]
-    commands: tuple[CommandEvidence, ...]
-    smoke_manifest_sha256: str
-    smoke_manifest: SmokeManifest
+    commands: tuple[CommandEvidence, ...]  # full inventory on pass; attempted prefix on failure
+    smoke_manifest_sha256: str | None
+    smoke_manifest: SmokeManifest | None
     secret_scan_passed: bool
-    candidate_clean_before: Literal[True]
-    candidate_clean_after: Literal[True]
+    candidate_clean_before: bool
+    candidate_clean_after: bool
     candidate_snapshot_before_sha256: str
-    candidate_snapshot_after_sha256: str
+    candidate_snapshot_after_sha256: str | None
     materialization_sha256: str
     runtime_instance_id: str
     runtime_source_sha256: str
-    runtime_snapshot_after_sha256: str
+    runtime_snapshot_after_sha256: str | None
     cleanup_status: Literal["completed", "failed"]
 ```
 
@@ -1767,50 +2053,310 @@ The fixed `shell=False` command inventory contains exactly these nine `(name, ar
 entries, in this order, each exactly once:
 
 ```text
-backend_uv_sync           ("python", "-m", "uv", "sync", "--frozen")
-backend_import            ("python", "-m", "uv", "run", "python", "-c", "import app.main")
-backend_pytest            ("python", "-m", "uv", "run", "pytest")
-backend_ruff              ("python", "-m", "uv", "run", "ruff", "check", ".")
-backend_d31_d35           ("python", "-m", "uv", "run", "pytest", "tests/test_d31_adversarial_safety.py", "tests/test_d32_concurrency_matrix.py", "tests/test_d33_recovery_matrix.py", "tests/test_d34_migrations.py", "tests/test_d35_startup_recovery_api.py", "-q")
-frontend_pnpm_install     ("npx", "-y", "pnpm@10.18.3", "install", "--frozen-lockfile")
-frontend_test             ("npx", "-y", "pnpm@10.18.3", "test")
+backend_uv_sync           ("python", "-m", "uv", "sync", "--locked", "--extra", "dev", "--extra", "retrieval", "--no-python-downloads", "--no-config")
+backend_import            ("python", "-B", "-c", "import app.main")
+backend_pytest            ("python", "-B", "-m", "pytest")
+backend_ruff              ("python", "-B", "-m", "ruff", "check", ".")
+backend_d31_d35           ("python", "-B", "-m", "pytest", "tests/test_d31_adversarial_safety.py", "tests/test_d32_concurrency_matrix.py", "tests/test_d33_recovery_matrix.py", "tests/test_d34_migrations.py", "tests/test_d35_startup_recovery_api.py", "-q")
+frontend_pnpm_install     ("npx", "-y", "pnpm@10.18.3", "install", "--frozen-lockfile", "--prod=false", "--ignore-scripts")
+frontend_test             ("npx", "-y", "pnpm@10.18.3", "test", "--maxWorkers=1", "--minWorkers=1", "--no-file-parallelism")
 frontend_build            ("npx", "-y", "pnpm@10.18.3", "build")
 frontend_lint             ("npx", "-y", "pnpm@10.18.3", "lint")
 ```
 
 `evaluation.release_verification.D39_REQUIRED_COMMANDS` is this immutable ordered
-nine-tuple. Entries 1–5 execute in the single backend group sandbox and entries 6–9
+nine-tuple. Models/validators above are frozen, strict, extra-forbid, with the shared
+pre-parse/canonical/literal contracts. A failed manifest may contain only an attempted
+ordered prefix and nullable absent smoke/final snapshots; it must never fabricate
+unexecuted commands, smoke success, clean flags, or final hashes to satisfy a schema.
+
+| Command | Hard deadline (seconds) |
+|---|---:|
+| backend_uv_sync | 600 |
+| backend_import | 30 |
+| backend_pytest | 1,800 |
+| backend_ruff | 120 |
+| backend_d31_d35 | 600 |
+| frontend_pnpm_install | 600 |
+| frontend_test | 600 |
+| frontend_build | 300 |
+| frontend_lint | 180 |
+
+Before command 1, resolve a regular native bootstrap Python 3.12.12, prove its uv
+0.12.15 module/binary origin, and bind executable/launcher versions, sizes, and
+streamed hashes. The backend venv itself need not contain uv. Set `UV_PYTHON` to that
+verified absolute Python, `UV_PROJECT_ENVIRONMENT` to `<group>/env`, `UV_CACHE_DIR`
+to `<group>/uv-cache`, and `UV_CONCURRENT_DOWNLOADS=2`, `UV_CONCURRENT_BUILDS=1`,
+`UV_CONCURRENT_INSTALLS=1`. Validate the resulting venv's `sys.executable`,
+`sys.base_prefix`/base executable and installed package origins before command 2.
+Commands 2–5 resolve `python` only to that group's `env/Scripts/python.exe` (POSIX
+`env/bin/python`); use `-m pytest`/`-m ruff` from it, never global executables or
+implicit `uv run` resync. A missing extra/module/origin fails before the next command.
+The optional retrieval wheels eliminate NumPy-based ONNX pooling-test skips; the
+loopback embeddings smoke itself needs HTTPX, not NumPy/ONNXRuntime/tokenizers and
+never loads weights. Successful fake-ONNX tests do not prove real ONNX asset inference.
+
+For frontend commands, resolve native `node.exe` 24.11.1 and its installed npm
+`npx-cli.js`; execute `(node_exe, npx_cli, *logical_argv[1:])` with `shell=False`.
+Never spawn `.cmd`/`.bat` or pass a caller-selected command. Pin pnpm 10.18.3 and bind
+its resolved `pnpm.cjs` hash/version before accepting install/test/build evidence.
+`argv` retains the canonical inventory; `resolved_argv` records this native expansion
+with exact role-to-path aliases, and `tool_bindings` records the real executable and
+JS/module launcher identities. The trusted Python stdin-gate supervisor is separately
+source-attested; its fixed wrapper is not mislabeled as the target command's argv.
+Rehash bindings around commands. Node/npx/pnpm hashes are not candidate source hashes.
+Native tool blobs cap at 256 MiB each / 1 GiB total and are stream-hashed.
+
+Set group-local npm cache/config, pnpm store/cache/state, `HOME`, `USERPROFILE`,
+`APPDATA`, `LOCALAPPDATA`, `XDG_*`, `TEMP`, `TMP`, and `TMPDIR`. A generated untracked
+`.npmrc` in the writable sandbox supplies group-local `store-dir` and
+`cache-dir`, `child-concurrency=1`, `network-concurrency=2`, and engine-strict checking;
+it is not a candidate tracked-file modification. Set `NODE_OPTIONS=--max-old-space-size=2048`,
+`OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `MKL_NUM_THREADS=1`,
+`NUMEXPR_NUM_THREADS=1`, `PYTHONDONTWRITEBYTECODE=1`, `PYTHONNOUSERSITE=1`,
+`RUFF_CACHE_DIR`, and `PYTEST_ADDOPTS` with the cache path inside the group. No inherited
+`NODE_ENV=production`, Python path, provider credentials, pytest plugins, Node options,
+or package-manager config is admitted. Build outputs remain in the writable sandbox;
+external application storage/database/browser profile roots belong to that group.
+Pinned package `test`/`build`/`lint` scripts are intentionally trusted and may internally
+use a shell (`tsc -b && vite build`); this is not a promise of shell-free npm internals.
+Arguments and synthetic inputs never supply shell fragments. Native esbuild availability
+is a fixed post-install preflight, not a tenth command or implicit script authorization.
+
+Expose the reusable `blinded_runtime.run_owned_command(*, argv: tuple[str, ...],
+cwd: Path, env: dict[str, str], stdout_path: Path, stderr_path: Path,
+deadline_seconds: int) -> Awaitable[OwnedCommandOutcome]` for D39 bootstrap/commands/
+smoke. `OwnedCommandOutcome` contains outcome, nullable exit code, timestamps and
+actual bounded output sizes/hashes, not raw text; `release_verification` adds canonical
+inventory and prevalidated tool bindings. This helper imports neither verification nor
+smoke/result models. It reuses D37 gate/tree/drain primitives and extends no candidate
+contract. D40 may import contracts but never invokes this helper.
+
+All commands use the existing trusted stdin gate before Windows Job Object assignment,
+with kill-on-close and no breakaway. Deadlines use monotonic time, not evidence wall
+clock; record canonical UTC-second start/finish times separately. If process creation
+returns after its deadline, do not release its gate and tear it down. Python cannot
+promise interruption of the initial native process-creation call; this OS limitation
+is not hidden as an exact kill-at-deadline guarantee. Output has a shared stdout+stderr 2 MiB cap per
+command, drained incrementally, with 1 s parent-exit grace and 10 s confirmed tree/
+reader teardown. One command runs at a time. Deadline, cap, memory pressure, nonzero
+exit, source drift, or launch/assignment/teardown failure stops the group; remaining
+commands do not run. Output is never captured unboundedly in RAM. Cleanup completes
+before bounded failed evidence is published; unknown teardown is a failed result,
+not a successful command. The group-local package fetches are the only installation
+network allowance; smoke providers are loopback only, and decision has none. Entries 1–5 execute in the single backend group sandbox and entries 6–9
 execute in the single frontend group sandbox; the separate smoke group adds no entry
 to this inventory. The verifier uses the tuple to execute, and D40 independently
 compares the parsed manifest's full `(name, argv)` sequence to it and checks every
-exit code; D40 never trusts `VerificationManifest.status` as a substitute. Every entry must have
-`exit_code == 0`; duplicate, missing, additional, reordered, or argv/name-mismatched
-entries invalidate the verification. Legacy migration/backup,
+exit code; D40 never trusts `VerificationManifest.status` as a substitute. Every entry in a passed manifest must have
+`outcome == "completed"` and `exit_code == 0`, the specified deadline, bounded output
+sizes, and validated native/tool bindings; duplicate, missing, additional, reordered,
+or argv/name-mismatched entries invalidate passed verification. Legacy migration/backup,
 restore, both-mode startup, recovery browser journey, and real FFmpeg with fake
 providers are mandatory smoke evidence, not caller-extensible commands. The exact
-canonical `SmokeManifest` is embedded in `VerificationManifest`; its canonical bytes
-hash to `smoke_manifest_sha256`. Every one of its six smoke hashes is exact lowercase
-64-hex and binds the same candidate, commit, freeze, materialization, runtime instance,
-and runtime source as the verification manifest. Stdout/stderr are bounded to 2 MiB.
+canonical `SmokeManifest` is embedded in `VerificationManifest`; its LF-terminated
+canonical bytes hash to `smoke_manifest_sha256`. Six arbitrary hash strings are not
+proof: the `smoke_contracts.py` schema below embeds exactly six typed stage receipts,
+and each named stage hash hashes that receipt's complete LF-terminated bytes.
 A secret/private/generated-file scan records rule IDs/counts only. Candidate/runtime drift or any command/smoke failure stops subsequent work and yields
 failed evidence. A partial materialization is removed by the materializer before it
 returns failure. After the final independent runtime recheck, the verifier calls
-`cleanup_candidate_runtime()` in `finally`; cleanup verifies the detached expected materialization hash before parse, the
-single-use marker, and containment beneath `work_root`, removes the read-only runtime and
-all external environment/cache/temp/browser/database/media roots, and preserves only
-bounded canonical evidence. Cleanup is idempotent. A cleanup failure sets
+`cleanup_candidate_runtime()` in `finally`; cleanup verifies the detached expected
+materialization hash before parse, the physical ownership marker/root identity, and
+containment beneath `work_root`. Stop/confirm every owned descendant first. Walk only
+owned non-link/non-reparse components; on Windows clear read-only with `os.chmod`
+only on validated owned regular files before unlinking, then remove owned directories
+bottom-up. Never traverse a junction, chmod a replacement or ancestor, or terminate a
+user-owned process. Close no-delete handles only immediately before removing their
+validated objects. Clean group caches/temp/browser/database/media and runtime source,
+preserve only bounded canonical evidence/ownership receipts, and record `cleaned`.
+Idempotence is marker-bound, not an identity-blind `rmtree(ignore_errors=True)`. A cleanup failure sets
 `status="failed"` and `cleanup_status="failed"` and reports only a root alias. If the
 verifier is never started after successful materialization, the operator runs the
 same dedicated cleanup CLI with the record; it refuses an unbound or out-of-root
 path. D39 atomically emits
 `verification-manifest.json` plus a distinct canonical D39 verifier source
 attestation whose aggregate hash equals `VerificationManifest.verifier_tool_sha256`.
+Use fixed `tool_name="d39_release_verifier"` and the exact sorted 19-path tuple below,
+validated against committed project-root bytes by existing `attest_tool`. No D39
+controller imports D37/D38/corpus/app; the internal bootstrap's app modules come only
+from independently frozen candidate bytes. An import-closure test distinguishes this
+candidate process boundary and fails any new unlisted tooling dependency.
+
+```text
+backend/evaluation/__init__.py
+backend/evaluation/blinded_io.py
+backend/evaluation/blinded_runtime.py
+backend/evaluation/browser_smoke.py
+backend/evaluation/evidence_json.py
+backend/evaluation/release_candidate/__init__.py
+backend/evaluation/release_candidate/contracts.py
+backend/evaluation/release_candidate/fingerprints.py
+backend/evaluation/release_candidate/freeze.py
+backend/evaluation/release_verification.py
+backend/evaluation/runtime_materialization.py
+backend/evaluation/scripts/d39_candidate_smoke.py
+backend/evaluation/scripts/d39_smoke.py
+backend/evaluation/scripts/materialize_candidate_runtime.py
+backend/evaluation/scripts/verify_release_candidate.py
+backend/evaluation/smoke_contracts.py
+backend/evaluation/tool_attestation.py
+backend/pyproject.toml
+backend/uv.lock
+```
 A candidate failure restarts at D36; a verifier-only change gets a new verifier hash
 and a complete D39 rerun in a new evidence directory. A passed manifest additionally
-requires `secret_scan_passed is True`, both clean flags true,
+requires a complete passed six-receipt smoke manifest, `secret_scan_passed is True`,
+both clean flags raw booleans true,
 `candidate_snapshot_before_sha256 == candidate_snapshot_after_sha256`,
 `runtime_snapshot_after_sha256 == runtime_source_sha256`, and
 `cleanup_status == "completed"`.
+
+#### Six-stage smoke contract
+
+`backend/evaluation/smoke_contracts.py` owns strict `SmokeStageReceipt`, its six
+summary variants, and `SmokeManifest`; it imports `FileFingerprint`/canonical hashing
+and the pure JSON parser, not executors/browser/app. D39 and D40 import it unchanged.
+
+```python
+class SmokeStageReceipt(BaseModel):
+    schema_version: Literal[1]
+    stage: Literal["legacy_migration", "restore", "all_tools_startup", "stateful_startup", "browser", "ffmpeg"]
+    candidate_id: str
+    git_commit: str
+    freeze_sha256: str
+    materialization_sha256: str
+    runtime_instance_id: str
+    runtime_source_sha256: str
+    outcome: Literal["passed", "failed"]
+    tools: tuple[ToolExecutionBinding, ...]
+    artifacts: tuple[FileFingerprint, ...]
+    summary: Annotated[
+        MigrationSummary | RestoreSummary | AllToolsStartupSummary | StatefulStartupSummary | BrowserSummary | FFmpegSummary,
+        Field(discriminator="stage"),
+    ]
+```
+
+Summary is discriminated by `stage`, not a free-form dictionary; fields below are
+required, extra-forbid and bounded. Each summary's `stage` is the matching single
+Literal; separate AllToolsStartupSummary and StatefulStartupSummary preserve exact
+mode-specific fields without optional omissions.
+`tools` is unique/sorted by role (<=16 entries); `artifacts` unique/sorted lexical
+aliases (1–64 entries). Every artifact has actual complete byte size and streamed
+SHA-256, verified before cleanup; no caller-supplied digest stands for a performed
+stage. Receipts <=64 KiB and smoke manifest <=1 MiB; retained summary JSON files
+<=64 KiB each, screenshots <=4 MiB, transient synthetic media <=32 MiB. The smoke
+producer hashes transient artifacts before disposal; D40 validates the attested typed
+summaries/bindings, not retained raw media or a human-review claim.
+
+| Fixed order / summary fields | Required observation / stage deadline |
+|---|---|
+| `legacy_migration`: `stage`, `from_version`, `to_version`, `integrity_ok`, `foreign_keys_enabled`, `rows_preserved`, `identities_preserved`, `backup_size`, `backup_sha256` | Copy committed synthetic upstream_v0 SQL, new synchronous SQLite connections explicitly execute/read back `PRAGMA foreign_keys=ON` before transactions, actual leased migration 0->1, backup verification and exact logical row/identity preservation; 120 s |
+| `restore`: `stage`, `restored_version`, `integrity_ok`, `foreign_keys_enabled`, `rows_equal`, `identities_equal`, `lease_exclusion_passed` | Actual stopped-app restore and rejected live-app restore, re-open with FK enabled and check exact expected logical state, never require nondeterministic SQLite file bytes to be equal; 120 s |
+| `all_tools_startup`: `stage`, `mode`, `startup_ready`, `health_ok`, `request_completed`, `model_calls`, `index_sha256` | Startup+health 200/ready, one synthetic exact operation via fake loopback chat, mode all_tools, `index_sha256=None`; 180 s |
+| `stateful_startup`: same startup fields plus `profile_sha256`, `embedding_calls`, `retrieval_verified` | Genuine source/profile-bound index, loopback embeddings/chat, explicit readiness and bounded fallback. Require actual verified retrieval/embedding call, not index presence or fallback-only success; complete exact operation; 180 s |
+| `browser`: `stage`, `narrow_width`, `wide_width`, `waiting_ok`, `safe_retry_ok`, `unknown_remote_blocked`, `migration_failed_ok`, `keyboard_ok`, `duplicate_post_count`, `horizontal_overflow`, `playback_ok`, `documentation_checks` | Actual 390/1440 px journeys, Tab/Enter and duplicate action (one POST), no overflow and playback. Fixed automated documentation checks below; 300 s |
+| `ffmpeg`: `stage`, `providers_fake`, `ffmpeg_exit_code`, `ffprobe_exit_code`, `video_present`, `subtitle_present`, `publication_bound`, `duration_ms` | Real FFmpeg/ffprobe through candidate fake-provider generation, present video/subtitle and exact current artifact pointer/size/hash; duration 1–60,000 ms, both exits zero; 300 s |
+
+`SmokeManifest.stage_receipts` follows that exact order. It retains exactly the six
+named hash fields already shown; do not add alternate stage-hash arrays or omit stages.
+For a passed smoke all outcomes/required booleans are true, counts are exact strict
+integers (model calls 0–4; embedding calls 1–4 in stateful), versions/executable hashes
+are present, summary stage/mode agrees, and every candidate/runtime binding equals
+materialization. The producer independently hashes/reopens six receipt files; the
+verifier independently validates the embedded receipts, hashes, schemas, versions,
+and bindings. Missing/malformed/failed receipt fails smoke; a partial failed smoke
+retains only actually completed/failed receipt files, never a fabricated complete
+`SmokeManifest`.
+
+Smoke has its own clean backend extras sync and frontend frozen dev install using
+the same native launch/environment policy; these bootstrap operations are bounded
+600 s each but add no entries to the nine-command final verifier inventory. Stage
+hashes bind the verified bootstrap tool versions too. The immutable runtime and
+original candidate remain untouched throughout. Index generation runs candidate
+`publish_index`/`load_index` in that group's candidate-rooted subprocess, against
+external synthetic assets; no `.env`/tracked source mutation or cloud/weights
+acquisition is permitted. It is a real candidate index format, not a placeholder file.
+
+The exact D35 `scripts/plan_c_demo.py` hardcodes chat/embedding endpoints and the ONNX
+E5 profile in `demo_settings`; environment variables alone cannot override them.
+Current demo/test source is not byte-identical to D35, so do not import current tooling
+copies as candidate proof. Add external internal-entrypoint
+`evaluation/scripts/d39_candidate_smoke.py`, launched by owned sandbox Python `-B`
+through a fixed runpy bootstrap with candidate backend as cwd/import root and no
+external-tool directory on sys.path. It imports candidate modules only in this child.
+Load committed candidate demo functions with `runpy.run_path` from the verified copy;
+call its exact `prepare_storage(directory)`, `exclusive_demo(directory)`,
+`demo_settings(directory, mode, model, index)`, and
+`create_demo_app(settings, frontend)` seams. Before create_demo_app, assign the Settings
+object's explicit synthetic `language_base_url`, `language_retrieval_profile`,
+`language_embedding_base_url`, and `language_retrieval_index`; keep readiness/all-tools
+fallback/reasoning flags as defined by D35. No source-file or `.env` write occurs.
+Use `uvicorn.run(app, host="127.0.0.1", port=owned_port, workers=1, reload=False)`.
+The external controller supplies only fixed mode plus validated owned storage/frontend/
+index/profile paths, loopback URLs and bounded model ID/port, never an arbitrary
+expression, Python import, shell command or case-selected hook. Reject incomplete
+stateful configuration before serving. Build frontend in the smoke group's writable
+copy first, then serve that group's dist path. This bootstrapping seam is synthetic
+configuration evidence, not a claim that the unmodified interactive demo CLI accepts
+new flags or that production ONNX weights were exercised.
+
+Official browser protocol research: <https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/json/browser_protocol.json>
+and <https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/json/js_protocol.json>
+were retrieved with a 2 MiB cap each in the 2026-09-30–2026-10-01 session (schema 1.3).
+Exact HTTP retrieval timestamps were not separately recorded. Browser/Runtime/Input/
+Page documentation pages were also inspected. Attempted official websockets reference
+<https://websockets.readthedocs.io/en/stable/reference/sync/client.html> returned
+HTTPError; installed 16.1.1 signature is the available API evidence, not a fabricated
+successful documentation lookup.
+
+Browser implementation is an external `backend/evaluation/browser_smoke.py` helper
+called only by `evaluation/scripts/d39_smoke.py`, never by the decision process.
+Use already locked/installed `websockets` 16.1.1 (via Uvicorn standard) and
+`websockets.sync.client.connect(uri, proxy=None, compression=None, open_timeout=5,
+close_timeout=5, max_size=2*1024*1024, max_queue=4)` with one connection/reader.
+The installed signature was probed; live websockets documentation retrieval failed,
+so behavior is checked by the later local roundtrip. Launch a user-supplied installed
+native Chrome/Chromium executable under the owned Job Object, bind version/hash,
+use a new group-local profile, loopback debugging address and ephemeral port, and
+poll the bounded `DevToolsActivePort`/`/json/version` and `/json/list` only for this
+owned process (5 s request / 30 s startup). Never attach to a user's browser.
+Recheck its installed `/json/protocol` before driving it. Official CDP master
+browser/js JSON schemas were retrieved in that audit session; they describe required fields,
+not proof of the installed browser version. Use only `Browser.getVersion`,
+`Page.navigate(url)`, `Runtime.evaluate(expression, returnByValue=True,
+awaitPromise=True, timeout=5000)`, `Input.dispatchKeyEvent(type,key,code)`,
+`Emulation.setDeviceMetricsOverride(width,height,deviceScaleFactor=1,mobile=False)`,
+and `Page.captureScreenshot(format="png",captureBeyondViewport=False)`. Reject CDP
+errors, `exceptionDetails`, unexpected IDs, oversized frames/screenshots, and missing
+methods. Fixed repository-owned expressions inspect role/status text, focus, scroll
+width and media readiness; synthetic values are JSON-encoded data, never JS fragments.
+Provider/backend/network counters prove exactly one action POST. The Chrome protocol
+roundtrip is still a **Blocked fact**; it cannot be counted as browser acceptance yet.
+
+Documentation checks in `BrowserSummary.documentation_checks` have exactly keys
+`setup_paths`, `locked_versions`, `mode_commands`, `recovery_codes`,
+`migration_restore`, `limitation_boundary`, all exact booleans true. Fixed inputs are
+pinned `README.md`, `Makefile`, `backend/.env.example`, package manifests/locks,
+`backend/scripts/plan_c_demo.py`, D34/D35 test sources and candidate specification.
+Check those paths/links resolve to inventoried regular files; package versions and
+Python/Node prerequisites agree with locked metadata; both demo-mode choices and
+public seams exist and the external bootstrap produces tested startup; the committed
+D35 API/UI reason/action fixtures pass; committed D34 migration/restore tests pass
+including live-lease rejection; and specification states automated evidence is not
+human acceptance and real held-out execution is external. Record explicit per-key
+pass/fail in the summary. The mode check does not claim environment overrides work
+with demo.main. Each machine check is bounded file/AST/fixture or command evidence,
+not an unstructured prose-review checkbox. Missing/stale claims fail this automated
+gate; no semantic prose review, human operation, or independent review is inferred.
+The pinned D35 README currently says Python 3.13+ and Node 20+, whereas its manifest
+permits Python >=3.12 and locked packages require a stronger Node floor. Thus the
+frozen setup claims are a known failed documentation subcheck for the selected lane.
+Do not silently ignore it, install a different stack to manufacture a pass, or edit
+D35. A fingerprinted candidate-doc correction requires an explicitly authorized
+successor candidate/D36 restart; changing this mandatory gate requires an explicit
+policy/DTD revision, not a coding-agent waiver. Neither action is authorized by this
+audit. Six receipt hashes and automation never supply D40 human/independent review.
 
 ### D40 exact readiness decision
 
@@ -1822,22 +2368,79 @@ lowercase 64-hex SHA-256 before parsing. A missing file, missing/malformed detac
 digest, digest mismatch, non-canonical file, or schema error becomes its own named
 Not-ready blocker.
 
-Before deciding, `python -m evaluation.scripts.attest_release_decision` invokes the
-shared `attest_tool_source()` API to generate and validate canonical
-`decision-tool-attestation.json`. Its exact source allowlist is:
+Before deciding, the separate `python -m evaluation.scripts.attest_release_decision`
+operation validates the actual Git repository root (project root, not `backend/`),
+clean normal index, declared HEAD, and exact committed working bytes, then calls the
+existing keyword-only API unchanged:
 
-```text
-evaluation/release_decision.py
-evaluation/result_contracts.py
-evaluation/result_import.py
-evaluation/release_verification.py
-evaluation/tool_attestation.py
-evaluation/scripts/attest_release_decision.py
-scripts/decide_release_readiness.py
+```python
+attest_tool(
+    repo_root=repo_root, tool_name="d40_release_decision", git_commit=verified_head,
+    source_paths=DECISION_SOURCE_PATHS,
+)
 ```
 
+There is no `attest_tool_source` API. Running from `backend/`, both CLIs use
+`--repo-root ..`. `DECISION_SOURCE_PATHS` is the exact sorted module-owned tuple below;
+paths are project-root-relative and include the existing result/protocol import
+closure (including corpus/fixture and app contract imports), planned IO/parser/runtime
+helpers, pure smoke contracts, and dependency manifests. This is conservative source
+coverage, not a permission to call imported executor/Git/provider functions.
+
+```text
+backend/app/__init__.py
+backend/app/interpretation/__init__.py
+backend/app/interpretation/contracts.py
+backend/app/operations/__init__.py
+backend/app/operations/catalog.py
+backend/app/operations/contracts.py
+backend/app/operations/definitions.json
+backend/app/operations/schema_validation.py
+backend/evaluation/__init__.py
+backend/evaluation/blinded_contracts.py
+backend/evaluation/blinded_io.py
+backend/evaluation/blinded_runtime.py
+backend/evaluation/contracts.py
+backend/evaluation/corpus.py
+backend/evaluation/evidence_json.py
+backend/evaluation/fixtures.py
+backend/evaluation/release_candidate/__init__.py
+backend/evaluation/release_candidate/contracts.py
+backend/evaluation/release_candidate/fingerprints.py
+backend/evaluation/release_candidate/freeze.py
+backend/evaluation/release_decision.py
+backend/evaluation/release_verification.py
+backend/evaluation/result_contracts.py
+backend/evaluation/result_import.py
+backend/evaluation/runtime_materialization.py
+backend/evaluation/scripts/attest_release_decision.py
+backend/evaluation/smoke_contracts.py
+backend/evaluation/tool_attestation.py
+backend/pyproject.toml
+backend/scripts/decide_release_readiness.py
+backend/uv.lock
+```
+
+Planned D38/D39 imports must stay inside that stated graph: import model/hash/reader
+APIs, not the smoke/browser orchestration CLI or runner. The import-closure check
+includes function-local imports and package initializers. If implementation adds a
+behavior-affecting imported helper, update this tuple and DTD before continuing;
+a new unlisted import fails the test. No stale seven-file subset is accepted.
+D39 has the distinct exact 19-path verifier tuple above (including its bootstrap/
+browser/CLIs); D38 has the distinct exact 25-path importer tuple. Neither inherits
+D40's larger closure at runtime or uses an unattested dependency-hash appendix.
+D40 checks fixed upstream tool names `d38_result_importer` and
+`d39_release_verifier`, source inventories and recomputed aggregates before gates.
+
 No glob, directory walk, caller-added path, omission, duplicate, or alternate file is
-permitted. The attestation uses the shared canonical `ToolAttestation` model, sorted
+permitted in decision-source selection. `load_decision_tool_attestation` performs only
+bounded regular-file reads, streaming fixed-path hashes, and shared aggregate
+recomputation. It MUST NOT call `attest_tool`, `validate_git_repository`, or any
+subprocess; committed-root/HEAD cleanliness was proved by the separate attestation
+operation. The declared immutable tooling checkout and trusted parents remain an
+operator assumption at decision time, not a fresh Git assertion. Fixed-source pre/post
+hash equality and detached expected aggregate protect decision bytes, not hostile
+same-user mutation. The attestation uses the shared canonical `ToolAttestation` model, sorted
 POSIX paths, per-file size/SHA-256, and canonical aggregate hash. The attestation CLI
 requires an out-of-band `--expected-sha256` and rejects a malformed or unequal
 expected aggregate before atomically publishing the artifact. The decision CLI then
@@ -1865,9 +2468,11 @@ parses a separately supplied D37 bundle or reconstructs omitted fields. It cross
 - `VerificationManifest.verifier_tool_sha256` to the separately detached and parsed
   D39 verifier source attestation aggregate hash;
 - the D39 command inventory to the exact nine ordered name/argv pairs exactly once,
-  with every exit code zero;
-- the embedded D39 smoke manifest's canonical hash and all six mandatory smoke hashes,
-  plus candidate/commit/freeze/materialization/runtime bindings;
+  with completed outcome, zero exit, exact deadlines/output caps, and honest native
+  executable/launcher hash+version bindings;
+- the embedded D39 smoke manifest's LF-terminated canonical hash, complete six typed
+  receipt bytes/hashes/sizes, summary outcomes/version evidence, and all candidate/
+  commit/freeze/materialization/runtime bindings;
 - D39 secret scan, candidate cleanliness, candidate snapshot equality, runtime
   snapshot equality, and completed cleanup; and
 - every review and limitation candidate ID to D36.
@@ -1918,6 +2523,20 @@ def load_decision_tool_attestation(
     *, repo_root: Path, attestation_path: Path, expected_sha256: str,
 ) -> tuple[ToolAttestation, str]: ...
 
+def load_d38_accepted_evidence(
+    *, accepted_result_path: Path, accepted_result_expected_sha256: str,
+    validation_path: Path, validation_expected_sha256: str,
+    d38_tool_attestation_path: Path, d38_tool_attestation_expected_sha256: str,
+    freeze: FreezeManifest,
+) -> tuple[EvaluationResultBundle, ImportValidation, ToolAttestation, dict[str, str]]: ...
+
+def load_d39_verification_evidence(
+    *, verification_path: Path, verification_expected_sha256: str,
+    verifier_tool_attestation_path: Path,
+    verifier_tool_attestation_expected_sha256: str,
+    freeze: FreezeManifest,
+) -> tuple[VerificationManifest, ToolAttestation, dict[str, str]]: ...
+
 def decide_readiness(
     *, freeze: FreezeManifest, aggregate: EvaluationResultBundle | None,
     import_validation: ImportValidation | None,
@@ -1927,16 +2546,29 @@ def decide_readiness(
     verifier_tool_attestation: ToolAttestation | None,
     d39_input_sha256: dict[str, str],
     human: ReviewEvidence | None, independent: ReviewEvidence | None,
-    limitation_approvals: list[AcceptedNonSafetyLimitation],
+    limitation_approvals: tuple[AcceptedNonSafetyLimitation, ...],
     decision_tool_attestation: ToolAttestation,
 ) -> ReadinessDecision: ...
 ```
 
-`ReadinessDecision.gates`, `blockers`, and `accepted_limitations` are JSON arrays and
-Python `list` values, matching Plan 40's gate, unresolved-item, and limitation lists;
-they are never tuple-typed or serialized from sets. Their deterministic ordering is
+The optional limitations input is one canonical JSON array, parsed explicitly with
+`TypeAdapter(tuple[AcceptedNonSafetyLimitation, ...]).validate_json(..., strict=True)`
+after the shared duplicate/nonfinite/canonical checks; its API value is a Python tuple
+(maximum 256 unique limitation IDs). Strict Python list-to-tuple coercion is not used.
+`ReadinessDecision.gates`, `blockers`, and `accepted_limitations` are output JSON
+arrays and Python `list` values; those output fields are never tuple-typed or
+serialized from sets. Their deterministic ordering is
 fixed by the decision engine: gate-definition order, blocker gate order, and
 `limitation_id` order respectively.
+
+The evidence loaders derive returned input hash maps only from detached-verified
+actual canonical bytes, never sibling hashes or caller claims. The engine compares
+canonical serialization hashes of the supplied models to those maps and the bound
+validation/attestation identities; it accepts successful integrity gates only from
+these loader-produced inputs. Direct synthetic model construction exercises gate
+arithmetic, not real transfer provenance. Likewise decision source identity comes
+only from independently fixed-file rehash plus detached aggregate validation before
+calling the engine, not an arbitrary ToolAttestation/hash argument.
 
 No hash is trimmed or case-normalized. Every content/artifact hash is exact lowercase
 64-hex. Completed review evidence requires an artifact; pending/not-performed must
@@ -2235,6 +2867,11 @@ from reaching readiness equations.
   reason/count/category accounting, and all hashes; all upstream identity/tool bindings; mode/safety
   accounting; evaluator identity/time; atomic accepted triplet;
   and proof that sealed evidence is never opened.
+- **Shared boundary prerequisites:** canonical JSON duplicate/nonfinite/Literal primitive
+  rejection, LF/no-LF hash distinction, strict JSON array/Python tuple behavior,
+  artifact-specific cap+1 rejection before parse, streaming index/blob identity checks,
+  and single-pass finite topology accounting. Blueprint rows are acceptance tests,
+  not claims that this audit ran them.
 - **D39:** separate materialization command/function; read-only verified runtime and
   external writable environments; materialization/smoke candidate-runtime binding;
   exactly one fresh backend sandbox for commands 1–5 with persistent uv state, one
@@ -2284,8 +2921,14 @@ confirming no application or restore process is live. Release/evaluation scripts
 require explicit CLI paths and refuse outputs inside tracked source except ignored
 `release-evidence/`.
 D37 receives model/index settings already documented for D30 and records only
-allowlisted non-secret values. The evaluator supplies held-out corpus, ledgers, and
-output paths directly; `.env` is not modified.
+allowlisted non-secret values. The explicitly paired external synthetic embedding
+profile/base-URL override described above is not an inherited setting or case field;
+missing/invalid pairing fails before a worker. Model configuration currently binds
+only the identifier; independent actual-provider provenance is required before real
+execution. D39 uses the fixed group-local clean environment, version lane and worker
+limits above; missing optional extras, native launcher/build support, or browser
+protocol methods fail instead of falling back. The evaluator supplies corpus, ledgers,
+and output paths directly; `.env` is not modified.
 
 ### Dependency-safe implementation roadmap
 
@@ -2359,7 +3002,19 @@ candidate behavior.
 
 #### Step 7 — D37 canonical protocol, shared schema, and blinded evaluator
 
-First establish the single strict D37-owned D37–D40 result schema. Add separate human
+The single strict D37-owned D37–D40 result/protocol schemas already exist. Do not
+repeat an obsolete RED premise or recreate them. Before D38 implementation, execute
+blueprint orders 1–2: pure canonical parser, streamed index hashing, exact literal
+rejection and single-pass topology accounting, paired external loopback-profile host
+configuration, and new synthetic boundary tests. `evidence_json`/runtime helpers cannot
+import result/protocol/runner/app. Extend only documented optional host/runner parameters,
+keep D24 event meanings and shared model inventories unchanged, and rerun focused D36/D37
+verification after source corrections. Exact pinned-worker integration is prerequisite
+evidence, not implied by stub tests. Commit tooling before source attestation; refresh
+D36 and pin the final tooling boundary before any real run. The original D37 construction
+scope below is retained as context, not an instruction to overwrite existing files.
+
+Establish the single strict D37-owned D37–D40 result schema. Add separate human
 and independent approval hashes, run-protocol hash, D36 trial-tool and D37 evaluator
 hashes, domain-separated opaque case/category tokens, non-empty bounded complete sorted
 protocol case/category sets and exact bindings repeated identically in the bundle, a
@@ -2379,8 +3034,14 @@ synthetic fixtures only. The implementation process never accesses real held-out
 
 #### Step 8 — D38 bound aggregate import
 
-Import the D37 models unchanged. Validate the detached bundle hash before parsing,
-validate exact D37 protocol bytes, bind candidate/freeze/corpus/separate approvals/
+Prerequisites: shared parsing/host corrections and committed D37 schemas; genuine
+synthetic pinned-worker proof remains required before claiming integration acceptance.
+Create `result_import.py`, import CLI and focused synthetic tests; do not modify app,
+candidate or locks. Verify focused D38/D37 tests and Ruff with the existing environment
+without resync. Acceptance: unchanged canonical accepted bytes, exact twenty bool-true
+checks, a no-replace complete accepted triplet and no sealed-data access. Import D37
+models unchanged. Validate detached bundle hash before parsing, validate exact D37
+protocol bytes, bind candidate/freeze/corpus/separate approvals/
 D36 trial tool/D37 evaluator tool and protocol model/index/category/case identities,
 require exact protocol/bundle identity for complete case count/tokens, category
 count/tokens, and case/category bindings, and enforce uniqueness, sortedness,
@@ -2393,7 +3054,16 @@ evidence.
 
 #### Step 9 — D39 isolated exact-candidate verification
 
-Implement the fixed verifier under `evaluation`, never `app`. First expose the
+Prerequisites: fixed shared parser/models and versioned native-launch/environment
+blueprint. Create `smoke_contracts.py`, `runtime_materialization.py`,
+`release_verification.py`, `browser_smoke.py`, internal `d39_candidate_smoke.py`,
+three public D39 CLIs and focused tests in
+that dependency order (pure contracts -> ownership -> owned execution -> smoke ->
+final verifier). Verify focused D39 tests/Ruff first, then blueprint orders 3–6 in
+fresh groups; do not count absent extras, browser or FFmpeg as a pass. Acceptance:
+exact canonical/native nine-command inventory, six fully bound typed receipts,
+tracked-source/candidate invariance, and ownership-verified cleanup. Implement the
+fixed verifier under `evaluation`, never `app`. First expose the
 separate `materialize_candidate_runtime` command/function to create a verified
 read-only tracked-byte copy plus canonical materialization evidence. Put every
 writable environment/cache/output outside it. Bind browser/media smoke to that exact
@@ -2413,8 +3083,16 @@ verifier-only changes require a new verifier hash and complete D39 rerun.
 
 #### Step 10 — D40 detached, cross-bound readiness decision
 
-Require D36; the three D38 artifacts; D39 verification manifest; D39 verifier source
-attestation; generated/validated D40 decision source attestation; human operation;
+Prerequisites: implemented D38 and pure D39 contracts, fixed import closure and a
+committed tooling checkout. Create `release_decision.py`, attestation CLI, decision
+CLI and focused synthetic tests. Verify focused D40/D38/D39 tests and Ruff; ban
+subprocess/network during decision tests. Separate source attestation may use Git;
+the decision operation may not. Acceptance: exact thresholds/bindings, tuple input /
+list outputs, and valid named Not-ready results for all missing mandatory evidence.
+Actual baseline remains Not ready without real independent aggregate and review;
+synthetic success is not release acceptance. Require D36; the three D38 artifacts;
+D39 verification manifest; D39 verifier source attestation; generated/validated D40
+decision source attestation; human operation;
 and independent review. Require detached expected hashes for each D38 and D39 file
 and the detached expected D40 source aggregate before parse/decision, then cross-bind their actual hashes,
 verifier/importer/runner/trial tool hashes, D35 commit/freeze/candidate, protocol,

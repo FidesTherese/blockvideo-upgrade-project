@@ -7,12 +7,12 @@ text or labels.
 
 ## Scope
 
-- Define an attested bundle containing freeze/corpus/protocol fingerprints,
-  included/excluded counts, mode/category aggregates, safety outcomes,
-  unauthorized effects, transport/deadline failures, integrity checks, evaluator
-  role, and execution time.
-- Require the protocol's complete sorted opaque case-token set/count and bundle's
-  a non-empty exact sorted included set plus exact sorted excluded tokens with one
+- Import D37's existing EvaluationResultBundle and EvaluationProtocol unchanged;
+  never define a D38-local bundle. Verify freeze/corpus/protocol and separate approval/
+  tool fingerprints, complete topology, counts, safety/failure outcomes, evaluator
+  identity/time, and exact canonical bytes.
+- Require the protocol's complete sorted opaque case/category token sets/counts and
+  exact one-case/one-category bindings repeated in the bundle, plus a non-empty exact sorted included set plus exact sorted excluded tokens with one
   approved deterministic reason per exclusion; require at least one included token in
   every declared category/mode and accept no raw IDs, text, category names, or labels.
 - Reject mismatched, incomplete, internally inconsistent, altered, or selectively
@@ -22,7 +22,14 @@ text or labels.
   opaque-category accounting, and every bound hash.
 - Preserve failures and exclusions explicitly; never convert missing trials to skips
   or successful non-effects.
-- Store the accepted aggregate alongside its content hash and validation report.
+- Preserve accepted bytes unchanged in a complete no-replace accepted triplet. Require
+  the DTD's exact twenty raw bool-true validation checks, including
+  sealed_evidence_hash_syntax; no extras or omissions.
+- Bind model_configuration_sha256/stateful_index_sha256 through the exact protocol
+  hash and copy those verified values into ImportValidation, never invented bundle
+  fields. Use 64/128 MiB protocol/result pre-parse caps, duplicate/nonfinite/Literal
+  primitive rejection and explicit strict JSON tuple parsing. File hashes include LF;
+  source aggregate does not. Do not open sealed evidence.
 
 ## Non-goals
 

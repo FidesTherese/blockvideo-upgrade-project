@@ -6,7 +6,12 @@
 
 **Architecture:** Strict result models validate canonical counts and identities; an out-of-band SHA-256 authenticates transfer integrity. The importer runs as later external tooling, records its own source attestation separately from candidate behavior, and atomically stores a canonical accepted bundle plus validation record.
 
-**Tech Stack:** Python 3.12, Pydantic 2, canonical JSON/SHA-256, pytest.
+**Tech Stack:** Verified lane Python 3.12.12 / Pydantic 2.13.4, existing canonical
+JSON/SHA-256 and pytest. No app, candidate, dependency or lock changes.
+
+**Prerequisites:** DTD shared strict parser and D37 host/index corrections. D37 result
+and protocol models already exist; import them unchanged. This plan is future work,
+not evidence that D38 has been implemented or integration approved.
 
 ## Global Constraints
 
@@ -63,7 +68,9 @@ cd backend
 python -m uv run pytest tests/test_d38_result_import.py -k contracts -q
 ```
 
-Expected: FAIL because result contracts do not exist.
+D37 result contracts already exist. Positive shared-contract tests may pass immediately;
+new D38 boundary/import tests should fail because that boundary is not implemented,
+not because models are absent. Do not manufacture a RED result by deleting models.
 
 - [ ] **Step 3: Verify and, only if needed, correct the D37 validators**
 
@@ -107,31 +114,58 @@ class ImportValidation(BaseModel):
     freeze_sha256: str
     d36_trial_tool_sha256: str
     d37_evaluator_tool_sha256: str
+    model_configuration_sha256: str
+    stateful_index_sha256: str
     d38_import_tool_sha256: str
     checks: dict[str, Literal[True]]
 
-import_evaluation_result(
+def import_evaluation_result(
     *, bundle_path: Path, expected_sha256: str, freeze_manifest_path: Path,
     protocol_path: Path, d36_trial_tool_attestation_path: Path,
     d37_tool_attestation_path: Path, output_dir: Path, repo_root: Path,
-) -> ImportValidation
+) -> ImportValidation: ...
 ```
 
 CLI:
 
 ```text
-python -m scripts.import_evaluation_result --bundle D:/blockvideo-evaluator/results/result-bundle.json --expected-sha256 8f4d2c6c7b75b9f4f57432db19f92f657340f25da6ebf5f564531f7865b0b46e --freeze-manifest D:/blockvideo-evaluator/freeze-manifest.json --protocol D:/blockvideo-evaluator/results/protocol.json --d36-trial-tool-attestation D:/blockvideo-evaluator/d36-tool-attestation.json --d37-tool-attestation D:/blockvideo-evaluator/results/tool-attestation.json --output ../../blockvideo-upgrade-project/release-evidence/d38
+python -m scripts.import_evaluation_result --bundle D:/blockvideo-evaluator/results/result-bundle.json --expected-sha256 8f4d2c6c7b75b9f4f57432db19f92f657340f25da6ebf5f564531f7865b0b46e --freeze-manifest D:/blockvideo-evaluator/freeze-manifest.json --protocol D:/blockvideo-evaluator/results/protocol.json --d36-trial-tool-attestation D:/blockvideo-evaluator/d36-tool-attestation.json --d37-tool-attestation D:/blockvideo-evaluator/results/tool-attestation.json --repo-root .. --output ../release-evidence/d38
 ```
 
-`ImportValidation.checks` must contain exactly the DTD-defined 19 check names, all
-`true`, with no omitted or extra key.
+`ImportValidation` is frozen/strict/extra-forbid. `checks` must contain exactly these
+DTD-defined twenty names, all raw `type(value) is bool` and `true`, with no omission
+or extra: `bundle_detached_sha256`, `bundle_canonical`, `protocol_canonical`,
+`protocol_sha256`, `candidate_binding`, `corpus_binding`, `approval_bindings`,
+`freeze_binding`, `tool_bindings`, `token_syntax`, `token_unique_sorted`,
+`token_disjoint`, `token_exact_union`, `token_counts`, `topology_identity`,
+`nonempty_coverage`, `exclusion_reasons`, `category_accounting`, `mode_accounting`,
+and `sealed_evidence_hash_syntax`.
+
+The bundle has no direct model/index fields. Its exact `protocol_sha256` commits the
+canonical protocol's `model_configuration_sha256` and `stateful_index_sha256`.
+D38 verifies that chain and copies only those verified protocol values into validation;
+D40 binds the validation's protocol identity back to the accepted bundle. Model hash
+currently pins an identifier, not actual provider weights/configuration.
+
+Read bundle/accepted bytes with the shared 128 MiB cap and protocol with 64 MiB, both
+before parse via cap+1 descriptor reads. Shared strict JSON rejects duplicate keys,
+nonfinite values, raw Literal bool/int coercions, noncanonical spelling and LF drift.
+Use strict JSON parsing for tuple arrays, not `model_validate(json.loads(...))` with
+strict Python lists. Accepted bytes are unchanged; source and accepted bundle hashes
+both equal the detached-verified LF-terminated bytes. Fingerprint-list/configuration
+aggregate hashes omit LF, and source tool aggregate is a different identity.
 
 The hexadecimal value above is a synthetic command example used only with the fixture whose test computes/patches the matching value; real execution uses the independently communicated 64-hex digest.
 
 - [ ] **Step 1: Write RED import tests**
 
-Assert raw bundle bytes match detached SHA-256 before JSON parsing and parse only through D37's exported `EvaluationResultBundle`. Read the supplied D37 `protocol.json` as bounded raw bytes, require canonical decoding through `EvaluationProtocol`, and assert its exact byte SHA-256 equals `bundle.protocol_sha256`. Cross-bind its candidate, corpus, separate human/independent approval, freeze, D36 candidate trial-tool, D37 runner/evaluator-tool, model-configuration, stateful-index, opaque category-token/binding and complete case-token identities to the bundle,
-attestations, exact token partition, and imported accounting. Reject D36 `final_protocol.json`, regenerated equivalent policy bytes that omit run identities, a copied/mutated protocol, non-canonical bytes, symlinks, and a protocol outside the evaluator run output. Assert canonical bundle hash stability and exact candidate, corpus, separate human/independent approval, freeze, D36 trial-tool, and D37 evaluator-tool hash matches. Assert evaluator role/name/time and shared-schema exclusions/category/safety fields are present, the output directory is ignored/untracked and new, and the importer never opens the sealed evidence path even if one exists nearby.
+Assert raw bundle bytes match detached SHA-256 before JSON parsing and parse only through D37's exported `EvaluationResultBundle`. Read the supplied D37 `protocol.json` as bounded raw bytes, require canonical decoding through `EvaluationProtocol`, and assert its exact byte SHA-256 equals `bundle.protocol_sha256`. Cross-bind candidate, corpus, separate approvals, freeze, D36 trial-tool,
+D37 evaluator-tool, and complete opaque topology directly to matching bundle fields;
+verify model/index through the exact protocol-hash chain, never invented bundle
+properties. Enforce the exact token partition/accounting. Reject D36 policy templates,
+regenerated/mutated/noncanonical protocol bytes and links. Require regular
+`protocol.json` beside source `result-bundle.json` in the operator-declared run root;
+this checks placement, not cryptographic proof that a same-byte copy originated there. Assert canonical bundle hash stability and exact candidate, corpus, separate human/independent approval, freeze, D36 trial-tool, and D37 evaluator-tool hash matches. Assert evaluator role/name/time and shared-schema exclusions/category/safety fields are present, the output directory is ignored/untracked and new, and the importer never opens the sealed evidence path even if one exists nearby.
 
 - [ ] **Step 2: Add tamper and accounting rejection tests**
 
@@ -144,9 +178,16 @@ exclusion reason, omitted trial, and injected raw ID/text/label field. Every cas
 
 - [ ] **Step 3: Implement atomic accepted evidence**
 
-Write `accepted-result.json`, `validation.json`, and `d38-tool-attestation.json` through temporary files plus `os.replace()`. `accepted-result.json` is the canonical shared-schema bundle; `validation.json.accepted_bundle_sha256` hashes its exact bytes and records every upstream identity and the exact DTD-defined check-key set covering token
+Build `accepted-result.json`, `validation.json`, and `d38-tool-attestation.json` in a
+new owned staging directory, validate/fsync the complete triplet, and publish the whole
+directory no-replace using the established D36 publication primitive. Reject an
+existing final; never leave a partial accepted triplet or overwrite prior evidence. `accepted-result.json` is the canonical shared-schema bundle; `validation.json.accepted_bundle_sha256` hashes its exact bytes and records every upstream identity and the exact DTD-defined check-key set covering token
 syntax/uniqueness/sorting/disjointness/exact-union/count/non-empty-coverage/typed-
-reason/category and hash checks; `validation.json.d38_import_tool_sha256` equals the canonical `d38-tool-attestation.json.aggregate_sha256`. Attest `result_import.py`, `tool_attestation.py`, and `import_evaluation_result.py`; include the shared D37 `result_contracts.py` hash in dependency evidence without redefining it. Retain D36 trial, D37 evaluator, and D38 importer tool hashes as separate fields so D40 can cross-bind all three artifacts.
+reason/category and hash checks; `validation.json.d38_import_tool_sha256` equals the canonical `d38-tool-attestation.json.aggregate_sha256`. Attest project-root-relative importer/CLI plus the entire DTD-defined shared model,
+parser, IO, freeze-reader and attestation source closure with existing keyword-only
+`attest_tool`. The shared `result_contracts.py`/`blinded_contracts.py` and their corpus/
+fixture/app-contract imports are source-attested dependencies, not a hash-only appendix
+or local schema. D38 must not import the D37 runner, D39 executor, or D40 module. Retain D36 trial, D37 evaluator, and D38 importer tool hashes as separate fields so D40 can cross-bind all three artifacts.
 
 - [ ] **Step 4: Run import tests**
 

@@ -1,371 +1,125 @@
 # D39 Exact-Candidate Verification Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Future implementation only. The 2026-09-30 stack audit changes documentation, not source, candidate, locks or evidence. Use `docs/DTD.md` as the implementation contract and execute its probe prerequisites sequentially before claiming integration acceptance.
 
-**Goal:** Verify the exact clean D35 candidate commit named by the D36 freeze manifest from external verifier tooling and produce content-bound regression, migration, recovery, browser, media, documentation, and secret-scan evidence without changing the candidate.
+**Goal:** Verify immutable D35 `522775516c0797abdb313e3432339a3a444b7ae2` through external tooling, with installation, regression, migration/restore, both-mode, browser/media, automated documentation and secret-scan evidence. No release approval is inferred.
 
-**Architecture:** A separate external materializer validates D36 and creates an exact
-read-only runtime plus canonical materialization evidence. D39 tooling derives exactly
-three fresh external writable sandboxes from independently reverified runtime bytes:
-the smoke producer owns one separate smoke sandbox, while the final verifier owns one
-backend sandbox for commands 1–5 and one frontend sandbox for commands 6–9 and validates
-the bound smoke manifest. Each tool rehashes tracked source throughout its group, runs the fixed
-command allowlist with per-command evidence and all writable state external, proves the original
-candidate unchanged, and cleans runtime/temp state in `finally`. The verifier has its own source attestation; behavior failures require a new D36 freeze, while verifier-only fixes require a new verifier hash and complete evidence rerun.
+**Architecture:** A separate materializer publishes a verified read-only runtime and physical ownership marker. Independently verified runtime bytes seed exactly three fresh writable external groups: backend commands 1–5, frontend commands 6–9, and a separate smoke group. Every group rehashes tracked source before/after each command/stage; runtime and original candidate snapshots remain unchanged. Cleanup removes only owned objects, preserving bounded canonical evidence. `app` never imports evaluation tools; no tool is copied into candidate source.
 
-**Tech Stack:** Python 3.12, subprocess, Git CLI, uv, pnpm 10.18.3, pytest/Ruff/Vitest/Vite/ESLint, SQLite, FFmpeg, browser smoke evidence, canonical JSON/SHA-256.
+**Stack:** Windows 11, Python 3.12.12, uv 0.12.15, Node 24.11.1 (24.x >=24), pnpm exactly 10.18.3, exact D35 manifests/locks, existing pytest/Ruff/Vitest/Vite/ESLint/SQLite/FFmpeg. Optional `dev` and `retrieval` extras are selected explicitly. Browser automation uses an owned installed Chrome/Chromium and the existing locked websockets 16.1.1 CDP transport, not a new candidate dependency.
 
-## Global Constraints
+## Constraints and facts not yet verified
 
-- Follow `docs/plan-c/work-unit-39.md`, the D37 Task 1 shared D37-D40 result-schema boundary in `docs/DTD.md`, and the clarified external-tool sequencing.
-- D39 produces only the separate `VerificationManifest`; it does not consume, redefine, normalize, or fork D37's shared evaluation-result schema. D40 cross-binds D39 evidence independently from the D38-accepted shared-schema bundle.
-- Run only against an isolated clean checkout/worktree whose HEAD equals `FreezeManifest.git_commit`.
-- Verifier code lives under `backend/evaluation`/`backend/evaluation/scripts`; production `app` never imports `evaluation`, and later verifier code is never copied into or imported by the candidate checkout.
-- Candidate and materialized runtime `.venv`, `node_modules`, package-manager caches,
-  build output, databases, media, browser profiles, logs, and writable runtime files
-  are forbidden. Use verifier-owned writable temporary siblings outside both roots;
-  runtime source directories/files remain read-only.
-- Capture candidate tracked and ignored-path snapshots around each execution group and
-  assert equality. Independently rehash runtime bytes/permissions/file types before
-  deriving and after discarding each group. Hash each sandbox's tracked source before
-  execution, after every command or fixed smoke stage, and at group end. Candidate and
-  immutable runtime remain read-only and unchanged. Generated evidence is allowed only
-  in the explicitly external evidence root.
-- Any D39 behavior fix is made on the development branch and creates a new D36 freeze; rerun affected D37/D38/D39 evidence.
-- A verifier/tooling-only fix creates a new D39 tool hash and requires a complete D39 evidence rerun; candidate ID remains unchanged.
-- Synthetic/fake content providers are mandatory; no real user/private data or cloud spend.
-- D39 does not tag, publish, deploy, or decide readiness.
-- Final delivery commit is `[DONE] Mission 39 Verify exact frozen release candidate`.
+- D38 and shared strict parser/host/index prerequisites precede this unit. D39 imports pure shared evidence/smoke contracts, never forks D37 result/protocol models or calls private evaluation.
+- Fresh extras install, native launcher/esbuild availability, browser protocol/ownership roundtrip and exact-D35 real-worker synthetic index integration are pending facts, not passed checks. Pinned README advertises Python 3.13+/Node 20+ rather than the audited lane: the mandatory documentation check has a known blocker. No candidate edit, stack substitution or silent gate waiver is authorized; a successor candidate or explicit policy revision requires separate user scope. Absent runtime support fails rather than silently skipping or downloading weights.
+- Candidate/runtime contain no venv, node_modules, caches, build output, database, media, profile, logs or evidence. All writable state is group-local outside both roots. No candidate source/config/lock mutation, real data or cloud spend.
+- Hard aggregate RAM <=16 GiB, target <=12 GiB; start no nontrivial job at >=14 GiB. One execution group/command at a time. One test/build worker and one NumPy/ONNX thread; never terminate unrelated user processes.
+- Preserve published evidence. A candidate behavior defect requires a new candidate and D36 boundary; a tooling-only correction requires a new source attestation and new evidence/run ID. Final evaluation waits for the final committed tooling closure.
+- This unit cannot tag, push a release, publish, deploy or decide readiness. Future tooling delivery follows the repository workflow; this audit specifically does not push.
 
----
+## Task 1: Pure contracts, materialization and owned execution
 
-### Task 1: Verification contracts, command allowlist, and drift protection
+**Files:** Create `backend/evaluation/smoke_contracts.py`, `runtime_materialization.py`, `release_verification.py`, materialization/verification CLIs under `backend/evaluation/scripts/`, and `backend/tests/test_d39_release_verification.py`. Extend `blinded_runtime.py` only through the DTD `run_owned_command` API. Shared JSON parsing is a prerequisite, not a second parser here.
 
-**Files:**
-- Create: `backend/evaluation/runtime_materialization.py`
-- Create: `backend/evaluation/scripts/materialize_candidate_runtime.py`
-- Create: `backend/evaluation/release_verification.py`
-- Create: `backend/evaluation/scripts/verify_release_candidate.py`
-- Create: `backend/tests/test_d39_release_verification.py`
-
-**Interfaces:**
+**Contracts:** Import DTD `ToolExecutionBinding`, `SmokeStageReceipt`, six discriminated summary variants and `SmokeManifest` from `smoke_contracts`; it never imports executors. `CommandEvidence` and `VerificationManifest` have exactly the fields/types in DTD D39: canonical argv plus native resolved argv/tool bindings, exact deadline/outcome, nullable failed exit, output sizes/hashes, failure-prefix commands, nullable unavailable smoke/final snapshots, and truthful bool cleanup/clean state. Strict/frozen/extra-forbid plus raw primitive guards apply to every new model. RuntimeMaterialization binds candidate/commit/freeze/snapshot, instance, sorted file fingerprints, runtime source aggregate, and `status="materialized"`.
 
 ```python
-D39_REQUIRED_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...]
-
-class CommandEvidence(BaseModel):
-    name: str
-    argv: tuple[str, ...]
-    cwd: str
-    exit_code: int
-    started_at: str
-    finished_at: str
-    stdout_sha256: str
-    stderr_sha256: str
-
-class RuntimeMaterialization(BaseModel):
-    schema_version: Literal[1]
-    candidate_id: str
-    git_commit: str
-    freeze_sha256: str
-    candidate_snapshot_sha256: str
-    runtime_instance_id: str
-    runtime_files: tuple[FileFingerprint, ...]
-    runtime_source_sha256: str
-    status: Literal["materialized"]
-
-class VerificationManifest(BaseModel):
-    schema_version: Literal[1]
-    candidate_id: str
-    git_commit: str
-    freeze_sha256: str
-    verifier_tool_sha256: str
-    status: Literal["passed", "failed"]
-    commands: tuple[CommandEvidence, ...]
-    smoke_manifest_sha256: str
-    smoke_manifest: SmokeManifest
-    secret_scan_passed: bool
-    candidate_clean_before: Literal[True]
-    candidate_clean_after: Literal[True]
-    candidate_snapshot_before_sha256: str
-    candidate_snapshot_after_sha256: str
-    materialization_sha256: str
-    runtime_instance_id: str
-    runtime_source_sha256: str
-    runtime_snapshot_after_sha256: str
-    cleanup_status: Literal["completed", "failed"]
-
-materialize_candidate_runtime(
+def materialize_candidate_runtime(
     *, candidate_root: Path, freeze_manifest_path: Path,
     work_root: Path, output_path: Path,
-) -> RuntimeMaterialization
-cleanup_candidate_runtime(
+) -> RuntimeMaterialization: ...
+
+def cleanup_candidate_runtime(
     *, runtime_root: Path, work_root: Path, materialization_path: Path,
     expected_materialization_sha256: str,
-) -> None
-verify_release_candidate(
+) -> None: ...
+
+def verify_release_candidate(
     *, candidate_root: Path, freeze_manifest_path: Path,
     runtime_root: Path, materialization_path: Path,
     expected_materialization_sha256: str, work_root: Path,
-    cache_root: Path, output_dir: Path, smoke_manifest_path: Path,
-) -> VerificationManifest
+    output_dir: Path, smoke_manifest_path: Path,
+) -> VerificationManifest: ...
 ```
 
-CLI (Git Bash):
+- [ ] Add negative tests before implementation: wrong detached hash before parse, cap+1, link/reparse/special files, changed committed source, extra runtime file, write permission drift, replaced marker/root, output inside candidate/runtime, and cleanup interruption.
+- [ ] Implement exact tracked-byte copy to `<work_root>/runtime-<runtime_instance_id>`, verify complete streamed size/hash inventory and freeze aggregate, then apply/verify readonly modes. No command executes in runtime source.
+- [ ] Create physical <=4 KiB marker beside materialization evidence, bound to instance, directory identity and materialization digest. Follow DTD building/active/cleaning/cleaned transitions. Remove a partial runtime only while ownership remains proven; ownership loss is failed cleanup, never deletion of a replacement.
+- [ ] Reuse the existing trusted stdin gate: assign a kill-on-close Windows Job Object before releasing a byte, no breakaway, or POSIX session/group. No suspended native subsystem. Test early parent exit, pipe-holding descendants, cancellation, floods and assignment failure.
+- [ ] Confirm descendants/readers are gone within 10 s after 1 s drain grace. Fail fast on deadline, output cap, memory pressure, nonzero exit, source drift or unknown teardown. A failed manifest contains only attempted prefix/actual observations; do not fabricate nine entries or successful hashes.
+- [ ] Cleanup verified owned regular files/directories only, clearing Windows readonly bits after identity checks, no junction traversal/ancestor chmod/identity-blind recursive delete. Preserve bounded marker/cleanup receipts. Idempotence requires the same marker/detached binding, not merely an absent path.
 
-```bash
-python -m evaluation.scripts.materialize_candidate_runtime --candidate-root ../../blockvideo-d35-candidate --freeze-manifest "$(find ../release-evidence/d36 -mindepth 2 -maxdepth 2 -name freeze-manifest.json -print -quit)" --work-root D:/blockvideo-verifier/work --output D:/blockvideo-verifier/evidence/d39-materialization/runtime-materialization.json
-python -m evaluation.scripts.verify_release_candidate --candidate-root ../../blockvideo-d35-candidate --freeze-manifest "$(find ../release-evidence/d36 -mindepth 2 -maxdepth 2 -name freeze-manifest.json -print -quit)" --runtime-root D:/blockvideo-verifier/work/runtime-<instance> --materialization D:/blockvideo-verifier/evidence/d39-materialization/runtime-materialization.json --expected-materialization-sha256 <DETACHED_64_HEX_SHA256> --work-root D:/blockvideo-verifier/work --cache-root D:/blockvideo-verifier/cache --output D:/blockvideo-verifier/evidence/d39 --smoke-manifest D:/blockvideo-verifier/evidence/d39-smoke/manual-smoke.json
-```
+## Task 2: Exact nine-command installation and regression inventory
 
-- [ ] **Step 1: Write RED command/drift tests**
-
-Assert the separate materializer verifies the detached candidate commit/fingerprints,
-creates exactly `<work_root>/runtime-<runtime_instance_id>` as a new non-symlink
-runtime, copies only tracked verified
-regular files, rejects special files/escaping links, independently verifies every
-hash/size plus freeze aggregate, emits canonical materialization evidence, and marks
-runtime source read-only. Assert a partial runtime is removed on any failure. Then
-assert only fixed argv tuples run with `shell=False`; no command executes directly in
-that read-only source. Across D39 tooling, create exactly three random non-symlink
-external sandboxes from independently reverified runtime tracked files: the final
-verifier owns one backend group for commands 1–5 and one frontend group for commands
-6–9; the smoke producer owns one separate smoke group. Verify each
-sandbox's tracked-source hash before execution, after every command or fixed smoke
-stage, and at group end. The backend uv environment persists through commands 1–5
-only; frontend `node_modules`, pnpm/npm cache/store, and build state persist through
-commands 6–9 only; smoke reuses neither sandbox. Use sandbox backend/frontend paths as
-cwd and discard each sandbox and all non-evidence state in `finally`. None is the
-candidate or immutable runtime root. Record a full candidate tracked-file hash plus
-ignored/untracked inventory around each group. Each responsible D39 tool verifies the
-detached expected materialization hash before parse, cross-binds candidate/freeze/
-runtime instance/source hash, then independently walks runtime bytes, permissions,
-and file types before deriving and after discarding its group. The final verifier
-repeats the runtime/candidate checks before accepting smoke evidence. Modify a candidate or runtime tracked byte/permission, add a runtime file, or
-create an ignored `.venv`, `node_modules`, cache, DB, media, or runtime file in either
-source root during a fake command and assert `status="failed"` with no subsequent
-commands.
-
-- [ ] **Step 2: Define the exact nine-entry allowlist**
-
-Use exactly these ordered `(name, argv)` entries once each. Entries 1–5 share the
-single fresh backend sandbox in order; entries 6–9 share the single fresh frontend
-sandbox in order. The separate fresh smoke sandbox contributes no command entry:
+`release_verification.D39_REQUIRED_COMMANDS` is the immutable ordered tuple below. A passed result has every entry exactly once, completed outcome, exit zero, exact deadlines and native/tool bindings. Smoke bootstrap is not a tenth entry.
 
 ```text
-backend_uv_sync           ("python", "-m", "uv", "sync", "--frozen")
-backend_import            ("python", "-m", "uv", "run", "python", "-c", "import app.main")
-backend_pytest            ("python", "-m", "uv", "run", "pytest")
-backend_ruff              ("python", "-m", "uv", "run", "ruff", "check", ".")
-backend_d31_d35           ("python", "-m", "uv", "run", "pytest", "tests/test_d31_adversarial_safety.py", "tests/test_d32_concurrency_matrix.py", "tests/test_d33_recovery_matrix.py", "tests/test_d34_migrations.py", "tests/test_d35_startup_recovery_api.py", "-q")
-frontend_pnpm_install     ("npx", "-y", "pnpm@10.18.3", "install", "--frozen-lockfile")
-frontend_test             ("npx", "-y", "pnpm@10.18.3", "test")
+backend_uv_sync           ("python", "-m", "uv", "sync", "--locked", "--extra", "dev", "--extra", "retrieval", "--no-python-downloads", "--no-config")
+backend_import            ("python", "-B", "-c", "import app.main")
+backend_pytest            ("python", "-B", "-m", "pytest")
+backend_ruff              ("python", "-B", "-m", "ruff", "check", ".")
+backend_d31_d35           ("python", "-B", "-m", "pytest", "tests/test_d31_adversarial_safety.py", "tests/test_d32_concurrency_matrix.py", "tests/test_d33_recovery_matrix.py", "tests/test_d34_migrations.py", "tests/test_d35_startup_recovery_api.py", "-q")
+frontend_pnpm_install     ("npx", "-y", "pnpm@10.18.3", "install", "--frozen-lockfile", "--prod=false", "--ignore-scripts")
+frontend_test             ("npx", "-y", "pnpm@10.18.3", "test", "--maxWorkers=1", "--minWorkers=1", "--no-file-parallelism")
 frontend_build            ("npx", "-y", "pnpm@10.18.3", "build")
 frontend_lint             ("npx", "-y", "pnpm@10.18.3", "lint")
 ```
 
-The verifier records one unchanged `CommandEvidence` per command; grouping never
-coalesces command evidence. It records argv as arrays and never accepts an arbitrary
-command from CLI/input JSON. Missing, duplicate, extra, reordered, or name/argv-
-mismatched entries fail verification, and every recorded `exit_code` must equal zero.
+| Command, in order | Deadline seconds |
+|---|---:|
+| backend_uv_sync | 600 |
+| backend_import | 30 |
+| backend_pytest | 1800 |
+| backend_ruff | 120 |
+| backend_d31_d35 | 600 |
+| frontend_pnpm_install | 600 |
+| frontend_test | 600 |
+| frontend_build | 300 |
+| frontend_lint | 180 |
 
-- [ ] **Step 3: Implement bounded execution and evidence hashing**
+- [ ] Prove native bootstrap Python 3.12.12 and its uv 0.12.15 origin/version/hash. Set `UV_PYTHON` to the verified absolute executable, `UV_PROJECT_ENVIRONMENT` and uv cache inside the backend group. Optional extras are not default dev groups; `--locked` rejects stale metadata rather than updating it. Check the created interpreter/base and package origins, including NumPy/ONNXRuntime/tokenizers, before command 2.
+- [ ] Resolve commands 2–5 directly to that sandbox venv Python. No `uv run` resync, global pytest/Ruff fallback or ambient Python imports. Retrieval extras eliminate NumPy-based ONNX unit-test skips; fake loopback runtime embeddings need HTTPX, not optional ONNX wheels, and do not load weights.
+- [ ] Resolve `node.exe` plus installed `npx-cli.js`, run `(node_exe, npx_cli, *canonical_argv[1:])` with `shell=False`, and bind actual pnpm.cjs 10.18.3 hash/version. Never launch .cmd/.bat. Canonical argv and alias-resolved native argv are different evidence fields, not a false assertion they were identical.
+- [ ] Apply the exact DTD group-local env/cache/temp/config policy and low concurrency: uv downloads 2/builds 1/installs 1, pnpm network 2/child 1, Node heap 2048 MiB, Vitest one worker and thread limits one. Strip inherited provider credentials/config/production-only settings; writable generated `.npmrc` is untracked sandbox state, not candidate mutation.
+- [ ] Stream/drain shared stdout+stderr <=2 MiB per command, record complete sizes/hashes without raw content in the manifest, stop subsequent commands on first failure and clean the group in finally.
+- [ ] Check locked native esbuild after ignored-script install before build. Candidate `allowBuilds` is not assumed valid authorization under pinned v10. There is no automatic rebuild, new v12 flag, lock repair or broad dependency script approval. Missing native build capability blocks the lane; a future narrowly authorized v10 change needs a new documented/probed run contract.
+- [ ] Explicit pinned package test/build/lint scripts may internally use a shell; trusted script source and fixed args are the boundary, not a claim of shell-free npm internals.
 
-Limit each stdout/stderr file to 2 MiB, retain exit code/timestamps/hash, use process timeouts fixed per command, and atomically rewrite the verification manifest. Set `UV_PROJECT_ENVIRONMENT`, `UV_CACHE_DIR`, pnpm store/cache, npm cache, temporary
-directory, application storage, browser profile, and build-output variables/arguments
-to the current group's verifier-owned writable execution/temp root outside candidate
-and immutable runtime. In `finally`, call
-`cleanup_candidate_runtime()` to validate the single-use marker, evidence hash, and
-containment, then remove read-only runtime plus environment/cache/temp/browser/DB/
-media roots while preserving bounded evidence. Cleanup is idempotent; cleanup failure
-sets both manifest status and `cleanup_status` to failed. The materializer cleanup CLI
-handles a successful runtime whose verifier never started and refuses unbound or
-out-of-root paths. Attest `evaluation/runtime_materialization.py`,
-`evaluation/release_verification.py`, `evaluation/tool_attestation.py`,
-`evaluation/scripts/materialize_candidate_runtime.py`,
-`evaluation/scripts/d39_smoke.py`, and `evaluation/scripts/verify_release_candidate.py` separately from D36. Atomically emit the canonical attestation as `verifier-tool-attestation.json`; require its `aggregate_sha256` to equal `VerificationManifest.verifier_tool_sha256`. Record the exact D36 freeze-manifest raw-byte SHA-256 as `VerificationManifest.freeze_sha256`. No production `app` module may import any of them.
+## Task 3: Genuine synthetic smoke and six typed receipts
 
-- [ ] **Step 4: Run focused tests**
-
-```bash
-cd backend
-python -m uv run pytest tests/test_d39_release_verification.py -k "command or drift or failure" -q
-python -m uv run ruff check evaluation/runtime_materialization.py evaluation/release_verification.py evaluation/scripts/materialize_candidate_runtime.py evaluation/scripts/verify_release_candidate.py tests/test_d39_release_verification.py
-```
-
-- [ ] **Step 5: Commit Task 1**
-
-```bash
-git add backend/evaluation/runtime_materialization.py backend/evaluation/release_verification.py backend/evaluation/scripts/materialize_candidate_runtime.py backend/evaluation/scripts/verify_release_candidate.py backend/tests/test_d39_release_verification.py
-git commit -m "feat: add exact-candidate verification runner"
-```
-
-### Task 2: Installation, migration, mode, secret, and evidence verification
-
-**Files:**
-- Modify: `backend/evaluation/release_verification.py`
-- Modify: `backend/tests/test_d39_release_verification.py`
-- Create: `backend/evaluation/scripts/d39_smoke.py`
-
-**Interfaces:**
+**Files:** Create `backend/evaluation/browser_smoke.py`, `backend/evaluation/scripts/d39_smoke.py` and internal candidate-rooted bootstrap `backend/evaluation/scripts/d39_candidate_smoke.py`; extend the focused D39 tests. No candidate modules are imported into the external smoke-controller process.
 
 ```python
-class SmokeManifest(BaseModel):
-    schema_version: Literal[1]
-    candidate_id: str
-    git_commit: str
-    freeze_sha256: str
-    materialization_sha256: str
-    runtime_instance_id: str
-    runtime_source_sha256: str
-    legacy_migration_sha256: str
-    restore_sha256: str
-    all_tools_startup_sha256: str
-    stateful_startup_sha256: str
-    browser_sha256: str
-    ffmpeg_sha256: str
-
-run_candidate_smokes(
-    runtime_root: Path, materialization: RuntimeMaterialization, output_dir: Path
-) -> SmokeManifest
-scan_candidate(candidate_root: Path, evidence_root: Path) -> bool
+def run_candidate_smokes(
+    *, candidate_root: Path, freeze_manifest_path: Path,
+    runtime_root: Path, materialization_path: Path,
+    expected_materialization_sha256: str, work_root: Path, output_dir: Path,
+) -> SmokeManifest: ...
 ```
 
-- [ ] **Step 1: Write RED smoke/evidence tests**
+- [ ] Independently verify runtime/candidate, derive a third fresh group, and install its own backend extras/frontend frozen dev state with the same native/environment policy. Do not reuse either command group.
+- [ ] Run exactly six DTD stages in order: legacy_migration (120 s), restore (120 s), all_tools_startup (180 s), stateful_startup (180 s), browser (300 s), ffmpeg (300 s). Enable/read back SQLite foreign_keys on every new synchronous test connection before transactions.
+- [ ] Generate/load a genuine candidate-compatible index through committed candidate load_sources/publish_index/load_index in a candidate-rooted subprocess. Pinned D35 demo_settings hardcodes ONNX profile/endpoints; do not assume env overrides work. The external d39_candidate_smoke bootstrap uses exact verified prepare_storage/exclusive_demo/demo_settings/create_demo_app seams, explicitly sets synthetic chat/profile/embedding/index values before create_demo_app, then runs owned loopback Uvicorn (one worker/no reload). No source/.env mutation, current-demo substitution, arbitrary Python expression, dummy index, fallback-only proof, ONNX weights or provider spend.
+- [ ] Emit <=64 KiB strict discriminated receipt per stage with exact candidate/commit/freeze/materialization/runtime bindings, actual outcome, typed summary, tool executable/launcher versions/hashes and complete artifact sizes/hashes. Stream transient media <=32 MiB and hash before disposal; retain only bounded canonical receipts/summaries and allowed evidence. No arbitrary supplied six hashes stand for performed stages.
+- [ ] `SmokeManifest` retains exactly its six named stage hash fields plus exactly six embedded `stage_receipts` in fixed order. Each named hash is SHA-256 of that receipt's complete LF-terminated canonical bytes. The <=1 MiB complete smoke manifest hashes with LF too. Final verifier independently validates receipt bytes/sizes, summary schemas/results, versions and bindings before embedding it.
+- [ ] Exercise an owned installed native Chrome/Chromium through DTD fixed CDP methods and websockets signature, never attach to a user's browser. Verify installed /json/protocol before automation. Check 390/1440 layouts, waiting/safe-retry/unknown-remote/migration-failed states, actual Tab/Enter, one POST from duplicate action, no overflow and playback. Missing browser/driver/method fails, not skipped acceptance.
+- [ ] Verify the exact six automated documentation checks from DTD BrowserSummary. These prove paths/version/contracts/commands, not semantic human review. Human/independent acceptance remains separate D40 evidence.
+- [ ] Real fake-provider FFmpeg/ffprobe run must bind present video/subtitle and current artifact identities. Scan tracked source and bounded public evidence for secret/private/generated-artifact rules; record only rule IDs/counts, never matched values.
+- [ ] Rehash tracked sandbox after every stage; rehash runtime and candidate after group discard. Failed/partial smoke retains only actual receipts, never a fabricated complete SmokeManifest.
 
-Assert the exact nine ordered command name/argv entries occur once each with zero
-exit codes. Assert clean install/import in an external temporary environment,
-migration of the committed synthetic legacy fixture, backup hash/integrity/restore,
-all-tools and stateful startup health, and exact lowercase 64-hex validation for the
-legacy migration, restore, both startup, browser, and FFmpeg evidence hashes. Cross-bind candidate ID, D35 commit, freeze hash, materialization hash, runtime
-instance, and runtime source hash. Canonicalize and hash the complete `SmokeManifest`,
-embed it in `VerificationManifest`, and require the embedded content's hash to equal
-`smoke_manifest_sha256`. Missing, altered, empty-hash, or differently bound smoke
-evidence fails.
+## Task 4: Integration gate, source lifecycle and delivery
 
-- [ ] **Step 2: Implement candidate-side smoke orchestration externally**
-
-`evaluation/scripts/d39_smoke.py` consumes the already materialized runtime and
-record; it never materializes or mutates source. After an independent runtime recheck,
-it invokes only committed candidate CLIs/tests in subprocesses from the third fresh
-runtime-derived writable sandbox and writes to external evidence. It does not reuse
-backend/frontend installed state, contributes no entry to `D39_REQUIRED_COMMANDS`,
-verifies tracked source before/after each fixed smoke stage, and discards the sandbox. It starts each D30 demo mode on loopback with external synthetic storage and browser profile, polls `/api/startup` and `/api/health`, records fixed response fields, then terminates it cleanly. It invokes real FFmpeg with fake providers through the existing synthetic test path. It never imports candidate modules into the verifier process.
-
-- [ ] **Step 3: Implement secret/private/generated-artifact scanning**
-
-Scan tracked candidate bytes and D39 evidence for known environment key names, credential patterns, `.env`, DB/media/model/cache/runtime artifacts, and private absolute path prefixes. Record rule ID/count only; never record matched values. Reject files exceeding the documented evidence size bounds.
-
-- [ ] **Step 4: Run full verifier tests**
+Examples below are future commands from `backend/` with operator-supplied paths/detached digest, not commands executed in the design audit. Paths name new external owned work/evidence roots. Do not discover or normalize real evaluator evidence.
 
 ```bash
-cd backend
-python -m uv run pytest tests/test_d39_release_verification.py -q
-python -m uv run ruff check evaluation/runtime_materialization.py evaluation/release_verification.py evaluation/scripts/materialize_candidate_runtime.py evaluation/scripts/verify_release_candidate.py evaluation/scripts/d39_smoke.py tests/test_d39_release_verification.py
+python -m evaluation.scripts.materialize_candidate_runtime --candidate-root "$CANDIDATE_ROOT" --freeze-manifest "$FREEZE_PATH" --work-root "$WORK_ROOT" --output "$MATERIALIZATION_PATH"
+python -m evaluation.scripts.d39_smoke --candidate-root "$CANDIDATE_ROOT" --freeze-manifest "$FREEZE_PATH" --runtime-root "$RUNTIME_ROOT" --materialization "$MATERIALIZATION_PATH" --expected-materialization-sha256 "$MATERIALIZATION_SHA256" --work-root "$WORK_ROOT" --output "$SMOKE_OUTPUT"
+python -m evaluation.scripts.verify_release_candidate --candidate-root "$CANDIDATE_ROOT" --freeze-manifest "$FREEZE_PATH" --runtime-root "$RUNTIME_ROOT" --materialization "$MATERIALIZATION_PATH" --expected-materialization-sha256 "$MATERIALIZATION_SHA256" --work-root "$WORK_ROOT" --output "$VERIFICATION_OUTPUT" --smoke-manifest "$SMOKE_MANIFEST_PATH"
 ```
 
-- [ ] **Step 5: Commit Task 2**
-
-```bash
-git add backend/evaluation/runtime_materialization.py backend/evaluation/release_verification.py backend/evaluation/scripts/materialize_candidate_runtime.py backend/evaluation/scripts/verify_release_candidate.py backend/evaluation/scripts/d39_smoke.py backend/tests/test_d39_release_verification.py
-git commit -m "feat: verify D39 smoke and evidence integrity"
-```
-
-### Task 3: Browser/media manifest and exact D36 run
-
-**Files:**
-- Create outside every repository during execution: `D:/blockvideo-verifier/evidence/d39-materialization/runtime-materialization.json`
-- Create outside every repository during execution: `D:/blockvideo-verifier/evidence/d39-smoke/manual-smoke.json`
-- Create outside every repository during execution: `D:/blockvideo-verifier/evidence/d39/verification-manifest.json`
-- Create outside every repository during execution: `D:/blockvideo-verifier/evidence/d39/verifier-tool-attestation.json`
-
-**Interfaces:**
-- Materialization evidence binds exact candidate/freeze bytes to one read-only runtime
-  instance. Manual/smoke manifest binds that same materialization/runtime and
-  references hashed bounded evidence for both modes, recovery UI journey, one real
-  FFmpeg fake-provider MP4, migration/restore, and documentation review.
-- No file path in canonical evidence is absolute; aliases are `candidate`, `tooling`, and `evidence`.
-
-- [ ] **Step 1: Recreate or verify the detached candidate checkout**
-
-```bash
-python -c "import json,pathlib,subprocess; manifests=list(pathlib.Path('release-evidence/d36').glob('*/freeze-manifest.json')); assert len(manifests)==1; m=json.loads(manifests[0].read_text()); p=pathlib.Path('../blockvideo-d35-candidate'); subprocess.run(['git','worktree','add','--detach',str(p),m['git_commit']],check=True) if not p.exists() else None; assert subprocess.check_output(['git','-C',str(p),'rev-parse','HEAD'],text=True).strip()==m['git_commit']; assert not subprocess.check_output(['git','-C',str(p),'status','--porcelain'],text=True).strip(); assert not subprocess.check_output(['git','-C',str(p),'status','--ignored','--porcelain'],text=True).strip()"
-```
-
-- [ ] **Step 2: Materialize the candidate runtime and detach its evidence hash**
-
-Run `evaluation.scripts.materialize_candidate_runtime` into new external work/evidence
-roots. Compute the canonical materialization file's SHA-256 through a separate
-operator channel, verify runtime source is read-only and exactly matches D36, and use
-that detached digest for smoke/final verification. If materialization fails, assert no
-partial runtime remains.
-
-- [ ] **Step 3: Produce bounded synthetic browser/media evidence**
-
-Exercise all-tools and stateful startup, D35 waiting/safe-retry/unknown/migration-failed states, keyboard flow, 390 px layout, and playback of a real FFmpeg MP4 generated with fake providers. Independently reverify the exact materialized runtime, derive the separate fresh smoke sandbox, rehash its tracked source before/after every fixed smoke stage, discard it, and save evidence only under
-`D:/blockvideo-verifier/evidence/d39-smoke/`; create canonical `manual-smoke.json`
-containing candidate ID, commit, freeze hash, materialization hash, runtime instance,
-runtime source hash, evidence SHA-256/size, environment versions, and explicit
-pass/fail values. Recheck the candidate tracked/ignored snapshot after browser and media work.
-
-- [ ] **Step 4: Run the external verifier**
-
-```bash
-cd backend
-python -m uv run python -m evaluation.scripts.verify_release_candidate --candidate-root ../../blockvideo-d35-candidate --freeze-manifest "$(find ../release-evidence/d36 -mindepth 2 -maxdepth 2 -name freeze-manifest.json -print -quit)" --runtime-root D:/blockvideo-verifier/work/runtime-<instance> --materialization D:/blockvideo-verifier/evidence/d39-materialization/runtime-materialization.json --expected-materialization-sha256 <DETACHED_64_HEX_SHA256> --work-root D:/blockvideo-verifier/work --cache-root D:/blockvideo-verifier/cache --output D:/blockvideo-verifier/evidence/d39 --smoke-manifest D:/blockvideo-verifier/evidence/d39-smoke/manual-smoke.json
-cd ..
-git -C ../blockvideo-d35-candidate status --porcelain
-git -C ../blockvideo-d35-candidate status --ignored --porcelain
-```
-
-Both final candidate status outputs must match their recorded pre-run snapshots
-exactly. The verification manifest must record the exact nine command entries once each with
-zero exits, embedded smoke content/hash and six mandatory smoke hashes, matching
-materialization/runtime hashes, `secret_scan_passed is true`, both clean flags true,
-`candidate_snapshot_before_sha256 == candidate_snapshot_after_sha256`,
-`runtime_snapshot_after_sha256 == runtime_source_sha256`, and
-`cleanup_status="completed"`; the runtime and all non-evidence temp roots must no
-longer exist after verifier exit, and the verifier's final pre-cleanup runtime byte
-snapshot must match. Candidate status remains normally empty; the worktree's `.git`
-administrative file is outside status output. No `.venv`, `node_modules`, cache, build, DB, media, browser, log, or runtime artifact may exist in the candidate. A failing candidate command is not repaired in this checkout.
-
-- [ ] **Step 5: Classify failures exactly**
-
-If failure is candidate behavior, stop and return to D36 with a new candidate; invalidate/rerun affected D37-D39 evidence. If failure is only verifier code, update tooling, ensure a new verifier attestation hash, delete no prior evidence, and run D39 again into a new evidence directory.
-
-### Task 4: Documentation reconciliation and D39 gate
-
-**Files:**
-- Create: `docs/plan-c/work-report-39.md`
-- Modify: `docs/plan-c/handoff.md`
-- Modify: `docs/DTD.md`, `specification.md`, and `docs/modules/operation-core.md` only on the tooling branch; any candidate-behavior documentation change requires a new D36 freeze if fingerprinted
-
-**Interfaces:**
-- Report candidate ID/commit, D36 freeze hash, verification-manifest hash, verifier source-attestation hash, every command/evidence hash/status, skipped environment check, and failure classification.
-
-- [ ] **Step 1: Verify later tooling itself**
-
-```bash
-cd backend && python -m uv run pytest tests/test_d39_release_verification.py tests/test_d38_result_import.py tests/test_d37_blinded_runner.py -q
-cd backend && python -m uv run ruff check .
-```
-
-- [ ] **Step 2: Reconcile documentation and inspect outputs**
-
-```bash
-git status --short
-git diff --check
-git ls-files .env storage release-evidence
-```
-
-Do not edit the D36 worktree. Record whether candidate verification passed; do not infer release readiness.
-
-- [ ] **Step 3: Commit and push the verifier tooling task**
-
-```bash
-git add backend docs/plan-c/work-report-39.md docs/plan-c/handoff.md docs/DTD.md specification.md docs/modules/operation-core.md
-git commit -m "[DONE] Mission 39 Verify exact frozen release candidate"
-git push
-```
-
-Do not tag, publish, deploy, create a GitHub release, or start D40 with missing mandatory D39 evidence.
+- [ ] Run focused synthetic D39 tests/Ruff first, then DTD native/fresh-install/pinned-worker probes sequentially. Full repository checks are future implementation verification, not counted as run by this audit.
+- [ ] Before real verification, commit all attested tooling and validate actual project Git root/HEAD/clean source bytes. D39 source attestation covers every imported behavior-affecting helper plus materialization/verify/smoke/browser/internal candidate bootstrap code and dependency manifests. It is distinct from D36/D37/D38 source hashes and candidate identity.
+- [ ] Passed verification requires the exact full nine inventory/native bindings, six fully validated receipts, secret scan true, actual clean/snapshot equality, runtime/source equality and completed marker-bound cleanup. A failed run records truthful prefix/nulls and fixed reasons, never synthetic success to fit a model.
+- [ ] Final verification cleans runtime in finally; if verifier never starts, the operator invokes the same dedicated cleanup CLI with the bound materialization record. Do not delete previous evidence, candidate data or unrelated roots.
+- [ ] Update work-report-39/handoff and affected module notes only during implementation. Distinguish automated results, blocked facts and pending reviews. Real D37 evaluation is deferred until final D38–D40 source closure is committed/pinned and D36 refreshed.
+- [ ] Inspect for secrets/generated/private data and deliver tooling under `[DONE] Mission 39 Verify exact frozen release candidate` only after that later task's verification. This plan/audit does not implement, generate evidence or push.

@@ -2,7 +2,8 @@
 
 ## Goal
 
-Verify the exact D36 candidate as a clean, reproducible local release candidate.
+Verify immutable D35 named by D36 as a clean, reproducible local release candidate.
+This future unit's acceptance is not established by the docs-only stack audit.
 
 ## Scope
 
@@ -14,23 +15,42 @@ Verify the exact D36 candidate as a clean, reproducible local release candidate.
   D31–D35 commands, one frontend sandbox for ordered pnpm install/test/build/lint, and
   one separate smoke sandbox. Backend dependency state persists only through its group;
   frontend `node_modules` persists only from install through lint in its group.
-- Test clean installation plus supported legacy migration, backup, and restoration.
+- Test fresh installation with Python 3.12.12 / uv 0.12.15, explicit optional dev and
+  retrieval extras under --locked, then direct sandbox Python without resync/global
+  fallback. Node 24.11.1 (24.x >=24) and pnpm exactly 10.18.3 use native node+npx-cli
+  with frozen dev install and ignored dependency scripts, not .cmd or newer flags.
+  Record canonical vs native argv and actual executable/launcher hashes+versions.
+- Test supported legacy migration/backup/restore with foreign_keys enabled/read back
+  on every new synchronous SQLite test connection before transactions.
 - Reproduce All Tools and stateful modes from documented commands.
 - Run bounded browser journeys and real FFmpeg with synthetic/fake content providers.
 - Check committed files and generated evidence for secrets, private data, and
   accidental large/runtime artifacts.
 - Record exactly nine fixed command name/argv entries once each, in the DTD-defined
   order, and require every exit code to be zero.
-- Bind a canonical smoke manifest and its hash to candidate, freeze, materialization
-  hash, runtime instance, and runtime byte hash. Require non-empty lowercase 64-hex
-  hashes for legacy migration, restore, All Tools startup, stateful startup, browser,
-  and FFmpeg; embed the smoke content/hash in `VerificationManifest` for D40.
+- Bind a canonical smoke manifest to candidate/freeze/materialization/runtime. Keep
+  exactly six named stage hashes, each binding complete LF-terminated canonical bytes
+  of an embedded typed receipt: migration, restore, All Tools, stateful, browser,
+  FFmpeg in DTD order. Require actual outcomes, versions and artifact hashes/sizes;
+  six arbitrary strings are not evidence. Stateful uses a genuine candidate-format
+  synthetic index and fake loopback profile/adapters, not dummy index/fallback proof.
+  Embed complete smoke content/hash for D40; automated docs checks are not human review.
+  Pinned demo profile/endpoints are hardcoded: use the DTD external candidate-rooted
+  bootstrap/public seams, not environment-only overrides or current-demo substitution.
+  Pinned README stack claims are a known documentation-gate blocker; no silent waiver
+  or candidate modification is authorized by this audit.
 - Require the responsible D39 tool to rehash immutable runtime bytes before deriving
   and after discarding each group, rehash every sandbox's tracked source before/after
   each command or smoke stage, and prove candidate/runtime remain read-only and
   unchanged. The final verifier repeats those checks before accepting smoke evidence.
-- Clean partial materializations on failure and remove runtime/temp environments in
-  verifier `finally`; preserve bounded evidence and fail closed on cleanup failure.
+- Bind physical single-use ownership markers and cleanup state; remove only owned
+  partial/runtime/temp objects in finally, clear Windows readonly bits only after
+  identity checks, never traverse links/junctions or delete a replacement. Preserve
+  bounded evidence; unknown ownership/teardown/cleanup fails. Failed manifests retain
+  attempted prefixes and null absent observations, not manufactured passed fields.
+- Enforce DTD per-command/stage deadlines, shared 2 MiB child output cap, gated Job
+  Objects/confirmed descendant teardown, group-local caches/env/temp and one worker.
+  Sequential aggregate RAM <=16 GiB, target <=12; no new nontrivial job at >=14.
 - Reconcile setup, operations, recovery, migration, limitations, and evaluation
   documentation with the frozen implementation.
 

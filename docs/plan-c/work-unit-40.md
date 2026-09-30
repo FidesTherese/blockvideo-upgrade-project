@@ -10,8 +10,10 @@ Produce an evidence-based release-readiness decision without publishing or deplo
 - D38 independently produced, validated aggregate;
 - D39 regression, migration, recovery, browser, media, and documentation
   `VerificationManifest`, plus the separately attested verifier source;
-- generated canonical `decision-tool-attestation.json` for the exact decision/
-  contracts/CLI source allowlist and its detached expected aggregate SHA-256;
+- separately generated canonical decision-tool-attestation.json from existing
+  keyword-only attest_tool, actual clean committed project root and the DTD fixed
+  complete imported source closure (backend/... paths), plus detached expected
+  aggregate SHA-256. From backend both CLIs use --repo-root ..;
 - accurately recorded human-operation and independent-review status.
 
 ## Mandatory gates
@@ -25,8 +27,10 @@ Produce an evidence-based release-readiness decision without publishing or deplo
    expected SHA-256; D39 candidate/commit/freeze identity matches D36 and its verifier
    tool hash matches the verifier attestation.
 4. Independently validate D39: exactly the DTD-defined nine command name/argv pairs
-   occur once each with exit code zero; all six mandatory smoke hashes are valid and
-   content-bound; secret scan and clean-before/after are true; cleanup completed;
+   occur once each with completed outcome, exit zero, exact deadlines/output caps,
+   and native executable/launcher version/hash bindings; all six typed stage receipts
+   have valid canonical bytes/hashes/sizes, outcomes and bindings, not merely arbitrary
+   hash strings; secret scan and clean-before/after are true; cleanup completed;
    candidate snapshots match; runtime final/source hashes match; and all D36,
    materialization, smoke, and verifier identities bind.
 5. Before any decision, the D40 decision source attestation is generated and
@@ -56,5 +60,16 @@ Conditionally ready for explicitly accepted non-safety limitations, or Not ready
 
 ## Non-goals and acceptance
 
-D40 creates a reviewable decision record and unresolved-item list. It does not tag,
-publish, deploy, create a GitHub release, or claim readiness when evidence is missing.
+D40 decision execution only performs bounded local reads/fixed streaming hashes and
+writes decision outputs; separate source attestation may use Git, but decision may
+not invoke Git/network/subprocess, even through imported helpers. Shared parsing
+rejects duplicate/nonfinite/coercible primitives and noncanonical LF bytes; bundle
+reader cap is 128 MiB. Optional limitation input is a Python tuple / JSON array;
+output gates/blockers/accepted limitations are deterministic Python lists / JSON arrays.
+No caller hash substitutes for independently loaded/validated bytes.
+
+Actual readiness stays Not ready without real independent aggregate and required
+human/independent review. Final tooling must be committed/pinned and D36 refreshed
+before real evaluation; source mismatch requires new evidence/run ID, never in-place
+normalization. This audit creates no decision/evidence. D40 does not tag, publish,
+deploy, create a GitHub release, or infer readiness from synthetic automation.

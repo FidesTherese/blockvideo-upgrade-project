@@ -9,7 +9,8 @@ process or allowing mode-specific test conditions.
 
 - Accept a separately mounted corpus and approval ledger at execution time.
 - Validate corpus, approval, protocol, and D36 freeze fingerprints before running.
-- Isolate database and media state per source-request group.
+- Each source-request group owns its output root; each case/mode receives fresh DB/
+  media state below it, without mutable state leaking to sibling paraphrases.
 - Execute frozen All Tools and stateful-retrieval modes with identical limits.
 - Score persisted receipts/effects and expected state, not model prose. Require the
   exact accepted proposal tuple or exact clarification missing-field set. Require exact
@@ -42,7 +43,16 @@ process or allowing mode-specific test conditions.
   without logging request text or labels. Exclude designated public outputs from the
   detailed-evidence seal only at the run root; nested files with the same basename are
   sealed private evidence.
-- Test runner behavior only with repository-owned synthetic fixtures.
+- Test runner behavior only with repository-owned synthetic fixtures. Existing stub
+  E2E tests do not prove exact-D35 stateful execution. Follow the DTD ordered blueprint:
+  strict canonical/literal parser, 64/128 MiB caps, streamed index hashing, and the
+  paired external loopback-profile host/runner prerequisite before a real candidate-
+  rooted synthetic index/chat/embeddings roundtrip. No dummy index or weights download.
+- Keep protocol/result model inventories unchanged. Bundle protocol_sha256 commits
+  the protocol's model/index hashes; model_configuration_sha256 currently pins only
+  the identifier, not provider weights. Require independent provenance before real
+  evaluation, after final D38–D40 tooling is committed/pinned and D36 refreshed.
+  New source mismatch means a new evidence/run ID, never in-place regeneration.
 
 ## Non-goals
 
@@ -62,7 +72,11 @@ snapshot and execution across checkout replacement without touching replacement 
 non-link writable directory enforcement,
 bounded output, early-parent inherited-pipe descendant termination, cancellation with
 bounded confirmed teardown, and token-key zeroization after final-`fstat` and close
-faults as well as normal exit. They also prove rejection of secondary-project mutation,
+faults as well as normal exit. Shared JSON rejects duplicate/nonfinite/raw Literal
+primitive coercions without normalization; durable hashes include LF and source
+aggregates do not. Native integration facts and independent final-fix acceptance
+remain pending until the specified verification; this docs-only audit establishes
+no new runtime acceptance. They also prove rejection of secondary-project mutation,
 primary unrelated-field mutation, project insertion/deletion, unapproved, selectively
 filtered, duplicate, zero-coverage, or mismatched input. Every repository-owned
 synthetic/development revision race uses `initial + 1`; a nonconforming mounted
