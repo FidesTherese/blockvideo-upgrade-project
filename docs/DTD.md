@@ -1080,8 +1080,12 @@ represented by a null file identity. Project entries are ordered by `id`.
 History entries contain only `project_id`, `revision`, `settings_sha256`, sorted
 `changed_fields`, and `restored_from_revision`, ordered by `(project_id, revision)`.
 Job entries contain only `id`, `project_id`, `status`, bounded `current_stage`,
-`input_revision`, `cancel_requested`, `kind`, `block_index`, and `parent_job_id`,
-ordered by `id`. Artifact entries contain only `id`, `project_id`, `job_id`,
+bounded numeric `progress` and `stage_progress`, `input_revision`,
+`cancel_requested`, `kind`, `block_index`, `parent_job_id`, nullable lowercase
+SHA-256 `input_fingerprint`, and required lowercase SHA-256 identities for the
+canonical input snapshot, plan, recovery message, and error message, ordered by
+`id`. The four required identities hash canonical values even when the underlying
+value is null; only `input_fingerprint` projects null directly. Artifact entries contain only `id`, `project_id`, `job_id`,
 `revision`, `input_fingerprint`, `video_path_sha256`, optional `video_size`, optional
 `video_sha256`, optional `subtitle_path_sha256`, optional `subtitle_size`, optional
 `subtitle_sha256`, and `manifest_sha256`, ordered by `id`. The video path hash is
@@ -1396,10 +1400,15 @@ subset result. Normal trials add exactly one language request and one turn;
 receipt additions preserve every prior receipt. External calls permit no change.
 It reconstructs the expected primary-project status, the exact history sequence and
 settings/changed-field/restore identities, and the expected job set from the D24
-contract. It also requires the observed proposal tuple to equal one accepted
-`(operation_id, operation_version, arguments_sha256, generate_after_save)` tuple,
-requires the prepared request's `generation_requested` to remain false, and compares
-the clarification tuple with the exact expected `question_for` set. `_event_check()`
+contract. It also validates the primary response through the same strict response
+helper used for event responses: HTTP must be 2xx for a declared application outcome;
+status, `executed`, and `requires_confirmation` must match that outcome; an operation
+must match one exact `(operation_id, operation_version, arguments_sha256,
+generate_after_save)` tuple with prepared `generation_requested=false`; a
+clarification must match the exact canonical `question_for` fields; and all other
+interpretations must carry neither operation nor clarification details. `reason_code`
+is required only for `blocked` and absent for every other declared primary outcome.
+`_event_check()`
 rejects every nested failure class. Idempotent replay requires unchanged state and an
 exact byte-for-byte projected 2xx `completed`/`ready` response. Same-ID conflict
 requires unchanged state and exactly 409/`http_error`/`request_id_conflict`, with
@@ -1417,8 +1426,11 @@ and job identity must be present unchanged except for
 the specifically asserted cancellation transition; `final.job_assertions` are checked
 against the selected redacted job, including count/new-ID/parent/revision/status and
 cancel flags. An asserted input-settings object is accepted only when it equals the
-fully reconstructed settings for the observed `input_revision`. Cancellation must
-change only its asserted job. Every before-artifact tuple must remain an exact subset
+fully reconstructed settings for the observed `input_revision`. Cancellation may
+change only the asserted job's exact `status` and `cancel_requested` fields; current
+production cancellation does not change job `current_stage`, `progress`, or any
+fingerprint/hash projection. Every other field on that job and every field on every
+non-target job must remain byte-for-byte/value-for-value equal. Every before-artifact tuple must remain an exact subset
 of the after tuple. `preserve_all_no_new_publication` permits no added artifact.
 Under `job_may_publish_on_success`, the artifact count delta MUST be zero or one. A
 zero delta permits no change to `current_artifact_id`, `output_video`, or
@@ -2082,8 +2094,11 @@ from reaching readiness equations.
   explicit non-negative finite bounds for every category/mode count; bool, negative,
   oversized, denominator-exceeding, sum-overflow, and equation rejection; canonical
   opaque receipt/request/turn preservation under additions; same-count replacement and
-  prior-receipt mutation rejection; strict direct-call event parsing; nested failure,
-  wrong replay/conflict/confirmation status, execution and proposal rejection;
+  prior-receipt mutation rejection; strict direct-call event parsing; primary
+  500-with-completed, false-executed, and stray-reason rejection; nested failure,
+  wrong replay/conflict/confirmation status, execution and proposal rejection; full
+  bounded job progress/fingerprint/snapshot/plan/recovery/error projection and
+  cancellation-only mutation enforcement;
   switch-target response binding; confirmation state-hash and duplicate-response
   binding; partial resume; mismatch rejection; and output redaction.
 - **D38:** raw detached bundle hash before parse; exact protocol bytes; shared-schema

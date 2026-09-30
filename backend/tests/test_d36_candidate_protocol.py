@@ -1075,6 +1075,19 @@ def test_maximum_valid_seed_produces_valid_real_worker_observation(tmp_path: Pat
     assert observation.before.artifact_count == 64
     assert len(observation.before.history_entries) == 32
     assert len(observation.before.job_entries) == 32
+    first_job = observation.before.job_entries[0]
+    assert first_job.progress == first_job.stage_progress == 0.0
+    assert first_job.input_fingerprint is not None
+    assert len(first_job.input_fingerprint) == 64
+    assert all(
+        len(getattr(first_job, field)) == 64
+        for field in (
+            "input_snapshot_sha256",
+            "plan_sha256",
+            "recovery_sha256",
+            "error_sha256",
+        )
+    )
     assert len(observation.before.artifact_entries) == 64
     assert observation.before.receipt_count == observation.before.external_call_count == 32
     assert observation.before.language_request_count == observation.before.language_turn_count == 8
@@ -1714,6 +1727,50 @@ def test_redacted_response_requires_exact_operation_and_clarification_shapes() -
         invalid = {**clarification, "clarification_missing_fields": missing_fields}
         with pytest.raises(ValidationError, match="clarification|missing fields"):
             trial_host.RedactedResponse.model_validate(invalid)
+
+
+def test_redacted_job_entry_carries_every_nonvolatile_mutable_identity() -> None:
+    value = {
+        "id": 7,
+        "project_id": 1,
+        "status": "running",
+        "current_stage": "render",
+        "progress": 0.25,
+        "stage_progress": 0.5,
+        "input_revision": 3,
+        "cancel_requested": False,
+        "kind": "full",
+        "block_index": None,
+        "parent_job_id": None,
+        "input_fingerprint": "1" * 64,
+        "input_snapshot_sha256": "2" * 64,
+        "plan_sha256": "3" * 64,
+        "recovery_sha256": "4" * 64,
+        "error_sha256": "5" * 64,
+    }
+
+    entry = trial_host.RedactedJobEntry.model_validate(value)
+
+    assert entry.progress == 0.25
+    assert entry.stage_progress == 0.5
+    assert entry.input_fingerprint == "1" * 64
+    for field, invalid_value in (
+        ("progress", -0.01),
+        ("progress", True),
+        ("stage_progress", 1.01),
+        ("stage_progress", "0.5"),
+        ("input_fingerprint", "not-a-hash"),
+        ("input_snapshot_sha256", None),
+        ("plan_sha256", "A" * 64),
+        ("recovery_sha256", 1),
+        ("error_sha256", "5" * 63),
+    ):
+        invalid = {**value, field: invalid_value}
+        with pytest.raises(ValidationError):
+            trial_host.RedactedJobEntry.model_validate(invalid)
+
+    nullable_fingerprint = {**value, "input_fingerprint": None}
+    assert trial_host.RedactedJobEntry.model_validate(nullable_fingerprint).input_fingerprint is None
 
 
 def test_redacted_artifact_entry_carries_complete_file_content_identities() -> None:

@@ -214,7 +214,9 @@ while preserving their equality relationships. Public observations contain only 
 enums, actual per-event HTTP/status/reason projections, fixed failure classes,
 counts/flags, deterministic redacted hashes, canonical sorted bounded project/history/job/artifact
 identity projections needed for persisted-effect scoring, and the pre/post-equal candidate
-snapshot hash. File identities bind the SHA-256 of the canonical stored relative path
+snapshot hash. Job projections include bounded overall/stage progress, nullable input
+fingerprint, and canonical hashes of input snapshot, plan, recovery, and error values in
+addition to lifecycle and relationship fields. File identities bind the SHA-256 of the canonical stored relative path
 string as well as size and content; a non-null stored path retains its path hash even
 when the file is missing, while raw and resolved paths are never emitted. Under the
 D37 publication policy, artifact delta +0 preserves all current/output pointers. Delta
@@ -225,7 +227,11 @@ missing files, stale pointers, wrong-job artifacts, and same-count or same-conte
 replacement are unauthorized. Settings
 values, timing, case text/labels, and private/model prose are excluded. Response projections bind exact operation ID/version/canonical-arguments
 hash/generation intent or exact sorted clarification missing fields, with status-specific
-nullability. Non-projected receipts, external calls, language requests, and language
+nullability. D37 applies the same strict HTTP/status/outcome, execution, confirmation,
+proposal-or-clarification, and reason-code contract to the primary response and every
+event response. Cancellation may change only the asserted target job's expected status
+and cancellation flag; all other target-job fields and all non-target jobs remain exact.
+Non-projected receipts, external calls, language requests, and language
 turns carry only sorted opaque canonical record-identity hashes; request IDs and turn
 text are never projected. Observed effects carry strict prior-record-preservation
 booleans computed by canonical identity subset, plus exact request/turn additions.

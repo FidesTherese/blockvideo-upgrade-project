@@ -301,18 +301,47 @@ def _proposal_tuple(response: dict[str, Any]) -> tuple[object, ...]:
 
 
 def _response_matches_effects(
-    response: dict[str, Any], effects: Effects, accepted_proposals: set[tuple[object, ...]]
+    response: dict[str, Any],
+    effects: Effects,
+    accepted_proposals: set[tuple[object, ...]],
+    *,
+    interpretation: str = "operation",
 ) -> bool:
-    completed = response.get("status") == "completed"
+    status = response.get("status")
+    completed = status == "completed"
+    reason_code = response.get("reason_code")
+    expected_missing_fields = (
+        sorted(set(effects.question_for)) if effects.question_for else None
+    )
+    if interpretation == "operation":
+        details_match = (
+            _proposal_tuple(response) in accepted_proposals
+            and response.get("generation_requested") is False
+            and response.get("clarification_missing_fields") is None
+        )
+    elif interpretation == "clarification":
+        details_match = (
+            _proposal_tuple(response) == (None, None, None, None)
+            and response.get("generation_requested") is None
+            and response.get("clarification_missing_fields") == expected_missing_fields
+        )
+    else:
+        details_match = (
+            _proposal_tuple(response) == (None, None, None, None)
+            and response.get("generation_requested") is None
+            and response.get("clarification_missing_fields") is None
+        )
+    reason_matches = (
+        reason_code is not None if effects.outcome == "blocked" else reason_code is None
+    )
     return (
         type(response.get("http_status")) is int
         and 200 <= response["http_status"] < 300
-        and response.get("status") in _STATUS_BY_OUTCOME[effects.outcome]
+        and status in _STATUS_BY_OUTCOME[effects.outcome]
         and response.get("executed") is completed
         and response.get("requires_confirmation") is effects.confirmation_required
-        and _proposal_tuple(response) in accepted_proposals
-        and response.get("generation_requested") is False
-        and response.get("reason_code") is None
+        and details_match
+        and reason_matches
     )
 
 
@@ -519,10 +548,14 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         )
     )
     initial_jobs = _initial_jobs(case)
-    if jobs_before != initial_jobs:
-        initial_jobs_valid = False
-    else:
-        initial_jobs_valid = True
+    initial_jobs_valid = (
+        len(jobs_before) == len(initial_jobs)
+        and all(
+            actual.get("id") == expected["id"]
+            and all(actual.get(key) == value for key, value in expected.items())
+            for actual, expected in zip(jobs_before, initial_jobs, strict=True)
+        )
+    )
 
     before_by_id = {item.get("id"): item for item in jobs_before}
     after_by_id = {item.get("id"): item for item in jobs_after}
@@ -783,8 +816,15 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         and response.get("operation_id") is None,
         "not_called": observation.get("model_calls") == 0,
     }[expected_interpretation]
+    primary_response_valid = _response_matches_effects(
+        response,
+        case.expected.submit,
+        accepted_proposals,
+        interpretation=expected_interpretation,
+    )
     checks = {
         "observation_completed": observation.get("failure_class") is None,
+        "primary_response": primary_response_valid,
         "interpretation_class": interpretation_valid,
         "accepted_operations": (
             response.get("operation_id") in accepted_operations

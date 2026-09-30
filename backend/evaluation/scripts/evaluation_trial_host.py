@@ -209,11 +209,18 @@ class RedactedJobEntry(_StrictRecord):
     project_id: int = Field(ge=1, le=2**63 - 1)
     status: Literal["pending", "running", "completed", "failed", "cancelled", "unknown"]
     current_stage: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$")
+    progress: float = Field(ge=0, le=1)
+    stage_progress: float = Field(ge=0, le=1)
     input_revision: int = Field(ge=1, le=10**12)
     cancel_requested: bool
     kind: Literal["full", "rerender"]
     block_index: int | None = Field(default=None, ge=0, le=100000)
     parent_job_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    input_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    input_snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recovery_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    error_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class RedactedArtifactEntry(_StrictRecord):
@@ -1081,8 +1088,10 @@ def _candidate_worker(model_call_budget: int) -> int:
                           "restored_from_revision": item["restored_from_revision"]}
                           for item in value["history"]],
                       "job_entries": [{key: item[key] for key in ("id", "project_id", "status",
-                          "current_stage", "input_revision", "cancel_requested", "kind",
-                          "block_index", "parent_job_id")} for item in value["jobs"]],
+                          "current_stage", "progress", "stage_progress", "input_revision",
+                          "cancel_requested", "kind", "block_index", "parent_job_id",
+                          "input_fingerprint", "input_snapshot_sha256", "plan_sha256",
+                          "recovery_sha256", "error_sha256")} for item in value["jobs"]],
                       "artifact_entries": [{"id": item["id"], "project_id": item["project_id"],
                           "job_id": item["job_id"], "revision": item["revision"],
                           "input_fingerprint": item["input_fingerprint"],

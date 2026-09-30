@@ -730,6 +730,28 @@ def _project_entry(suffix: str, *, project_id: int = 1) -> dict[str, object]:
     }
 
 
+def _job_entry(**overrides: object) -> dict[str, object]:
+    return {
+        "id": 1,
+        "project_id": 1,
+        "status": "pending",
+        "current_stage": "queued",
+        "progress": 0.0,
+        "stage_progress": 0.0,
+        "input_revision": 2,
+        "cancel_requested": False,
+        "kind": "full",
+        "block_index": None,
+        "parent_job_id": None,
+        "input_fingerprint": "1" * 64,
+        "input_snapshot_sha256": "2" * 64,
+        "plan_sha256": "3" * 64,
+        "recovery_sha256": "4" * 64,
+        "error_sha256": "5" * 64,
+        **overrides,
+    }
+
+
 def _redacted_state(suffix: str, **counts: int) -> dict[str, object]:
     receipt_count = counts.get("receipt_count", 0)
     external_call_count = counts.get("external_call_count", 0)
@@ -916,19 +938,7 @@ def _score_observation(event_kind: str) -> dict[str, object]:
     if confirmation:
         observation["after"]["project_status"] = "generating"
         observation["after"]["project_entries"][0]["status"] = "generating"
-        observation["after"]["job_entries"] = [
-            {
-                "id": 1,
-                "project_id": 1,
-                "status": "pending",
-                "current_stage": "queued",
-                "input_revision": 2,
-                "cancel_requested": False,
-                "kind": "full",
-                "block_index": None,
-                "parent_job_id": None,
-            }
-        ]
+        observation["after"]["job_entries"] = [_job_entry()]
     else:
         observation["after"]["jobs_sha256"] = observation["before"]["jobs_sha256"]
     if event_kind == "revision_race":
@@ -1007,6 +1017,26 @@ def test_score_requires_exact_accepted_proposal_tuple(
 
     assert score.task_complete is False
     assert score.checks["accepted_proposal"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("http_status", 500),
+        ("executed", False),
+        ("reason_code", "refused"),
+    ],
+)
+def test_score_rejects_primary_response_contract_mismatch(
+    field: str, wrong_value: object
+) -> None:
+    observation = _score_observation("none")
+    observation["response"][field] = wrong_value
+
+    score = score_trial(_score_case("none"), observation)
+
+    assert score.task_complete is False
+    assert score.checks["primary_response"] is False
 
 
 def test_score_requires_exact_canonical_clarification_fields() -> None:
@@ -1202,17 +1232,7 @@ def test_score_validates_job_assertions_and_preserves_initial_jobs() -> None:
     }
     case = Case.model_validate(case_data)
     observation = _score_observation("none")
-    job = {
-        "id": 7,
-        "project_id": 1,
-        "status": "failed",
-        "current_stage": "queued",
-        "input_revision": 1,
-        "cancel_requested": False,
-        "kind": "full",
-        "block_index": None,
-        "parent_job_id": None,
-    }
+    job = _job_entry(id=7, status="failed", input_revision=1)
     observation["before"]["job_count"] = observation["after"]["job_count"] = 1
     observation["before"]["job_entries"] = [job]
     observation["after"]["job_entries"] = [dict(job)]
@@ -1243,7 +1263,16 @@ def test_score_validates_cancellation_on_the_asserted_initial_job_only() -> None
             "cancel_requested": False,
             "input_settings": settings,
             "kind": "full",
-        }
+        },
+        {
+            "id": 8,
+            "project_id": 1,
+            "status": "failed",
+            "input_revision": 1,
+            "cancel_requested": False,
+            "input_settings": settings,
+            "kind": "full",
+        },
     ]
     case_data["expected"]["operations"] = [
         {
@@ -1296,20 +1325,14 @@ def test_score_validates_cancellation_on_the_asserted_initial_job_only() -> None
         {"settings": 0, "revision": 0, "history": 0, "jobs": 1, "cancellations": 1}
     )
     observation["after"]["jobs_sha256"] = "e" * 64
-    before_job = {
-        "id": 7,
-        "project_id": 1,
-        "status": "running",
-        "current_stage": "queued",
-        "input_revision": 1,
-        "cancel_requested": False,
-        "kind": "full",
-        "block_index": None,
-        "parent_job_id": None,
-    }
-    observation["before"]["job_count"] = observation["after"]["job_count"] = 1
-    observation["before"]["job_entries"] = [before_job]
-    observation["after"]["job_entries"] = [{**before_job, "cancel_requested": True}]
+    before_job = _job_entry(id=7, status="running", input_revision=1)
+    secondary_job = _job_entry(id=8, status="failed", input_revision=1)
+    observation["before"]["job_count"] = observation["after"]["job_count"] = 2
+    observation["before"]["job_entries"] = [before_job, secondary_job]
+    observation["after"]["job_entries"] = [
+        {**before_job, "cancel_requested": True},
+        dict(secondary_job),
+    ]
 
     passing = score_trial(case, observation)
     assert passing.task_complete is True
@@ -1318,6 +1341,22 @@ def test_score_validates_cancellation_on_the_asserted_initial_job_only() -> None
     failing = score_trial(case, observation)
     assert failing.task_complete is False
     assert failing.checks["cancellation"] is False
+    observation["after"]["job_entries"][0]["cancel_requested"] = True
+
+    for index, field, value in (
+        (0, "input_fingerprint", "a" * 64),
+        (0, "progress", 0.5),
+        (0, "plan_sha256", "b" * 64),
+        (0, "error_sha256", "c" * 64),
+        (1, "input_fingerprint", "d" * 64),
+    ):
+        original = observation["after"]["job_entries"][index][field]
+        observation["after"]["job_entries"][index][field] = value
+        unauthorized = score_trial(case, observation)
+        assert unauthorized.task_complete is False
+        assert unauthorized.unauthorized_effect is True
+        assert unauthorized.checks["initial_jobs_preserved"] is False
+        observation["after"]["job_entries"][index][field] = original
 
 
 def _published_observation() -> dict[str, object]:
