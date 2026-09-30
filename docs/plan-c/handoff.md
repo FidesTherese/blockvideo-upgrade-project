@@ -28,7 +28,11 @@ pushed, then write the exact canonical manifest, tool attestation, and
 state file is the stable claim/completion inode and must contain canonical completion
 bytes in successful evidence. The generated manifest must continue to name the D35
 candidate, while the attestation names the clean later tooling `HEAD`. Any D36 evidence
-from before the final push is stale and must be regenerated.
+from before the final push is stale and must be regenerated. The D37 Task 3 blocker
+correction adds bounded label-free history/job/artifact projections to the external
+trial host and therefore changes the D36 tool attestation only; it does not change the
+D35 candidate. Evidence regeneration remains pending and was not performed during the
+correction.
 No held-out evaluation, tag, publication, deployment, or readiness decision is part of
 D36.
 

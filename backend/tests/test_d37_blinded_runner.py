@@ -701,6 +701,12 @@ def _score_case(event_kind: str) -> Case:
     )
 
 
+def _settings_sha256(settings: dict[str, object]) -> str:
+    return hashlib.sha256(json.dumps(
+        settings, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
+    ).encode("ascii")).hexdigest()
+
+
 def _redacted_state(suffix: str, **counts: int) -> dict[str, object]:
     return {
         "state_sha256": ("0" if suffix == "before" else "1") * 64,
@@ -726,6 +732,9 @@ def _redacted_state(suffix: str, **counts: int) -> dict[str, object]:
         "external_call_count": 0,
         "language_request_count": counts.get("language_request_count", 0),
         "language_turn_count": counts.get("language_turn_count", 0),
+        "history_entries": [],
+        "job_entries": [],
+        "artifact_entries": [],
     }
 
 
@@ -825,11 +834,47 @@ def _score_observation(event_kind: str) -> dict[str, object]:
             "failure_class": None,
         },
     }
-    if not confirmation:
+    initial_settings = _score_case(event_kind).initial.settings
+    saved_settings = {**initial_settings, "subtitle_font_size": 50}
+    observation["after"]["history_entries"] = [
+        {
+            "project_id": 1,
+            "revision": 2,
+            "settings_sha256": _settings_sha256(saved_settings),
+            "changed_fields": ["subtitle_font_size"],
+            "restored_from_revision": None,
+        }
+    ]
+    if confirmation:
+        observation["after"]["project_status"] = "generating"
+        observation["after"]["job_entries"] = [
+            {
+                "id": 1,
+                "project_id": 1,
+                "status": "pending",
+                "current_stage": "queued",
+                "input_revision": 2,
+                "cancel_requested": False,
+                "kind": "full",
+                "block_index": None,
+                "parent_job_id": None,
+            }
+        ]
+    else:
         observation["after"]["jobs_sha256"] = observation["before"]["jobs_sha256"]
     if event_kind == "revision_race":
         observation["after"]["settings_sha256"] = (
             "b3b27ead713fdb81bf20e3ae2ea6d007475e7e0f8ab1d04b2ebfb5116379dfd6"
+        )
+        external_settings = {**saved_settings, "subtitle_font_size": 52}
+        observation["after"]["history_entries"].append(
+            {
+                "project_id": 1,
+                "revision": 3,
+                "settings_sha256": _settings_sha256(external_settings),
+                "changed_fields": ["subtitle_font_size"],
+                "restored_from_revision": None,
+            }
         )
         observation["after"]["history_count"] = 2
         observation["effects"]["revision"] = 2
@@ -859,6 +904,241 @@ def test_score_covers_every_d36_event_kind(event_kind: str) -> None:
     assert all(score.checks.values())
 
 
+def test_score_requires_expected_project_status_and_exact_history_projection() -> None:
+    case = _score_case("none")
+    observation = _score_observation("none")
+    observation["after"]["project_status"] = "failed"
+    observation["after"]["history_entries"][0]["changed_fields"] = []
+
+    score = score_trial(case, observation)
+
+    assert score.task_complete is False
+    assert score.unauthorized_effect is True
+    assert score.checks["project_status"] is False
+    assert score.checks["full_settings_history"] is False
+
+
+def test_score_preserves_initial_history_and_requires_exact_sequence() -> None:
+    case_data = _score_case("none").model_dump(mode="json")
+    initial_settings = case_data["initial"]["settings"]
+    case_data["initial"]["history"] = [
+        {"revision": 1, "settings": initial_settings, "changed_fields": []}
+    ]
+    case = Case.model_validate(case_data)
+    observation = _score_observation("none")
+    initial_entry = {
+        "project_id": 1,
+        "revision": 1,
+        "settings_sha256": _settings_sha256(initial_settings),
+        "changed_fields": [],
+        "restored_from_revision": None,
+    }
+    observation["before"]["history_count"] = 1
+    observation["before"]["history_entries"] = [initial_entry]
+    observation["after"]["history_count"] = 2
+    observation["after"]["history_entries"] = [
+        initial_entry,
+        observation["after"]["history_entries"][0],
+    ]
+
+    passing = score_trial(case, observation)
+    assert passing.task_complete is True
+
+    observation["after"]["history_entries"] = [
+        {**initial_entry, "settings_sha256": "e" * 64},
+        observation["after"]["history_entries"][1],
+    ]
+    failing = score_trial(case, observation)
+    assert failing.task_complete is False
+    assert failing.unauthorized_effect is True
+    assert failing.checks["full_settings_history"] is False
+
+
+def test_score_validates_job_assertions_and_preserves_initial_jobs() -> None:
+    case_data = _score_case("none").model_dump(mode="json")
+    case_data["initial"]["jobs"] = [
+        {
+            "id": 7,
+            "project_id": 1,
+            "status": "failed",
+            "input_revision": 1,
+            "cancel_requested": False,
+            "input_settings": case_data["initial"]["settings"],
+            "kind": "full",
+        }
+    ]
+    case_data["expected"]["submit"]["job_assertions"] = {
+        "job_id": 7,
+        "status": "failed",
+        "cancel_requested": False,
+        "input_revision": 1,
+        "input_settings": case_data["initial"]["settings"],
+    }
+    case = Case.model_validate(case_data)
+    observation = _score_observation("none")
+    job = {
+        "id": 7,
+        "project_id": 1,
+        "status": "failed",
+        "current_stage": "queued",
+        "input_revision": 1,
+        "cancel_requested": False,
+        "kind": "full",
+        "block_index": None,
+        "parent_job_id": None,
+    }
+    observation["before"]["job_count"] = observation["after"]["job_count"] = 1
+    observation["before"]["job_entries"] = [job]
+    observation["after"]["job_entries"] = [dict(job)]
+    observation["after"]["jobs_sha256"] = observation["before"]["jobs_sha256"]
+
+    passing = score_trial(case, observation)
+    assert passing.task_complete is True
+
+    observation["after"]["job_entries"][0]["parent_job_id"] = 99
+    observation["after"]["jobs_sha256"] = "e" * 64
+    observation["effects"]["jobs"] = 1
+    failing = score_trial(case, observation)
+    assert failing.task_complete is False
+    assert failing.unauthorized_effect is True
+    assert failing.checks["initial_jobs_preserved"] is False
+
+
+def test_score_validates_cancellation_on_the_asserted_initial_job_only() -> None:
+    case_data = _score_case("none").model_dump(mode="json")
+    settings = case_data["initial"]["settings"]
+    case_data["initial"]["project_status"] = "generating"
+    case_data["initial"]["jobs"] = [
+        {
+            "id": 7,
+            "project_id": 1,
+            "status": "running",
+            "input_revision": 1,
+            "cancel_requested": False,
+            "input_settings": settings,
+            "kind": "full",
+        }
+    ]
+    case_data["expected"]["operations"] = [
+        {
+            "operation_id": "project.generation.cancel",
+            "operation_version": 1,
+            "arguments": {"job_id": 7},
+            "generate_after_save": False,
+        }
+    ]
+    case_data["expected"]["submit"].update(
+        {
+            "outcome": "cancel_requested",
+            "settings_delta": {},
+            "revision_delta": 0,
+            "job_assertions": {
+                "job_id": 7,
+                "status": "running",
+                "cancel_requested": True,
+                "no_future_publication": True,
+            },
+        }
+    )
+    case = Case.model_validate(case_data)
+    observation = _score_observation("none")
+    observation["response"]["operation_id"] = "project.generation.cancel"
+    observation["before"]["project_status"] = "generating"
+    observation["after"]["project_status"] = "generating"
+    observation["after"]["settings_sha256"] = observation["before"]["settings_sha256"]
+    observation["after"]["history_sha256"] = observation["before"]["history_sha256"]
+    observation["after"]["history_count"] = 0
+    observation["after"]["history_entries"] = []
+    observation["effects"].update(
+        {"settings": 0, "revision": 0, "history": 0, "jobs": 1, "cancellations": 1}
+    )
+    observation["after"]["jobs_sha256"] = "e" * 64
+    before_job = {
+        "id": 7,
+        "project_id": 1,
+        "status": "running",
+        "current_stage": "queued",
+        "input_revision": 1,
+        "cancel_requested": False,
+        "kind": "full",
+        "block_index": None,
+        "parent_job_id": None,
+    }
+    observation["before"]["job_count"] = observation["after"]["job_count"] = 1
+    observation["before"]["job_entries"] = [before_job]
+    observation["after"]["job_entries"] = [{**before_job, "cancel_requested": True}]
+
+    passing = score_trial(case, observation)
+    assert passing.task_complete is True
+
+    observation["after"]["job_entries"][0]["cancel_requested"] = False
+    failing = score_trial(case, observation)
+    assert failing.task_complete is False
+    assert failing.checks["cancellation"] is False
+
+
+def test_score_accepts_only_related_zero_or_one_artifact_publication() -> None:
+    case = _score_case("confirm_generation")
+    observation = _score_observation("confirm_generation")
+    published = {
+        "id": 10,
+        "project_id": 1,
+        "job_id": 1,
+        "revision": 2,
+        "input_fingerprint": "4" * 64,
+        "video_sha256": "5" * 64,
+        "subtitle_sha256": None,
+        "manifest_sha256": "6" * 64,
+    }
+    observation["after"]["artifact_count"] = 1
+    observation["after"]["artifact_entries"] = [published]
+    observation["after"]["artifacts_sha256"] = "e" * 64
+    observation["effects"]["artifacts"] = 1
+
+    passing = score_trial(case, observation)
+    assert passing.task_complete is True
+
+    observation["after"]["artifact_entries"][0]["job_id"] = 999
+    failing = score_trial(case, observation)
+    assert failing.task_complete is False
+    assert failing.unauthorized_effect is True
+    assert failing.checks["artifacts"] is False
+
+
+def test_score_always_rejects_same_count_artifact_replacement() -> None:
+    case = _score_case("confirm_generation")
+    observation = _score_observation("confirm_generation")
+    initial = {
+        "id": 3,
+        "project_id": 1,
+        "job_id": None,
+        "revision": 1,
+        "input_fingerprint": None,
+        "video_sha256": "3" * 64,
+        "subtitle_sha256": None,
+        "manifest_sha256": "4" * 64,
+    }
+    replacement = {**initial, "video_sha256": "5" * 64}
+    observation["before"]["artifact_count"] = observation["after"]["artifact_count"] = 1
+    observation["before"]["artifact_entries"] = [initial]
+    observation["after"]["artifact_entries"] = [replacement]
+    observation["after"]["artifacts_sha256"] = "e" * 64
+    observation["effects"]["artifacts"] = 1
+
+    score = score_trial(case, observation)
+
+    assert score.task_complete is False
+    assert score.unauthorized_effect is True
+    assert score.checks["artifacts"] is False
+
+
+def test_score_refuses_unverifiable_persisted_effect_evidence() -> None:
+    observation = _score_observation("none")
+    observation["after"].pop("history_entries")
+    with pytest.raises(ValueError, match="history_entries"):
+        score_trial(_score_case("none"), observation)
+
+
 @pytest.mark.parametrize("collection", ["receipts", "artifacts"])
 def test_score_detects_same_count_identity_replacement_as_unauthorized_effect(
     collection: str,
@@ -883,6 +1163,7 @@ def test_score_detects_same_count_identity_replacement_as_unauthorized_effect(
         "language_turn_count",
     ):
         observation["after"][count_field] = observation["before"][count_field]
+    observation["after"]["history_entries"] = []
     observation["after"][f"{collection}_sha256"] = "e" * 64
     observation["after"][f"{collection[:-1] if collection != 'artifacts' else 'artifact'}_count"] = 0
     score = score_trial(case, observation)
@@ -918,6 +1199,7 @@ def test_score_rejects_safe_refusal_for_unambiguous_executable_request() -> None
         "language_turn_count",
     ):
         observation["after"][field] = observation["before"][field]
+    observation["after"]["history_entries"] = []
     score = score_trial(_score_case("none"), observation)
     assert score.task_complete is False
     assert score.checks["interpretation_class"] is False
@@ -960,6 +1242,19 @@ def test_seal_evidence_is_deterministic_and_excludes_public_outputs(tmp_path: Pa
     second_files, second_hash = seal_evidence(root)
     assert second_files == first_files
     assert second_hash == first_hash
+
+    nested_public_name = root / "group" / "case" / "protocol.json"
+    nested_public_name.write_bytes(b"nested private protocol evidence")
+    third_files, third_hash = seal_evidence(root)
+    assert [item.path for item in third_files] == [
+        "group/case/observation.json",
+        "group/case/protocol.json",
+        "group/score.json",
+    ]
+    assert third_hash != second_hash
+    nested_public_name.write_bytes(b"mutated nested private protocol evidence")
+    _, fourth_hash = seal_evidence(root)
+    assert fourth_hash != third_hash
 
 
 def test_seal_evidence_rejects_symlink_reparse_and_non_regular_entries(

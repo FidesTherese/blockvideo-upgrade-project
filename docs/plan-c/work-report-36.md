@@ -68,8 +68,12 @@ attestation aggregate, artifact sizes/hashes, and canonical state content. It mu
 prove the candidate remains clean and that the tooling checkout differs from `HEAD`
 only by ignored release evidence.
 
-This tooling-only fix changes the D36 source attestation. Real D36 evidence MUST be
-regenerated after this final D36 commit is pushed; no pre-push evidence is current.
+The D37 Task 3 blocker correction extends only the external D36 trial-host observation
+schema with bounded sorted label-free history, job, and artifact identity projections.
+It does not change candidate bytes or behavior. This tooling-only fix changes the D36
+source attestation. Real D36 evidence MUST be regenerated after this final tooling
+commit is pushed; evidence was intentionally not regenerated as part of the correction,
+and no pre-commit evidence is current.
 
 ## Boundary and limits
 

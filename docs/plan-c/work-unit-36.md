@@ -83,7 +83,13 @@ The host MUST disable bytecode writes, prove a pre/post-equal candidate snapshot
 an atomic no-replace hard link so a competing destination is never overwritten.
 `RedactedState` count maxima MUST accept the strict seed maxima plus up to four
 event/model effects: 17 projects, 36 history rows, 36 jobs, 68 artifacts, 36 receipts,
-36 external calls, 12 language requests, and 12 language turns. The 68-artifact bound
+36 external calls, 12 language requests, and 12 language turns. It MUST additionally
+publish canonical sorted bounded label-free projections for every history row
+(project/revision/settings hash/changed fields/restore source), job row
+(identity/owner/status/stage/input revision/cancel flag/kind/block/parent), and artifact
+row (identity/owner/job/revision/input fingerprint/content and manifest hashes). These
+projections MUST contain no path, case text, model text, or label, and tuple lengths
+MUST equal their corresponding counts. The 68-artifact bound
 MUST include both independently valid 32-item artifact inputs. Any relationship that would make worker seeding impossible MUST be rejected before
 candidate invocation. This includes out-of-range or future artifact revisions, unknown
 project/job/artifact/history/receipt/call/prior-turn/parent/successor references,

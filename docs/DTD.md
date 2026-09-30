@@ -1067,7 +1067,17 @@ effects: `project_count <= 17`, `history_count <= 36`, `job_count <= 36`,
 `language_request_count <= 12`, and `language_turn_count <= 12`. Projects receive no
 event allowance because events cannot create projects. These are finite acceptance
 bounds rather than expected-effect assertions; actual effects remain separately
-reported. The input validator accepts `artifact_revisions` only as strict integers from 1 through
+reported. To make persisted-effect scoring verifiable without exposing case text or
+labels, `RedactedState` also carries three required sorted bounded tuples. History
+entries contain only `project_id`, `revision`, `settings_sha256`, sorted
+`changed_fields`, and `restored_from_revision`, ordered by `(project_id, revision)`.
+Job entries contain only `id`, `project_id`, `status`, bounded `current_stage`,
+`input_revision`, `cancel_requested`, `kind`, `block_index`, and `parent_job_id`,
+ordered by `id`. Artifact entries contain only `id`, `project_id`, `job_id`,
+`revision`, `input_fingerprint`, `video_sha256`, optional `subtitle_sha256`, and
+`manifest_sha256`, ordered by `id`. No entry contains paths, source/model text,
+messages, labels, or settings values. Tuple lengths MUST equal their corresponding
+counts, identities MUST be unique, and ordering MUST be canonical. The input validator accepts `artifact_revisions` only as strict integers from 1 through
 `10**12`, requires each to be no newer than the primary project, and requires the
 largest explicit artifact ID plus the revision-derived artifact count to fit
 `2**63 - 1`. Before worker launch it builds the complete seeded graph and rejects:
@@ -1345,11 +1355,33 @@ becomes an exclusion. The bundle contains no raw case IDs, request text, expecte
 values, category names, or labels. Scoring covers declared events, full persisted
 effects, receipts/artifacts, replay, confirmation, and disclosure. Unexpected
 mutation, replay, and disclosure are separately counted overall and by category.
-Detailed records remain sealed in evaluator storage. The shared model owns named
+Detailed records remain sealed in evaluator storage. D37 scoring MUST reject missing
+or malformed persisted-state projections rather than treating hashes/counts as proof.
+It reconstructs the expected primary-project status, the exact history sequence and
+settings/changed-field/restore identities, and the expected job set from the D24
+contract. Every initial history and job identity must be present unchanged except for
+the specifically asserted cancellation transition; `final.job_assertions` are checked
+against the selected redacted job, including count/new-ID/parent/revision/status and
+cancel flags. An asserted input-settings object is accepted only when it equals the
+fully reconstructed settings for the observed `input_revision`. Cancellation must
+change only its asserted job. Every before-artifact tuple must remain an exact subset
+of the after tuple. `preserve_all_no_new_publication` permits no added artifact;
+`job_may_publish_on_success` permits zero or one new artifact, and one is legitimate
+only when it belongs to the target project and an observed new job, its revision
+equals that job's input revision, and its input fingerprint is a non-null lowercase
+SHA-256 identity. Same-count
+artifact replacement is always unauthorized. `after.project_status` must equal the
+status implied by the expected outcome and job assertions; a newly queued job implies
+`generating`, while other outcomes preserve the initial status unless the asserted
+job transition requires the candidate's defined terminal status. The shared model owns named
 `model_validator(mode="after")` checks for topology, partition/count bounds, category
 denominators, mode denominators, category-to-mode sums, and completion equations;
 D37, D38, and D40 invoke that same validation by parsing the shared model and then run
 their boundary-specific protocol comparison or independent decision checks.
+
+The detailed-evidence seal excludes the designated public output names only when they
+are direct children of the run root. A file with the same basename below a case/group
+directory is private evidence and MUST affect the sealed aggregate.
 
 D36 candidate trial-tool, D37 evaluator/runner, D38 importer, D39 verifier, and D40
 decision sources each have separate canonical `ToolAttestation.aggregate_sha256`

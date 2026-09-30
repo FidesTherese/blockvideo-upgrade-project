@@ -11,7 +11,11 @@ process or allowing mode-specific test conditions.
 - Validate corpus, approval, protocol, and D36 freeze fingerprints before running.
 - Isolate database and media state per source-request group.
 - Execute frozen All Tools and stateful-retrieval modes with identical limits.
-- Score persisted receipts/effects and expected state, not model prose.
+- Score persisted receipts/effects and expected state, not model prose. Require exact
+  project-status, history-row, settings-hash/revision/changed-field, job-assertion,
+  initial-job, cancellation, and artifact-subset evidence from D36. Missing projections
+  are unverifiable and fail closed. Artifact publication permits only a legitimate
+  related +0/+1; same-count replacement is always unauthorized.
 - Derive domain-separated evaluator-keyed HMAC-SHA-256 case/category tokens. Publish
   only a non-empty complete sorted opaque token set/count and non-empty opaque category
   bindings in the canonical protocol; never publish raw case IDs, text, category names,
@@ -22,7 +26,9 @@ process or allowing mode-specific test conditions.
   included tokens and exact sorted excluded tokens with one deterministic reason per
   exclusion: `both_not_approved` when both approvals are absent, otherwise the sole
   missing approval's reason.
-  without logging request text or labels.
+  without logging request text or labels. Exclude designated public outputs from the
+  detailed-evidence seal only at the run root; nested files with the same basename are
+  sealed private evidence.
 - Test runner behavior only with repository-owned synthetic fixtures.
 
 ## Non-goals

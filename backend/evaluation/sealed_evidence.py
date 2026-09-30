@@ -88,7 +88,7 @@ def seal_evidence(root: Path) -> tuple[list[FileFingerprint], str]:
             path = current_path / file_name
             relative = path.relative_to(root).as_posix()
             FileFingerprint(path=relative, sha256="0" * 64, size=0)
-            if file_name in _EXCLUDED_OUTPUT_NAMES:
+            if current_path == root and file_name in _EXCLUDED_OUTPUT_NAMES:
                 metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISREG(
                     metadata.st_mode

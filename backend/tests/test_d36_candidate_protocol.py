@@ -336,6 +336,16 @@ def _worker_observation() -> dict[str, Any]:
             "external_call_count": 0,
             "language_request_count": 0,
             "language_turn_count": 0,
+            "history_entries": [],
+            "job_entries": [],
+            "artifact_entries": [
+                {"id": 1, "project_id": 1, "job_id": None, "revision": 1,
+                 "input_fingerprint": None, "video_sha256": "1" * 64,
+                 "subtitle_sha256": None, "manifest_sha256": "2" * 64},
+                {"id": 2, "project_id": 1, "job_id": None, "revision": 1,
+                 "input_fingerprint": None, "video_sha256": "3" * 64,
+                 "subtitle_sha256": None, "manifest_sha256": "4" * 64},
+            ],
         },
         "after": {
             "state_sha256": "e" * 64,
@@ -357,6 +367,20 @@ def _worker_observation() -> dict[str, Any]:
             "external_call_count": 0,
             "language_request_count": 1,
             "language_turn_count": 1,
+            "history_entries": [
+                {"project_id": 1, "revision": 2, "settings_sha256": "9" * 64,
+                 "changed_fields": ["subtitle_font_size"],
+                 "restored_from_revision": None},
+            ],
+            "job_entries": [],
+            "artifact_entries": [
+                {"id": 1, "project_id": 1, "job_id": None, "revision": 1,
+                 "input_fingerprint": None, "video_sha256": "1" * 64,
+                 "subtitle_sha256": None, "manifest_sha256": "2" * 64},
+                {"id": 2, "project_id": 1, "job_id": None, "revision": 1,
+                 "input_fingerprint": None, "video_sha256": "3" * 64,
+                 "subtitle_sha256": None, "manifest_sha256": "4" * 64},
+            ],
         },
         "effects": {
             "settings": 1,
@@ -999,6 +1023,9 @@ def test_maximum_valid_seed_produces_valid_real_worker_observation(tmp_path: Pat
     assert observation.before.project_count == 17
     assert observation.before.history_count == observation.before.job_count == 32
     assert observation.before.artifact_count == 64
+    assert len(observation.before.history_entries) == 32
+    assert len(observation.before.job_entries) == 32
+    assert len(observation.before.artifact_entries) == 64
     assert observation.before.receipt_count == observation.before.external_call_count == 32
     assert observation.before.language_request_count == observation.before.language_turn_count == 8
     assert observation.after.receipt_count == 33
@@ -1549,6 +1576,30 @@ def test_real_worker_seeds_complete_allowed_initial_state(tmp_path: Path) -> Non
     assert observation.before.history_count == observation.before.receipt_count == 1
     assert observation.before.artifact_count == 3
     assert observation.before.language_request_count == observation.before.language_turn_count == 1
+
+
+def test_redacted_state_requires_exact_sorted_label_free_persisted_projections() -> None:
+    value = _worker_observation()["after"]
+    state = trial_host.RedactedState.model_validate(value)
+    assert state.history_entries[0].changed_fields == ("subtitle_font_size",)
+    assert [item.id for item in state.artifact_entries] == [1, 2]
+    assert "path" not in state.model_dump_json()
+    assert "text" not in state.model_dump_json()
+
+    unsorted = json.loads(json.dumps(value))
+    unsorted["artifact_entries"].reverse()
+    with pytest.raises(ValidationError, match="sorted"):
+        trial_host.RedactedState.model_validate(unsorted)
+
+    leaking = json.loads(json.dumps(value))
+    leaking["artifact_entries"][0]["video_path"] = "private/video.mp4"
+    with pytest.raises(ValidationError):
+        trial_host.RedactedState.model_validate(leaking)
+
+    missing = json.loads(json.dumps(value))
+    missing.pop("history_entries")
+    with pytest.raises(ValidationError):
+        trial_host.RedactedState.model_validate(missing)
 
 
 def test_observation_contract_rejects_worker_exfiltration_strings() -> None:

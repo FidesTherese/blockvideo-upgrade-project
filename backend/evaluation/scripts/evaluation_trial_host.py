@@ -97,6 +97,47 @@ class RedactedResponse(_StrictRecord):
     response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class RedactedHistoryEntry(_StrictRecord):
+    project_id: int = Field(ge=1, le=2**63 - 1)
+    revision: int = Field(ge=1, le=10**12)
+    settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    changed_fields: tuple[Literal[
+        "subtitle_font_size", "voicevox_speed_scale", "voicevox_speaker_id",
+        "pronunciation_overrides", "narration_pacing_mode",
+        "narration_sentence_pause_seconds",
+    ], ...] = Field(max_length=6, strict=False)
+    restored_from_revision: int | None = Field(default=None, ge=1, le=10**12)
+
+    @model_validator(mode="after")
+    def changed_fields_are_canonical(self) -> RedactedHistoryEntry:
+        if tuple(sorted(set(self.changed_fields))) != self.changed_fields:
+            raise ValueError("changed fields must be unique and sorted")
+        return self
+
+
+class RedactedJobEntry(_StrictRecord):
+    id: int = Field(ge=1, le=2**63 - 1)
+    project_id: int = Field(ge=1, le=2**63 - 1)
+    status: Literal["pending", "running", "completed", "failed", "cancelled", "unknown"]
+    current_stage: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$")
+    input_revision: int = Field(ge=1, le=10**12)
+    cancel_requested: bool
+    kind: Literal["full", "rerender"]
+    block_index: int | None = Field(default=None, ge=0, le=100000)
+    parent_job_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+
+
+class RedactedArtifactEntry(_StrictRecord):
+    id: int = Field(ge=1, le=2**63 - 1)
+    project_id: int = Field(ge=1, le=2**63 - 1)
+    job_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    revision: int | None = Field(default=None, ge=1, le=10**12)
+    input_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    video_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    subtitle_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class RedactedState(_StrictRecord):
     state_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     project_status: ProjectStatusValue
@@ -117,6 +158,34 @@ class RedactedState(_StrictRecord):
     external_call_count: int = Field(ge=0, le=MAX_OBSERVED_EXTERNAL_CALLS)
     language_request_count: int = Field(ge=0, le=MAX_OBSERVED_LANGUAGE_REQUESTS)
     language_turn_count: int = Field(ge=0, le=MAX_OBSERVED_LANGUAGE_TURNS)
+    history_entries: tuple[RedactedHistoryEntry, ...] = Field(
+        max_length=MAX_OBSERVED_HISTORY, strict=False
+    )
+    job_entries: tuple[RedactedJobEntry, ...] = Field(
+        max_length=MAX_OBSERVED_JOBS, strict=False
+    )
+    artifact_entries: tuple[RedactedArtifactEntry, ...] = Field(
+        max_length=MAX_OBSERVED_ARTIFACTS, strict=False
+    )
+
+    @model_validator(mode="after")
+    def projections_match_counts_and_order(self) -> RedactedState:
+        if len(self.history_entries) != self.history_count:
+            raise ValueError("history entries must match history count")
+        if len(self.job_entries) != self.job_count:
+            raise ValueError("job entries must match job count")
+        if len(self.artifact_entries) != self.artifact_count:
+            raise ValueError("artifact entries must match artifact count")
+        history_keys = [(item.project_id, item.revision) for item in self.history_entries]
+        job_ids = [item.id for item in self.job_entries]
+        artifact_ids = [item.id for item in self.artifact_entries]
+        if history_keys != sorted(set(history_keys)):
+            raise ValueError("history entries must be unique and sorted")
+        if job_ids != sorted(set(job_ids)):
+            raise ValueError("job entries must be unique and sorted")
+        if artifact_ids != sorted(set(artifact_ids)):
+            raise ValueError("artifact entries must be unique and sorted")
+        return self
 
 
 class ObservedEffects(_StrictRecord):
@@ -846,7 +915,23 @@ def _candidate_worker(model_call_budget: int) -> int:
         def redact_state(value: dict[str, Any]) -> dict[str, Any]:
             primary = value["primary"]
             result = {"state_sha256": _hash(value), "project_status": primary["status"],
-                      "settings_sha256": _hash(primary["settings"])}
+                      "settings_sha256": _hash(primary["settings"]),
+                      "history_entries": [{"project_id": item["project_id"],
+                          "revision": item["revision"], "settings_sha256": _hash(item["settings"]),
+                          "changed_fields": item["changed_fields"],
+                          "restored_from_revision": item["restored_from_revision"]}
+                          for item in value["history"]],
+                      "job_entries": [{key: item[key] for key in ("id", "project_id", "status",
+                          "current_stage", "input_revision", "cancel_requested", "kind",
+                          "block_index", "parent_job_id")} for item in value["jobs"]],
+                      "artifact_entries": [{"id": item["id"], "project_id": item["project_id"],
+                          "job_id": item["job_id"], "revision": item["revision"],
+                          "input_fingerprint": item["input_fingerprint"],
+                          "video_sha256": item["video"]["sha256"],
+                          "subtitle_sha256": (
+                              item["subtitle"]["sha256"] if item["subtitle"] is not None else None
+                          ), "manifest_sha256": item["manifest_sha256"]}
+                          for item in value["artifacts"]]}
             for name in ("projects", "history", "jobs", "receipts", "artifacts", "external_calls", "language_requests", "language_turns"):
                 result[f"{name}_sha256"] = _hash(value[name])
                 singular = {"projects": "project", "history": "history", "jobs": "job", "receipts": "receipt",
