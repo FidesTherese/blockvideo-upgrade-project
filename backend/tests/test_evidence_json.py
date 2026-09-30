@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from typing import Any, Literal
 
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from evaluation.blinded_contracts import MAX_PROTOCOL_BYTES, EvaluationProtocol
+from evaluation.result_contracts import MAX_RESULT_BUNDLE_BYTES, EvaluationResultBundle
 from evaluation.tool_attestation import canonical_json_bytes
 
 
@@ -88,18 +91,110 @@ def test_canonical_json_bounds_before_json_construction(
         parser.parse_canonical_model(raw, Evidence, maximum=maximum)
 
 
-def test_canonical_json_rejects_actual_four_million_token_overflow_before_construction(
+def test_canonical_json_rejects_actual_eight_million_token_overflow_before_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parser = importlib.import_module("evaluation.evidence_json")
-    raw = b"[" + b"0," * 2_000_000 + b"0]\n"
+    raw = b"[" + b"0," * 4_000_000 + b"0]\n"
 
     def forbidden_loads(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("four million token overflow reached JSON construction")
+        raise AssertionError("eight million token overflow reached JSON construction")
 
     monkeypatch.setattr(parser.json, "loads", forbidden_loads)
     with pytest.raises(ValueError, match="evidence token limit"):
         parser.parse_canonical_model(raw, Evidence, maximum=8 * 1024 * 1024)
+
+
+def _maximum_topology_bytes(artifact: Literal["protocol", "bundle"]) -> bytes:
+    count = 65_535
+    cases = [f"{index:064x}" for index in range(count)]
+    categories = ["1" + f"{index:063x}" for index in range(count)]
+    bindings = [
+        {"case_token": case, "category_token": category}
+        for case, category in zip(cases, categories, strict=True)
+    ]
+    shared: dict[str, Any] = {
+        "schema_version": 1,
+        "candidate_id": "\U0010ffff" * 128,
+        "freeze_sha256": "a" * 64,
+        "corpus_sha256": "b" * 64,
+        "human_approval_sha256": "c" * 64,
+        "independent_approval_sha256": "d" * 64,
+        "d36_trial_tool_sha256": "e" * 64,
+        "d37_evaluator_tool_sha256": "f" * 64,
+        "case_categories": bindings,
+    }
+    if artifact == "protocol":
+        data = {
+            **shared,
+            "modes": ["all_tools", "stateful"],
+            "per_call_deadline_seconds": 180,
+            "maximum_model_calls": 4,
+            "isolation": "fresh_case_state_under_source_group",
+            "model_configuration_sha256": "2" * 64,
+            "stateful_index_sha256": "3" * 64,
+            "category_count": count,
+            "category_tokens": categories,
+            "case_count": count,
+            "case_tokens": cases,
+        }
+    else:
+        results = [
+            {"category_token": category, "included": 1, "completed": 1,
+             "task_complete": 1, "unauthorized_effects": 0,
+             "unauthorized_replays": 0, "secret_disclosures": 0}
+            for category in categories
+        ]
+        mode = {
+            "included": count, "completed": count, "task_complete": count,
+            "unauthorized_effects": 0, "unauthorized_replays": 0,
+            "secret_disclosures": 0, "transport_failures": 0,
+            "deadline_failures": 0, "categories": results,
+        }
+        data = {
+            **shared,
+            "protocol_sha256": "4" * 64,
+            "protocol_case_count": count,
+            "protocol_case_tokens": cases,
+            "protocol_category_count": count,
+            "protocol_category_tokens": categories,
+            "included_count": count,
+            "excluded_count": 0,
+            "included_case_tokens": cases,
+            "excluded_cases": [],
+            "evaluator_role": "independent_evaluator",
+            "evaluator_name": "\U0010ffff" * 128,
+            "executed_at": "9999-12-31T23:59:59Z",
+            "sealed_evidence_sha256": "5" * 64,
+            "modes": [{"mode": "all_tools", **mode}, {"mode": "stateful", **mode}],
+        }
+    return json.dumps(
+        data, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"),
+    ).encode("ascii") + b"\n"
+
+
+@pytest.mark.parametrize(
+    ("artifact", "model_type", "maximum", "expected_tokens"),
+    [("protocol", EvaluationProtocol, MAX_PROTOCOL_BYTES, 917_571),
+     ("bundle", EvaluationResultBundle, MAX_RESULT_BUNDLE_BYTES, 4_980_838)],
+)
+def test_maximum_valid_topology_roundtrips_through_shared_parser(
+    artifact: Literal["protocol", "bundle"], model_type: type[BaseModel],
+    maximum: int, expected_tokens: int,
+) -> None:
+    raw = _maximum_topology_bytes(artifact)
+    actual_tokens = sum(
+        1 for _ in re.finditer(rb'"(?:[^"\\]|\\.)*"|[{}\[\],:]|[^{}\[\],:\s]+', raw)
+    )
+    assert actual_tokens == expected_tokens
+    assert len(raw) <= maximum
+    valid = model_type.model_validate_json(raw, strict=True)
+    assert canonical_json_bytes(valid) + b"\n" == raw
+    print(f"max-topology {artifact}: tokens={actual_tokens} bytes={len(raw)}")
+    parser = importlib.import_module("evaluation.evidence_json")
+    parsed = parser.parse_canonical_model(raw, model_type, maximum=maximum)
+    assert parsed == valid
+    assert canonical_json_bytes(parsed) + b"\n" == raw
 
 
 def test_canonical_json_accepts_exact_byte_and_string_limits() -> None:

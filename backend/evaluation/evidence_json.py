@@ -11,7 +11,7 @@ from evaluation.tool_attestation import canonical_json_bytes
 
 TModel = TypeVar("TModel", bound=BaseModel)
 _MAX_DEPTH = 32
-_MAX_TOKENS = 4_000_000
+_MAX_TOKENS = 8_000_000
 _MAX_STRING_BYTES = 8192
 _WHITESPACE = b" \t\r\n"
 _DELIMITERS = b'{}[],:" \t\r\n'

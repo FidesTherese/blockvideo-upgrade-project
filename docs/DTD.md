@@ -277,8 +277,9 @@ def parse_canonical_model(
    with `cap + 1` detection and descriptor/path identity checks. For detached inputs,
    validate the exact lowercase 64-hex expected digest and actual bytes before parse.
 2. Before JSON construction, a bounded string-aware lexical scan rejects depth over
-   32, more than 4,000,000 tokens, and string tokens over 8,192 encoded bytes. Object
-   keys count as tokens. Then `json.loads` uses a duplicate-rejecting
+   32, more than 8,000,000 tokens, and string tokens over 8,192 encoded bytes. Each
+   scalar/string (including object keys), delimiter, colon and comma counts as one token.
+   Then `json.loads` uses a duplicate-rejecting
    `object_pairs_hook` and a rejecting `parse_constant` (NaN/Infinity/-Infinity).
    Reject malformed UTF-8, BOM, surrogate strings, and nonfinite/overflowing numbers.
 3. Require `canonical_json_bytes(decoded) + b"\n" == raw`; no whitespace, key order,
@@ -326,7 +327,38 @@ attestation tallies those bounded fingerprints and rejects inventories above
 512 MiB before producing an attestation. Index inventory caps are 4,096 files /
 512 MiB total. Parse large artifacts sequentially and
 release raw/decoded duplicates once hashes and validated models are retained.
-Maximum-topology byte arithmetic is proven; maximum-size parse time/memory is not.
+Maximum-topology byte arithmetic is proven. The audited 4,000,000-token scanner
+contradicted the unchanged result schema: a directly validated maximum topology has
+4,980,838 tokens and 50,794,203 canonical bytes including LF. The maximum protocol
+has 917,571 tokens and 19,663,039 bytes. Independent test tokenization counts strings
+as indivisible tokens and counts all structural punctuation; it does not use the
+production scanner or derive expectations from its constants.
+
+For `N` cases, `C` categories, `I` included cases and `E` exclusions, a binding has
+9 tokens and a seven-field category result has 29. Protocol token count is `14N + 81`.
+The two ten-field modes contribute `85 + 60C` tokens together. Bundle count is
+`177 + 14N + 2I + 10E + 60C` for `E > 0`, or
+`178 + 14N + 2I + 60C` for `E = 0`. Since `I + E = N`, `I >= C`, and
+`1 <= C <= N <= 65,535`, the maximum is `76 * 65,535 + 178 = 4,980,838`:
+one included case per unique category, no exclusions, both full category arrays.
+The finite 8,000,000-token cap gives headroom above that proven maximum without
+changing depth/string/64-MiB/128-MiB caps, field maxima, strict types, accounting,
+canonical ASCII/LF, or sanitized rejection behavior. No dependency or parser API changes.
+
+Implementation order for this bounded completion: reproduce rejection with the actual
+maximum fixtures before editing this contract; update this contract; change only
+`evidence_json._MAX_TOKENS`; replace the existing actual-overflow test with an
+8,000,003-token input whose JSON constructor is forbidden; prove both maximum models
+roundtrip through `parse_canonical_model` with unchanged canonical bytes. Fixtures
+use literal sorted synthetic 64-hex tokens, not case loading, HMAC keys, or real evidence.
+Run parser/D36/D37/D22 coverage and Ruff sequentially, commit before the full backend
+clean-root CLI gate. Application, candidate, locks, later-unit source and public schemas
+remain unchanged. The isolated two-fixture GREEN probe passed in 17.35 seconds:
+observed owned-Python peak-working-set sum 0.680 GiB, sampled owned resident peak
+0.628 GiB, conservative controller/worker workload peak 1.824 GiB. These Windows
+measurements are one local experiment, not a universal maximum-size performance or
+operational acceptance claim; tests impose no parse-time performance cutoff.
+
 The runner and result validator now tally included category denominators once with
 `Counter`, then project the declared category order. A 4,096-case/2,048-category
 regression bounds actual equality operations without a wall-clock threshold; names,

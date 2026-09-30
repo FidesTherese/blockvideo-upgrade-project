@@ -45,7 +45,11 @@ mutable buffer before I/O and zeroes it after every open/read/stat/close failure
 normal context exit. The runner creates one immutable canonical run protocol and one
 shared full result schema. Protocol bytes use a 64 MiB cap proven above the maximum
 65,535-case topology; result bundles use a 128 MiB cap proven above their maximum
-schema topology, with identical reader/writer caps. The D24 `switch_target` event changes
+schema topology, with identical reader/writer caps. The shared scanner's finite
+8,000,000-token cap exceeds the independently derived 4,980,838-token maximum valid
+bundle; depth, string, strict-type and canonical-byte restrictions remain unchanged.
+Maximum 65,535-case/category protocol and bundle fixtures roundtrip through the real
+parser without a timing acceptance cutoff. The D24 `switch_target` event changes
 selection outside the immutable request and rereads the exact original request and
 response, adding no replacement request and using the normal one-request/turn/receipt
 delta. Every projected response mode must equal the trial mode.

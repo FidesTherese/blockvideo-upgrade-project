@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from app.db import get_session_factory
+from app.interpretation import service as interpretation_service
 from app.interpretation.contracts import CandidateRef, InterpretationInput
 from app.interpretation.errors import InterpretationError
 from app.interpretation.service import Interpreter
@@ -78,12 +82,51 @@ async def test_unoffered_or_invalid_values_are_not_guessed_by_repair(result: dic
     assert len(adapter.messages) == 1
 
 
-async def test_repair_shares_original_deadline() -> None:
-    adapter = SequenceAdapter(['not json', GOOD], delay=0.04)
-    result = await Interpreter(CATALOG, adapter, timeout_seconds=0.065).preview(REQUEST)
-    assert result.failure.reason_code == "timeout"
-    assert result.attempts == 2 and result.repair_codes == ["invalid_json"]
-    assert len(adapter.messages) == 2
+async def test_repair_shares_original_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    deadlines: list[asyncio.Timeout] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    cancelled, completed = asyncio.Event(), asyncio.Event()
+
+    @asynccontextmanager
+    async def capture_timeout(delay: float) -> AsyncIterator[asyncio.Timeout]:
+        assert delay == 0.065
+        deadline = asyncio.timeout(delay)
+        deadlines.append(deadline)
+        async with deadline:
+            deadline.reschedule(None)
+            yield deadline
+
+    class WaitingRepair(SequenceAdapter):
+        async def complete(self, messages: tuple[ModelMessage, ...], schema: dict[str, Any]) -> str:
+            self.messages.append(messages)
+            if len(self.messages) == 1:
+                return 'not json'
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            completed.set()
+            return GOOD
+
+    monkeypatch.setattr(interpretation_service, "asyncio", SimpleNamespace(timeout=capture_timeout))
+    adapter = WaitingRepair([])
+    task = asyncio.create_task(Interpreter(CATALOG, adapter, timeout_seconds=0.065).preview(REQUEST))
+    try:
+        async with asyncio.timeout(5):
+            await entered.wait()
+            original = deadlines[0]
+            original.reschedule(asyncio.get_running_loop().time() - 1)
+            result = await task
+        assert result.status == "error" and result.failure.reason_code == "timeout"
+        assert result.attempts == 2 and result.repair_codes == ["invalid_json"]
+        assert len(adapter.messages) == 2 and len(deadlines) == 1
+        assert original.expired() and cancelled.is_set() and not completed.is_set()
+    finally:
+        task.cancel()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.parametrize("replies,expected", [(['not json', GOOD], "completed"), (['not json', '{}'], "error")])
