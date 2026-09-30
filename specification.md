@@ -225,7 +225,11 @@ missing files, stale pointers, wrong-job artifacts, and same-count or same-conte
 replacement are unauthorized. Settings
 values, timing, case text/labels, and private/model prose are excluded. Response projections bind exact operation ID/version/canonical-arguments
 hash/generation intent or exact sorted clarification missing fields, with status-specific
-nullability. Observation counts remain finite
+nullability. Non-projected receipts, external calls, language requests, and language
+turns carry only sorted opaque canonical record-identity hashes; request IDs and turn
+text are never projected. Observed effects carry strict prior-record-preservation
+booleans computed by canonical identity subset, plus exact request/turn additions.
+Observation counts remain finite
 while accepting every valid seed and up to four event/model effects: projects 17,
 history 36, jobs 36, artifacts 68 (32 explicit plus 32 revision-derived plus four),
 receipts 36, external calls 36, language requests 12, and language turns 12. Derived artifact IDs must remain within the database integer range. The host validates

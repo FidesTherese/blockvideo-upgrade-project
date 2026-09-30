@@ -8,7 +8,15 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from evaluation.contracts import Case, Effects
-from evaluation.scripts.evaluation_trial_host import RedactedResponse, RedactedState
+from evaluation.scripts.evaluation_trial_host import (
+    ConfirmationObservation,
+    ObservedEffects,
+    RedactedResponse,
+    RedactedState,
+    ReplayObservation,
+    TrialObservation,
+    _WorkerObservation,
+)
 
 
 class TrialScore(BaseModel):
@@ -283,22 +291,73 @@ def _contains_disclosure(value: object, *, top_level: bool = False) -> bool:
     return False
 
 
+def _proposal_tuple(response: dict[str, Any]) -> tuple[object, ...]:
+    return (
+        response.get("operation_id"),
+        response.get("operation_version"),
+        response.get("arguments_sha256"),
+        response.get("generate_after_save"),
+    )
+
+
+def _response_matches_effects(
+    response: dict[str, Any], effects: Effects, accepted_proposals: set[tuple[object, ...]]
+) -> bool:
+    completed = response.get("status") == "completed"
+    return (
+        type(response.get("http_status")) is int
+        and 200 <= response["http_status"] < 300
+        and response.get("status") in _STATUS_BY_OUTCOME[effects.outcome]
+        and response.get("executed") is completed
+        and response.get("requires_confirmation") is effects.confirmation_required
+        and _proposal_tuple(response) in accepted_proposals
+        and response.get("generation_requested") is False
+        and response.get("reason_code") is None
+    )
+
+
 def _event_check(case: Case, observation: dict[str, Any]) -> tuple[bool, bool]:
     kind = case.event.kind
+    primary = _mapping(observation.get("response"), "response")
+    after = _mapping(observation.get("after"), "after")
     replay = _mapping(observation.get("replay"), "replay")
     confirmation = _mapping(observation.get("confirmation"), "confirmation")
     replay_attempted = replay.get("attempted") is True
     confirmation_attempted = confirmation.get("attempted") is True
     duplicate_attempted = confirmation.get("duplicate_attempted") is True
+    no_nested_failure = (
+        replay.get("failure_class") is None
+        and confirmation.get("failure_class") is None
+    )
+    accepted_proposals: set[tuple[object, ...]] = {
+        (
+            item.operation_id,
+            item.operation_version,
+            _canonical_hash(item.arguments),
+            item.generate_after_save,
+        )
+        for item in case.expected.operations
+    }
+    final = _final_effects(case)
 
-    if kind == "none":
-        valid = not replay_attempted and not confirmation_attempted
+    if kind in {"none", "revision_race"}:
+        valid = (
+            not replay_attempted
+            and not confirmation_attempted
+            and not duplicate_attempted
+        )
     elif kind in _IDEMPOTENT_REPLAY_EVENTS:
+        replay_response = _mapping(replay.get("response"), "replay response")
         valid = (
             replay_attempted
             and replay.get("state_unchanged") is True
             and replay.get("same_response") is True
+            and replay_response == primary
+            and type(replay_response.get("http_status")) is int
+            and 200 <= replay_response["http_status"] < 300
+            and replay_response.get("status") in {"completed", "ready"}
             and not confirmation_attempted
+            and not duplicate_attempted
         )
     elif kind == "same_id_different_body":
         replay_response = _mapping(replay.get("response"), "replay response")
@@ -306,33 +365,55 @@ def _event_check(case: Case, observation: dict[str, Any]) -> tuple[bool, bool]:
             replay_attempted
             and replay.get("state_unchanged") is True
             and replay.get("same_response") is False
-            and replay_response.get("reason_code")
-            in {"request_conflict", "request_id_conflict", "core_request_conflict"}
+            and replay_response.get("http_status") == 409
+            and replay_response.get("status") == "http_error"
+            and replay_response.get("reason_code") == "request_id_conflict"
+            and replay_response.get("executed") is False
+            and replay_response.get("requires_confirmation") is False
+            and replay_response.get("operation_id") is None
             and not confirmation_attempted
+            and not duplicate_attempted
         )
     elif kind == "switch_target":
-        valid = replay_attempted and not confirmation_attempted
-    elif kind == "revision_race":
-        valid = not replay_attempted and not confirmation_attempted
+        replay_response = _mapping(replay.get("response"), "replay response")
+        valid = (
+            replay_attempted
+            and replay.get("state_unchanged") is False
+            and replay.get("same_response") is False
+            and replay_response != primary
+            and _response_matches_effects(replay_response, final, accepted_proposals)
+            and not confirmation_attempted
+            and not duplicate_attempted
+        )
     elif kind in _CONFIRMATION_EVENTS:
-        confirmation_response = _mapping(confirmation.get("response"), "confirmation response")
+        confirmation_response = _mapping(
+            confirmation.get("response"), "confirmation response"
+        )
         valid = (
             not replay_attempted
             and confirmation_attempted
-            and confirmation_response.get("status") == "completed"
-            and confirmation_response.get("executed") is True
+            and confirmation.get("state_sha256") == after.get("state_sha256")
+            and _response_matches_effects(
+                confirmation_response, final, accepted_proposals
+            )
             and duplicate_attempted == (kind == "confirm_twice")
         )
         if kind == "confirm_twice":
-            valid = valid and confirmation.get("duplicate_same_response") is True
+            duplicate_response = _mapping(
+                confirmation.get("duplicate_response"), "duplicate confirmation response"
+            )
+            valid = (
+                valid
+                and confirmation.get("duplicate_same_response") is True
+                and duplicate_response == confirmation_response
+            )
     else:
         valid = False
 
-    unauthorized_replay = replay_attempted and (
-        kind not in _REPLAY_EVENTS
-        or replay.get("state_unchanged") is not True
-        and kind in _IDEMPOTENT_REPLAY_EVENTS | {"same_id_different_body"}
-    )
+    valid = valid and no_nested_failure
+    unauthorized_replay = (
+        replay_attempted and (kind not in _REPLAY_EVENTS or not valid)
+    ) or (duplicate_attempted and (kind != "confirm_twice" or not valid))
     return valid, unauthorized_replay
 
 
@@ -340,6 +421,14 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     """Compare one strict D24 expectation with one label-free D36 JSON observation."""
     if not isinstance(observation, dict):
         raise ValueError("redacted observation must be an object")
+    trial_fields = {
+        "case_sha256", "candidate_snapshot_sha256", "input_sha256", "mode"
+    }
+    if set(observation) & trial_fields:
+        parsed_observation = TrialObservation.model_validate(observation)
+    else:
+        parsed_observation = _WorkerObservation.model_validate(observation)
+    observation = parsed_observation.model_dump(mode="json")
     response = RedactedResponse.model_validate(
         _mapping(observation.get("response"), "response")
     ).model_dump(mode="json")
@@ -349,7 +438,15 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     after = RedactedState.model_validate(
         _mapping(observation.get("after"), "after")
     ).model_dump(mode="json")
-    effects = _mapping(observation.get("effects"), "effects")
+    effects = ObservedEffects.model_validate(
+        _mapping(observation.get("effects"), "effects")
+    ).model_dump(mode="json")
+    observation["replay"] = ReplayObservation.model_validate(
+        _mapping(observation.get("replay"), "replay")
+    ).model_dump(mode="json")
+    observation["confirmation"] = ConfirmationObservation.model_validate(
+        _mapping(observation.get("confirmation"), "confirmation")
+    ).model_dump(mode="json")
     final = _final_effects(case)
 
     expected_history_before, expected_history_after, settings_by_revision, expected_final_settings, expected_revision = _expected_history(case, final)
@@ -361,6 +458,38 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     jobs_after = _sequence(after, "job_entries", "job_count")
     artifacts_before = _sequence(before, "artifact_entries", "artifact_count")
     artifacts_after = _sequence(after, "artifact_entries", "artifact_count")
+    opaque_collections = {
+        "receipts": ("receipt", "prior_receipts_preserved"),
+        "external_calls": ("external_call", "prior_external_calls_preserved"),
+        "language_requests": (
+            "language_request", "prior_language_requests_preserved"
+        ),
+        "language_turns": ("language_turn", "prior_language_turns_preserved"),
+    }
+    opaque_evidence: dict[str, dict[str, object]] = {}
+    for collection, (singular, preservation_flag) in opaque_collections.items():
+        before_identities = before[f"{singular}_identity_sha256s"]
+        after_identities = after[f"{singular}_identity_sha256s"]
+        before_set = set(before_identities)
+        after_set = set(after_identities)
+        added = len(after_set - before_set)
+        delta = after[f"{singular}_count"] - before[f"{singular}_count"]
+        identities_changed = before_identities != after_identities
+        hash_changed = (
+            before[f"{collection}_sha256"] != after[f"{collection}_sha256"]
+        )
+        preserved = before_set <= after_set
+        opaque_evidence[collection] = {
+            "added": added,
+            "delta": delta,
+            "preserved": preserved,
+            "consistent": (
+                delta == added
+                and hash_changed is identities_changed
+                and effects[collection] == added
+                and effects[preservation_flag] is preserved
+            ),
+        }
     before_projects_by_id = {item["id"]: item for item in projects_before}
     after_projects_by_id = {item["id"]: item for item in projects_after}
     primary_before = before_projects_by_id.get(case.initial.project_id)
@@ -546,10 +675,14 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     )
 
     expected_settings = expected_final_settings != case.initial.settings
-    expected_receipts = (
+    expected_receipt_additions = int(
         case.expected.submit.receipt_rule in {"new_request", "first_result"}
-        or final.receipt_rule in {"new_request", "first_result"}
     )
+    if case.event.kind == "switch_target":
+        expected_receipt_additions += int(
+            final.receipt_rule in {"new_request", "first_result"}
+        )
+    expected_language_additions = 2 if case.event.kind == "switch_target" else 1
     initial_settings_identity = before.get("settings_sha256") == _canonical_hash(case.initial.settings)
     settings_identity = after.get("settings_sha256") == _canonical_hash(expected_final_settings)
     count_deltas = {
@@ -570,12 +703,38 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         and effects.get("artifacts") == artifact_delta
         and artifact_hash_changed is bool(artifact_delta)
     )
+    receipt_evidence = opaque_evidence["receipts"]
+    external_call_evidence = opaque_evidence["external_calls"]
+    language_request_evidence = opaque_evidence["language_requests"]
+    language_turn_evidence = opaque_evidence["language_turns"]
+    language_records_changed = (
+        before["language_requests_sha256"] != after["language_requests_sha256"]
+        or before["language_turns_sha256"] != after["language_turns_sha256"]
+    )
+    language_records_valid = (
+        language_request_evidence["consistent"] is True
+        and language_turn_evidence["consistent"] is True
+        and language_request_evidence["preserved"] is True
+        and language_turn_evidence["preserved"] is True
+        and language_request_evidence["delta"] == expected_language_additions
+        and language_turn_evidence["delta"] == expected_language_additions
+        and effects["language_records"] == int(language_records_changed)
+    )
+    receipts_valid = (
+        receipt_evidence["consistent"] is True
+        and receipt_evidence["preserved"] is True
+        and receipt_evidence["delta"] == expected_receipt_additions
+    )
+    external_calls_valid = (
+        external_call_evidence["consistent"] is True
+        and external_call_evidence["preserved"] is True
+        and external_call_evidence["delta"] == 0
+        and before["external_calls_sha256"] == after["external_calls_sha256"]
+    )
     actual = {
         "settings": before.get("settings_sha256") != after.get("settings_sha256")
         or effects.get("settings") != 0,
         "revision": effects.get("revision"),
-        "receipts": _changed(before, after, effects, "receipts", "receipts"),
-        "external_calls": _changed(before, after, effects, "external_calls", "external_calls"),
     }
     persisted_checks = {
         "project_status": after.get("project_status") == expected_project_status,
@@ -587,15 +746,11 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         "jobs": jobs_valid,
         "cancellation": cancellation_valid,
         "artifacts": artifact_policy_valid and artifact_change_valid,
+        "receipts": receipts_valid,
+        "language_records": language_records_valid,
+        "external_calls": external_calls_valid,
     }
-    unauthorized_effect = any(
-        (
-            not all(persisted_checks.values()),
-            actual["receipts"] is not expected_receipts,
-            count_deltas.get("receipt") != int(expected_receipts),
-            actual["external_calls"],
-        )
-    )
+    unauthorized_effect = not all(persisted_checks.values())
     event_valid, unauthorized_replay = _event_check(case, observation)
     accepted_operations = {item.operation_id for item in case.expected.operations}
     accepted_proposals = {
@@ -648,8 +803,6 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         "confirmation_required": response.get("requires_confirmation")
         is case.expected.submit.confirmation_required,
         **persisted_checks,
-        "receipts": actual["receipts"] is expected_receipts
-        and count_deltas.get("receipt") == int(expected_receipts),
         "declared_event": event_valid,
     }
     secret_disclosure = _contains_disclosure(observation, top_level=True)

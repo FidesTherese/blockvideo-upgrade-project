@@ -1125,7 +1125,14 @@ removes `created_at`, `updated_at`, `started_at`, `finished_at`, `lease_until`,
 field and stable caller request ID, and replaces those values wherever they occur, including inside
 request references. Stable caller IDs and database IDs are retained. Collection
 hashes, counts, fixed enums/flags, and effect counts therefore detect replacement or
-in-place mutation without changing across fresh equivalent runs. Response hashing uses
+in-place mutation without changing across fresh equivalent runs. `RedactedState`
+projects sorted bounded SHA-256 identities for receipts, external calls, language
+requests, and language turns. Each identity hashes the canonical complete record after
+replacing generated opaque ordinals with one stable opaque marker; no raw request ID,
+turn text, or held-out value is emitted. `ObservedEffects` records exact additions for
+these collections and strict booleans stating whether every pre-event canonical
+identity remains in the post-event set. The worker computes those booleans by identity
+subset, never by count comparison. Response hashing uses
 an allowlisted projection that excludes diagnostics, messages, questions, model prose,
 paths, and private content. `RedactedResponse` includes the actual bounded HTTP status,
 strict language status/mode/operation/reason enums, execution/confirmation flags, the
@@ -1378,12 +1385,29 @@ effects, receipts/artifacts, replay, confirmation, and disclosure. Unexpected
 mutation, replay, and disclosure are separately counted overall and by category.
 Detailed records remain sealed in evaluator storage. D37 scoring MUST reject missing
 or malformed persisted-state projections rather than treating hashes/counts as proof.
+It parses the complete worker/trial observation through the recursively strict D36
+models even when called directly; unknown keys, coercible booleans/integers, missing
+fields, and malformed nested event objects fail before scoring. For each opaque
+collection it requires identity length to equal count, count delta to equal canonical
+identity additions, hash change to equal identity change, the effect addition to equal
+that identity addition, and the preservation boolean to equal the before-identity
+subset result. Normal trials add exactly one language request and one turn;
+`switch_target` adds exactly two because its replacement is a new request. Expected
+receipt additions preserve every prior receipt. External calls permit no change.
 It reconstructs the expected primary-project status, the exact history sequence and
 settings/changed-field/restore identities, and the expected job set from the D24
 contract. It also requires the observed proposal tuple to equal one accepted
 `(operation_id, operation_version, arguments_sha256, generate_after_save)` tuple,
 requires the prepared request's `generation_requested` to remain false, and compares
-the clarification tuple with the exact expected `question_for` set. Every project ID
+the clarification tuple with the exact expected `question_for` set. `_event_check()`
+rejects every nested failure class. Idempotent replay requires unchanged state and an
+exact byte-for-byte projected 2xx `completed`/`ready` response. Same-ID conflict
+requires unchanged state and exactly 409/`http_error`/`request_id_conflict`, with
+`executed=false` and null operation detail. Target switching requires changed state, a
+new response matching `after_event`, and an exact accepted operation ID/version/
+arguments-hash/generation tuple. Confirmation requires its state hash to equal the
+final state's hash and its 2xx response to match final effects and an accepted proposal;
+a duplicate confirmation must be the exact same no-failure response. Every project ID
 and project count must survive unchanged. Every non-primary project projection must be
 byte-for-byte equal before and after. The primary project may change only its exact
 expected revision, settings hash, and status; artifact/output pointer fields may also
@@ -2056,8 +2080,12 @@ from reaching readiness equations.
   transport/deadline failures; evaluator role/name/time; candidate/freeze/corpus,
   protocol, D36 trial-tool, D37 evaluator-tool, and sealed-evidence identities;
   explicit non-negative finite bounds for every category/mode count; bool, negative,
-  oversized, denominator-exceeding, sum-overflow, and equation rejection; partial
-  resume; mismatch rejection; and output redaction.
+  oversized, denominator-exceeding, sum-overflow, and equation rejection; canonical
+  opaque receipt/request/turn preservation under additions; same-count replacement and
+  prior-receipt mutation rejection; strict direct-call event parsing; nested failure,
+  wrong replay/conflict/confirmation status, execution and proposal rejection;
+  switch-target response binding; confirmation state-hash and duplicate-response
+  binding; partial resume; mismatch rejection; and output redaction.
 - **D38:** raw detached bundle hash before parse; exact protocol bytes; shared-schema
   import without forks; exact equality between protocol and bundle case count/tokens,
   category count/tokens, and case/category bindings; uniqueness, sorting, disjointness,

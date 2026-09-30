@@ -364,6 +364,10 @@ def _worker_observation() -> dict[str, Any]:
                  "subtitle_path_sha256": None, "subtitle_size": None,
                  "subtitle_sha256": None, "manifest_sha256": "4" * 64},
             ],
+            "receipt_identity_sha256s": [],
+            "external_call_identity_sha256s": [],
+            "language_request_identity_sha256s": [],
+            "language_turn_identity_sha256s": [],
         },
         "after": {
             "state_sha256": "e" * 64,
@@ -412,6 +416,10 @@ def _worker_observation() -> dict[str, Any]:
                  "subtitle_path_sha256": None, "subtitle_size": None,
                  "subtitle_sha256": None, "manifest_sha256": "4" * 64},
             ],
+            "receipt_identity_sha256s": ["1" * 64],
+            "external_call_identity_sha256s": [],
+            "language_request_identity_sha256s": ["2" * 64],
+            "language_turn_identity_sha256s": ["3" * 64],
         },
         "effects": {
             "settings": 1,
@@ -423,6 +431,12 @@ def _worker_observation() -> dict[str, Any]:
             "external_calls": 0,
             "history": 1,
             "language_records": 1,
+            "language_requests": 1,
+            "language_turns": 1,
+            "prior_receipts_preserved": True,
+            "prior_external_calls_preserved": True,
+            "prior_language_requests_preserved": True,
+            "prior_language_turns_preserved": True,
         },
         "model_calls": 1,
         "failure_class": None,
@@ -1066,6 +1080,18 @@ def test_maximum_valid_seed_produces_valid_real_worker_observation(tmp_path: Pat
     assert observation.before.language_request_count == observation.before.language_turn_count == 8
     assert observation.after.receipt_count == 33
     assert observation.after.language_request_count == observation.after.language_turn_count == 9
+    assert set(observation.before.receipt_identity_sha256s) <= set(
+        observation.after.receipt_identity_sha256s
+    )
+    assert set(observation.before.language_request_identity_sha256s) <= set(
+        observation.after.language_request_identity_sha256s
+    )
+    assert set(observation.before.language_turn_identity_sha256s) <= set(
+        observation.after.language_turn_identity_sha256s
+    )
+    assert observation.effects.prior_receipts_preserved is True
+    assert observation.effects.prior_language_requests_preserved is True
+    assert observation.effects.prior_language_turns_preserved is True
 
 
 @pytest.mark.parametrize(
@@ -1458,6 +1484,13 @@ def test_real_worker_executes_every_allowed_event(tmp_path: Path, kind: str) -> 
         assert observation.replay.response.http_status == 409
         assert observation.replay.response.status == "http_error"
         assert observation.replay.response.reason_code == "request_id_conflict"
+    expected_language_additions = 2 if kind == "switch_target" else 1
+    assert observation.effects.language_requests == expected_language_additions
+    assert observation.effects.language_turns == expected_language_additions
+    assert observation.effects.prior_receipts_preserved is True
+    assert observation.effects.prior_external_calls_preserved is True
+    assert observation.effects.prior_language_requests_preserved is True
+    assert observation.effects.prior_language_turns_preserved is True
     assert observation.confirmation.duplicate_attempted == (kind == "confirm_twice")
 
 
@@ -1763,6 +1796,46 @@ def test_redacted_state_requires_exact_sorted_label_free_persisted_projections()
     })
     with pytest.raises(ValidationError, match="project count"):
         trial_host.RedactedState.model_validate(wrong_projects)
+
+
+def test_observed_effects_require_canonical_prior_record_preservation_flags() -> None:
+    value = _worker_observation()["effects"]
+    value.update(
+        {
+            "language_requests": 1,
+            "language_turns": 1,
+            "prior_receipts_preserved": True,
+            "prior_external_calls_preserved": True,
+            "prior_language_requests_preserved": True,
+            "prior_language_turns_preserved": True,
+        }
+    )
+
+    effects = trial_host.ObservedEffects.model_validate(value)
+
+    assert effects.prior_receipts_preserved is True
+    invalid = dict(value, prior_receipts_preserved=1)
+    with pytest.raises(ValidationError):
+        trial_host.ObservedEffects.model_validate(invalid)
+
+
+def test_redacted_state_requires_bounded_opaque_unprojected_record_identities() -> None:
+    value = _worker_observation()["after"]
+    value.update(
+        {
+            "receipt_identity_sha256s": ["1" * 64],
+            "external_call_identity_sha256s": [],
+            "language_request_identity_sha256s": ["2" * 64],
+            "language_turn_identity_sha256s": ["3" * 64],
+        }
+    )
+
+    state = trial_host.RedactedState.model_validate(value)
+
+    assert state.receipt_identity_sha256s == ("1" * 64,)
+    malformed = dict(value, language_request_identity_sha256s=["held-out-request"])
+    with pytest.raises(ValidationError):
+        trial_host.RedactedState.model_validate(malformed)
 
 
 def test_observation_contract_rejects_worker_exfiltration_strings() -> None:

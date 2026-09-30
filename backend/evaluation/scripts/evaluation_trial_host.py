@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -14,7 +15,7 @@ import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -62,6 +63,7 @@ FailureClass = Literal[
 ProjectStatusValue = Literal[
     "pending", "splitting", "planning", "generating", "rendering", "completed", "failed", "cancelled",
 ]
+OpaqueIdentityHash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 async def _quiescent_candidate_dispatcher() -> None:
@@ -272,6 +274,18 @@ class RedactedState(_StrictRecord):
     artifact_entries: tuple[RedactedArtifactEntry, ...] = Field(
         max_length=MAX_OBSERVED_ARTIFACTS, strict=False
     )
+    receipt_identity_sha256s: tuple[OpaqueIdentityHash, ...] = Field(
+        max_length=MAX_OBSERVED_RECEIPTS, strict=False
+    )
+    external_call_identity_sha256s: tuple[OpaqueIdentityHash, ...] = Field(
+        max_length=MAX_OBSERVED_EXTERNAL_CALLS, strict=False
+    )
+    language_request_identity_sha256s: tuple[OpaqueIdentityHash, ...] = Field(
+        max_length=MAX_OBSERVED_LANGUAGE_REQUESTS, strict=False
+    )
+    language_turn_identity_sha256s: tuple[OpaqueIdentityHash, ...] = Field(
+        max_length=MAX_OBSERVED_LANGUAGE_TURNS, strict=False
+    )
 
     @model_validator(mode="after")
     def projections_match_counts_and_order(self) -> RedactedState:
@@ -283,6 +297,16 @@ class RedactedState(_StrictRecord):
             raise ValueError("job entries must match job count")
         if len(self.artifact_entries) != self.artifact_count:
             raise ValueError("artifact entries must match artifact count")
+        opaque_identities = (
+            (self.receipt_identity_sha256s, self.receipt_count),
+            (self.external_call_identity_sha256s, self.external_call_count),
+            (self.language_request_identity_sha256s, self.language_request_count),
+            (self.language_turn_identity_sha256s, self.language_turn_count),
+        )
+        if any(len(identities) != count for identities, count in opaque_identities):
+            raise ValueError("opaque record identities must match collection counts")
+        if any(tuple(sorted(set(identities))) != identities for identities, _ in opaque_identities):
+            raise ValueError("opaque record identities must be unique and sorted")
         project_ids = [item.id for item in self.project_entries]
         history_keys = [(item.project_id, item.revision) for item in self.history_entries]
         job_ids = [item.id for item in self.job_entries]
@@ -303,11 +327,17 @@ class ObservedEffects(_StrictRecord):
     revision: int = Field(ge=0, le=10**12)
     jobs: int = Field(ge=0, le=1)
     cancellations: int = Field(ge=0, le=1)
-    receipts: int = Field(ge=0, le=1)
+    receipts: int = Field(ge=0, le=MODEL_CALL_LIMIT)
     artifacts: int = Field(ge=0, le=1)
-    external_calls: int = Field(ge=0, le=1)
+    external_calls: int = Field(ge=0, le=MODEL_CALL_LIMIT)
     history: int = Field(ge=0, le=1)
     language_records: int = Field(ge=0, le=1)
+    language_requests: int = Field(ge=0, le=MODEL_CALL_LIMIT)
+    language_turns: int = Field(ge=0, le=MODEL_CALL_LIMIT)
+    prior_receipts_preserved: bool
+    prior_external_calls_preserved: bool
+    prior_language_requests_preserved: bool
+    prior_language_turns_preserved: bool
 
 
 class ReplayObservation(_StrictRecord):
@@ -378,6 +408,19 @@ _VOLATILE_LOGICAL_FIELDS = frozenset({
     "created_at", "updated_at", "started_at", "finished_at", "lease_until", "owner_token",
 })
 _OPAQUE_LOGICAL_FIELDS = frozenset({"confirmation_token", "core_request_id"})
+
+
+def _record_identity(value: object) -> str:
+    def stable_opaque(item: object) -> object:
+        if isinstance(item, dict):
+            return {key: stable_opaque(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [stable_opaque(child) for child in item]
+        if isinstance(item, str):
+            return re.sub(r"opaque-\d+", "opaque", item)
+        return item
+
+    return _hash(stable_opaque(value))
 
 
 def _logical_state(value: object) -> object:
@@ -1055,7 +1098,19 @@ def _candidate_worker(model_call_budget: int) -> int:
                           "subtitle_sha256": (
                               item["subtitle"]["sha256"] if item["subtitle"] is not None else None
                           ), "manifest_sha256": item["manifest_sha256"]}
-                          for item in value["artifacts"]]}
+                          for item in value["artifacts"]],
+                      "receipt_identity_sha256s": sorted(
+                          _record_identity(item) for item in value["receipts"]
+                      ),
+                      "external_call_identity_sha256s": sorted(
+                          _record_identity(item) for item in value["external_calls"]
+                      ),
+                      "language_request_identity_sha256s": sorted(
+                          _record_identity(item) for item in value["language_requests"]
+                      ),
+                      "language_turn_identity_sha256s": sorted(
+                          _record_identity(item) for item in value["language_turns"]
+                      )}
             for name in ("projects", "history", "jobs", "receipts", "artifacts", "external_calls", "language_requests", "language_turns"):
                 result[f"{name}_sha256"] = _hash(value[name])
                 singular = {"projects": "project", "history": "history", "jobs": "job", "receipts": "receipt",
@@ -1204,6 +1259,25 @@ def _candidate_worker(model_call_budget: int) -> int:
             after = canonical_state()
             collection_changes = {name: int(_hash(before[name]) != _hash(after[name])) for name in
                 ("history", "jobs", "receipts", "artifacts", "external_calls", "language_requests", "language_turns")}
+            opaque_collections = (
+                "receipts", "external_calls", "language_requests", "language_turns"
+            )
+            before_identities = {
+                name: {_record_identity(item) for item in before[name]}
+                for name in opaque_collections
+            }
+            after_identities = {
+                name: {_record_identity(item) for item in after[name]}
+                for name in opaque_collections
+            }
+            additions = {
+                name: len(after_identities[name] - before_identities[name])
+                for name in opaque_collections
+            }
+            prior_preserved = {
+                name: before_identities[name] <= after_identities[name]
+                for name in opaque_collections
+            }
             cancel_before = [(item["id"], item["cancel_requested"]) for item in before["jobs"]]
             cancel_after = [(item["id"], item["cancel_requested"]) for item in after["jobs"]]
             redacted_response = response_projection(response, response_http.status_code)
@@ -1225,9 +1299,15 @@ def _candidate_worker(model_call_budget: int) -> int:
                 "effects": {"settings": int(before["primary"]["settings"] != after["primary"]["settings"]),
                     "revision": abs(after["primary"]["revision"] - before["primary"]["revision"]),
                     "jobs": collection_changes["jobs"], "cancellations": int(cancel_before != cancel_after),
-                    "receipts": collection_changes["receipts"], "artifacts": collection_changes["artifacts"],
-                    "external_calls": collection_changes["external_calls"], "history": collection_changes["history"],
-                    "language_records": int(collection_changes["language_requests"] or collection_changes["language_turns"])},
+                    "receipts": additions["receipts"], "artifacts": collection_changes["artifacts"],
+                    "external_calls": additions["external_calls"], "history": collection_changes["history"],
+                    "language_records": int(collection_changes["language_requests"] or collection_changes["language_turns"]),
+                    "language_requests": additions["language_requests"],
+                    "language_turns": additions["language_turns"],
+                    "prior_receipts_preserved": prior_preserved["receipts"],
+                    "prior_external_calls_preserved": prior_preserved["external_calls"],
+                    "prior_language_requests_preserved": prior_preserved["language_requests"],
+                    "prior_language_turns_preserved": prior_preserved["language_turns"]},
                 "model_calls": model_budget.calls, "failure_class": None,
                 "replay": {"attempted": replay_projection is not None, "model_calls": model_budget.calls - calls_before_event,
                     "state_unchanged": replay_before == replay_after,
