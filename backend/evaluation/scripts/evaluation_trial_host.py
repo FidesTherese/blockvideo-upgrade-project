@@ -34,6 +34,7 @@ MAX_OBSERVED_LANGUAGE_REQUESTS = 8 + MODEL_CALL_LIMIT
 MAX_OBSERVED_LANGUAGE_TURNS = 8 + MODEL_CALL_LIMIT
 SUBPROCESS_TIMEOUT_SECONDS = PROTOCOL_DEADLINE_SECONDS * MODEL_CALL_LIMIT + 30
 _REPARSE_POINT = 0x400
+_POSIX_FD_PATH = re.compile(r"^/proc/[1-9][0-9]*/fd/[0-9]+$")
 
 ResponseStatus = Literal["interpreting", "ready", "needs_input", "unsupported", "blocked", "error", "completed", "dismissed", "http_error"]
 ResponseMode = Literal["all_tools", "semantic", "stateful"]
@@ -491,6 +492,19 @@ def _lstat_directory(path: Path, error: str) -> os.stat_result:
     return metadata
 
 
+def _resolve_candidate_root(path: Path) -> Path:
+    absolute = path.absolute()
+    metadata = absolute.lstat()
+    if stat.S_ISLNK(metadata.st_mode):
+        if os.name != "posix" or _POSIX_FD_PATH.fullmatch(absolute.as_posix()) is None:
+            raise ValueError("candidate root is invalid")
+        resolved = absolute.resolve(strict=True)
+        _lstat_directory(resolved, "candidate root is invalid")
+        return resolved
+    _lstat_directory(absolute, "candidate root is invalid")
+    return absolute.resolve(strict=True)
+
+
 def _bounded_bytes(path: Path, limit: int, error: str) -> bytes:
     before = _lstat_regular(path, error)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -718,8 +732,7 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
     except (ValidationError, ValueError):
         raise ValueError("invalid unlabeled trial case") from None
 
-    _lstat_directory(candidate_root, "candidate root is invalid")
-    candidate_root = candidate_root.resolve(strict=True)
+    candidate_root = _resolve_candidate_root(candidate_root)
     candidate_backend = candidate_root / "backend"
     _lstat_directory(candidate_backend, "candidate root is invalid")
     if not _contained(candidate_backend, candidate_root):

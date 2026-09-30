@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import stat
 import subprocess
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -79,6 +81,19 @@ _REPARSE_POINT = 0x400
 _MAX_JSON_BYTES = 16 * 1024 * 1024
 _HOST_WATCHDOG_SECONDS = 180 * 4 + 30
 _HOST_OUTPUT_CAP_BYTES = 2 * 1024 * 1024
+_HOST_PIPE_DRAIN_GRACE_SECONDS = 1.0
+_HOST_TEARDOWN_SECONDS = 10.0
+_FILE_SHARE_READ = 0x1
+_FILE_SHARE_WRITE = 0x2
+_GENERIC_READ = 0x80000000
+_OPEN_EXISTING = 3
+_FILE_ATTRIBUTE_DIRECTORY = 0x10
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_PROCESS_SET_QUOTA = 0x0100
+_PROCESS_TERMINATE = 0x0001
 _TEMP_PATTERN = re.compile(r"^\.(?P<final>[^/\\]+)\.tmp-[0-9a-f]{64}$")
 _TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MODES = ("all_tools", "stateful")
@@ -97,6 +112,16 @@ class _TrialRecord(BaseModel):
     candidate_snapshot_sha256: str | None
 
 
+@dataclass
+class _CandidateAnchor:
+    canonical_path: Path
+    execution_path: Path
+    identity: tuple[int, int]
+    descriptor: int | None = None
+    handle: int | None = None
+    closed: bool = False
+
+
 class _RunContext(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
@@ -105,6 +130,7 @@ class _RunContext(BaseModel):
     d37_attestation: ToolAttestation
     freeze_sha256: str
     tool_root: Path
+    candidate_anchor: _CandidateAnchor
 
 
 def _tool_repo_root() -> Path:
@@ -593,6 +619,195 @@ _D37_SOURCE_PATHS = tuple(
 )
 
 
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("read_operation_count", ctypes.c_uint64),
+        ("write_operation_count", ctypes.c_uint64),
+        ("other_operation_count", ctypes.c_uint64),
+        ("read_transfer_count", ctypes.c_uint64),
+        ("write_transfer_count", ctypes.c_uint64),
+        ("other_transfer_count", ctypes.c_uint64),
+    ]
+
+
+class _BasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("per_process_user_time_limit", ctypes.c_int64),
+        ("per_job_user_time_limit", ctypes.c_int64),
+        ("limit_flags", ctypes.c_uint32),
+        ("minimum_working_set_size", ctypes.c_size_t),
+        ("maximum_working_set_size", ctypes.c_size_t),
+        ("active_process_limit", ctypes.c_uint32),
+        ("affinity", ctypes.c_size_t),
+        ("priority_class", ctypes.c_uint32),
+        ("scheduling_class", ctypes.c_uint32),
+    ]
+
+
+class _ExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("basic_limit_information", _BasicLimitInformation),
+        ("io_info", _IoCounters),
+        ("process_memory_limit", ctypes.c_size_t),
+        ("job_memory_limit", ctypes.c_size_t),
+        ("peak_process_memory_used", ctypes.c_size_t),
+        ("peak_job_memory_used", ctypes.c_size_t),
+    ]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("file_attributes", ctypes.c_uint32),
+        ("creation_time_low", ctypes.c_uint32),
+        ("creation_time_high", ctypes.c_uint32),
+        ("last_access_time_low", ctypes.c_uint32),
+        ("last_access_time_high", ctypes.c_uint32),
+        ("last_write_time_low", ctypes.c_uint32),
+        ("last_write_time_high", ctypes.c_uint32),
+        ("volume_serial_number", ctypes.c_uint32),
+        ("file_size_high", ctypes.c_uint32),
+        ("file_size_low", ctypes.c_uint32),
+        ("number_of_links", ctypes.c_uint32),
+        ("file_index_high", ctypes.c_uint32),
+        ("file_index_low", ctypes.c_uint32),
+    ]
+
+
+def _windows_directory_identity(handle: int) -> tuple[int, int]:
+    information = _ByHandleFileInformation()
+    get_information = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandle
+    get_information.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ByHandleFileInformation)]
+    get_information.restype = ctypes.c_int
+    if not get_information(ctypes.c_void_p(handle), ctypes.byref(information)):
+        error = ctypes.get_last_error()
+        raise OSError(error, "GetFileInformationByHandle failed for candidate directory")
+    if (
+        not information.file_attributes & _FILE_ATTRIBUTE_DIRECTORY
+        or information.file_attributes & _REPARSE_POINT
+    ):
+        raise ValueError("candidate anchor must be a non-reparse directory")
+    file_index = (information.file_index_high << 32) | information.file_index_low
+    return information.volume_serial_number, file_index
+
+
+def _windows_open_candidate_directory(path: Path) -> int:
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(
+        str(path),
+        _GENERIC_READ,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle in (None, invalid_handle):
+        error = ctypes.get_last_error()
+        raise OSError(error, "CreateFileW failed for candidate directory")
+    return int(handle)
+
+
+def _windows_close_handle(handle: int) -> None:
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    if not close_handle(ctypes.c_void_p(handle)):
+        error = ctypes.get_last_error()
+        raise OSError(error, "CloseHandle failed for candidate directory")
+
+
+def _open_candidate_anchor(candidate_root: Path) -> _CandidateAnchor:
+    canonical = _canonical_candidate_root(candidate_root)
+    if os.name == "nt":
+        handle = _windows_open_candidate_directory(canonical)
+        try:
+            identity = _windows_directory_identity(handle)
+        except BaseException:
+            _windows_close_handle(handle)
+            raise
+        return _CandidateAnchor(
+            canonical_path=canonical,
+            execution_path=canonical,
+            identity=identity,
+            handle=handle,
+        )
+    if os.name != "posix" or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("candidate directory anchoring is unsupported on this platform")
+    descriptor = os.open(canonical, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
+            raise ValueError("candidate anchor must be a non-reparse directory")
+        execution = Path(f"/proc/{os.getpid()}/fd/{descriptor}")
+        if not execution.exists() or execution.resolve(strict=True) != canonical:
+            raise ValueError("stable candidate fd path is unavailable on this POSIX host")
+        return _CandidateAnchor(
+            canonical_path=canonical,
+            execution_path=execution,
+            identity=(metadata.st_dev, metadata.st_ino),
+            descriptor=descriptor,
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _close_candidate_anchor(anchor: _CandidateAnchor) -> None:
+    if anchor.closed:
+        return
+    anchor.closed = True
+    if anchor.handle is not None:
+        handle = anchor.handle
+        anchor.handle = None
+        _windows_close_handle(handle)
+    if anchor.descriptor is not None:
+        descriptor = anchor.descriptor
+        anchor.descriptor = None
+        os.close(descriptor)
+
+
+def _candidate_path_identity(path: Path) -> tuple[int, int]:
+    if os.name == "nt":
+        handle = _windows_open_candidate_directory(path)
+        try:
+            return _windows_directory_identity(handle)
+        finally:
+            _windows_close_handle(handle)
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISDIR(
+        metadata.st_mode
+    ):
+        raise ValueError("candidate root must remain a non-link directory")
+    return metadata.st_dev, metadata.st_ino
+
+
+def _assert_candidate_anchor(anchor: _CandidateAnchor) -> None:
+    if anchor.closed:
+        raise ValueError("candidate directory anchor is closed")
+    if anchor.handle is not None:
+        retained = _windows_directory_identity(anchor.handle)
+    elif anchor.descriptor is not None:
+        metadata = os.fstat(anchor.descriptor)
+        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
+            raise ValueError("candidate directory anchor changed type")
+        retained = metadata.st_dev, metadata.st_ino
+    else:
+        raise ValueError("candidate directory anchor is unavailable")
+    if retained != anchor.identity or _candidate_path_identity(anchor.canonical_path) != anchor.identity:
+        raise ValueError("candidate directory identity changed during evaluation")
+
+
 def _canonical_candidate_root(candidate_root: Path) -> Path:
     supplied = candidate_root.absolute()
     metadata = supplied.lstat()
@@ -634,7 +849,11 @@ def _verify_tool_sources(root: Path, attestation: ToolAttestation) -> None:
             raise ValueError("tool attestation does not match its declared commit")
 
 
-def _load_run_context(candidate_root: Path, freeze_manifest: Path) -> _RunContext:
+def _load_run_context(
+    candidate_root: Path,
+    freeze_manifest: Path,
+    candidate_anchor: _CandidateAnchor,
+) -> _RunContext:
     if freeze_manifest.name != "freeze-manifest.json":
         raise ValueError("freeze manifest must belong to a completed D36 publication")
     publication = freeze_manifest.parent
@@ -660,13 +879,16 @@ def _load_run_context(candidate_root: Path, freeze_manifest: Path) -> _RunContex
         git_commit=tool_commit,
         source_paths=_d37_source_paths(tool_root),
     )
+    _assert_candidate_anchor(candidate_anchor)
     _validate_candidate(candidate_root, manifest)
+    _assert_candidate_anchor(candidate_anchor)
     return _RunContext(
         manifest=manifest,
         d36_attestation=d36_attestation,
         d37_attestation=d37_attestation,
         freeze_sha256=_sha256_bytes(raw),
         tool_root=tool_root,
+        candidate_anchor=candidate_anchor,
     )
 
 
@@ -674,7 +896,11 @@ def _validate_run_context(
     candidate_root: Path, freeze_manifest: Path, expected: _RunContext
 ) -> None:
     try:
-        current = _load_run_context(candidate_root, freeze_manifest)
+        _assert_candidate_anchor(expected.candidate_anchor)
+        current = _load_run_context(
+            candidate_root, freeze_manifest, expected.candidate_anchor
+        )
+        _assert_candidate_anchor(expected.candidate_anchor)
     except (OSError, ValueError) as error:
         raise ValueError(
             "candidate, freeze, or tool identity changed during evaluation"
@@ -729,6 +955,18 @@ def _path_is_within(path: Path, root: Path) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return _path_is_within(left, right) or _path_is_within(right, left)
+
+
+def _validate_output_location(output_root: Path, protected_roots: tuple[Path, ...]) -> Path:
+    output = output_root.absolute().resolve(strict=False)
+    for protected in protected_roots:
+        if _paths_overlap(output, protected):
+            raise ValueError("evaluation output overlaps a protected root")
+    return output
 
 
 def _validate_run_artifacts(
@@ -934,11 +1172,96 @@ async def _bounded_stream(
         os.close(descriptor)
 
 
-async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        await process.wait()
+def _attach_windows_job(process: asyncio.subprocess.Process) -> None:
+    if os.name != "nt":
         return
-    if os.name == "nt" and hasattr(process, "pid"):
+    create_job = ctypes.WinDLL("kernel32", use_last_error=True).CreateJobObjectW
+    create_job.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    create_job.restype = ctypes.c_void_p
+    job = create_job(None, None)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if job in (None, invalid_handle):
+        error = ctypes.get_last_error()
+        raise OSError(error, "CreateJobObjectW failed for trial host")
+    job_handle = int(job)
+    try:
+        information = _ExtendedLimitInformation()
+        information.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        set_information = ctypes.WinDLL(
+            "kernel32", use_last_error=True
+        ).SetInformationJobObject
+        set_information.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        set_information.restype = ctypes.c_int
+        if not set_information(
+            ctypes.c_void_p(job_handle),
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+        ):
+            error = ctypes.get_last_error()
+            raise OSError(error, "SetInformationJobObject failed for trial host")
+        open_process = ctypes.WinDLL("kernel32", use_last_error=True).OpenProcess
+        open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        open_process.restype = ctypes.c_void_p
+        process_handle = open_process(
+            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, 0, process.pid
+        )
+        if process_handle in (None, invalid_handle):
+            error = ctypes.get_last_error()
+            raise OSError(error, "OpenProcess failed for trial host")
+        try:
+            assign = ctypes.WinDLL(
+                "kernel32", use_last_error=True
+            ).AssignProcessToJobObject
+            assign.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            assign.restype = ctypes.c_int
+            if not assign(
+                ctypes.c_void_p(job_handle), ctypes.c_void_p(process_handle)
+            ):
+                error = ctypes.get_last_error()
+                raise OSError(error, "AssignProcessToJobObject failed for trial host")
+        finally:
+            _windows_close_handle(int(process_handle))
+        setattr(process, "_d37_job_handle", job_handle)
+    except BaseException:
+        _windows_close_handle(job_handle)
+        raise
+
+
+async def _release_windows_bootstrap(process: asyncio.subprocess.Process) -> None:
+    if os.name != "nt":
+        return
+    if process.stdin is None:
+        raise ValueError("trial host bootstrap pipe is unavailable")
+    process.stdin.write(b"1")
+    await process.stdin.drain()
+    process.stdin.close()
+    await process.stdin.wait_closed()
+
+
+def _close_windows_job(process: asyncio.subprocess.Process) -> None:
+    handle = getattr(process, "_d37_job_handle", None)
+    if handle is None:
+        return
+    setattr(process, "_d37_job_handle", None)
+    _windows_close_handle(handle)
+
+
+async def _wait_for_parent_exit(process: asyncio.subprocess.Process) -> int:
+    while process.returncode is None:
+        await asyncio.sleep(0.01)
+    return process.returncode
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+    if os.name == "nt" and getattr(process, "_d37_job_handle", None) is not None:
+        _close_windows_job(process)
+    elif os.name == "nt" and hasattr(process, "pid") and process.returncode is None:
         killer = await asyncio.create_subprocess_exec(
             "taskkill",
             "/PID",
@@ -955,16 +1278,14 @@ async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    else:
+    elif process.returncode is None:
         process.kill()
-    if process.returncode is None:
-        try:
-            await asyncio.wait_for(process.wait(), timeout=10)
-        except TimeoutError:
+    try:
+        await asyncio.wait_for(process.wait(), timeout=_HOST_TEARDOWN_SECONDS)
+    except TimeoutError:
+        if process.returncode is None:
             process.kill()
-            await process.wait()
-    else:
-        await process.wait()
+        raise ValueError("trial host process teardown could not be confirmed") from None
 
 
 async def _invoke_trial_host(
@@ -1001,10 +1322,20 @@ async def _invoke_trial_host(
     if mode == "stateful":
         arguments.extend(("--index", str(index)))
     process_options: dict[str, object] = {}
+    launch_arguments = arguments
+    process_stdin: int = asyncio.subprocess.DEVNULL
     if os.name == "posix":
         process_options["start_new_session"] = True
     elif os.name == "nt":
         process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        bootstrap = (
+            "import subprocess,sys; "
+            "ready=sys.stdin.buffer.read(1); "
+            "raise SystemExit(125) if ready != b'1' else "
+            "SystemExit(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL))"
+        )
+        launch_arguments = [sys.executable, "-B", "-c", bootstrap, *arguments]
+        process_stdin = asyncio.subprocess.PIPE
     stdout_descriptor = _open_exclusive_regular(stdout_path, "trial stdout")
     try:
         stderr_descriptor = _open_exclusive_regular(stderr_path, "trial stderr")
@@ -1013,15 +1344,26 @@ async def _invoke_trial_host(
         raise
     try:
         process = await asyncio.create_subprocess_exec(
-            *arguments,
+            *launch_arguments,
             cwd=tool_root / "backend",
             env=_clean_subprocess_environment(tool_root),
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=process_stdin,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             **process_options,
         )
+        _attach_windows_job(process)
+        await _release_windows_bootstrap(process)
     except BaseException:
+        if "process" in locals():
+            if getattr(process, "_d37_job_handle", None) is not None:
+                _close_windows_job(process)
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
         os.close(stdout_descriptor)
         os.close(stderr_descriptor)
         raise
@@ -1047,8 +1389,9 @@ async def _invoke_trial_host(
             )
         ),
     )
-    wait_task = asyncio.create_task(process.wait())
+    wait_task = asyncio.create_task(_wait_for_parent_exit(process))
     overflow_task = asyncio.create_task(overflow.wait())
+    outcome: str
     try:
         done, _ = await asyncio.wait(
             (wait_task, overflow_task),
@@ -1056,20 +1399,45 @@ async def _invoke_trial_host(
             return_when=asyncio.FIRST_COMPLETED,
         )
         if not done:
-            await _terminate_process_tree(process)
-            return "deadline_failure"
-        if overflow_task in done and overflow.is_set():
-            await _terminate_process_tree(process)
-            return "transport_failure"
-        await wait_task
+            outcome = "deadline_failure"
+        elif overflow_task in done and overflow.is_set():
+            outcome = "transport_failure"
+        else:
+            await wait_task
+            outcome = "completed" if process.returncode == 0 else "transport_failure"
+            _, pending_readers = await asyncio.wait(
+                readers, timeout=_HOST_PIPE_DRAIN_GRACE_SECONDS
+            )
+            if not pending_readers:
+                await asyncio.gather(*readers, return_exceptions=False)
+        await _terminate_process_tree(process)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*readers, return_exceptions=False),
+                timeout=_HOST_TEARDOWN_SECONDS,
+            )
+        except TimeoutError:
+            for reader in readers:
+                reader.cancel()
+            await asyncio.gather(*readers, return_exceptions=True)
+            raise ValueError("trial host pipe teardown could not be confirmed") from None
+        return outcome
     except BaseException:
         await _terminate_process_tree(process)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*readers, return_exceptions=True),
+                timeout=_HOST_TEARDOWN_SECONDS,
+            )
+        except TimeoutError:
+            for reader in readers:
+                reader.cancel()
+            await asyncio.gather(*readers, return_exceptions=True)
+            raise ValueError("trial host teardown could not be confirmed") from None
         raise
     finally:
         overflow_task.cancel()
         await asyncio.gather(overflow_task, return_exceptions=True)
-        await asyncio.gather(*readers, return_exceptions=False)
-    return "completed" if process.returncode == 0 else "transport_failure"
 
 
 def _observation(path: Path) -> tuple[TrialObservation, bytes]:
@@ -1138,7 +1506,7 @@ async def _run_trial(
     try:
         outcome = await _invoke_trial_host(
             tool_root=context.tool_root,
-            candidate_root=candidate_root,
+            candidate_root=context.candidate_anchor.execution_path,
             mode=mode,
             input_path=input_path,
             output_path=output_path,
@@ -1267,7 +1635,7 @@ def _validate_existing_bundle(
     return bundle
 
 
-async def run_blinded_evaluation(
+async def _run_blinded_evaluation_anchored(
     *,
     candidate_root: Path,
     freeze_manifest: Path,
@@ -1279,13 +1647,22 @@ async def run_blinded_evaluation(
     index: Path,
     evaluator_name: str,
     token_key_file: Path,
+    context: _RunContext,
 ) -> EvaluationResultBundle:
-    """Run or resume one externally isolated synthetic-or-held-out evaluation."""
-    candidate_root = _canonical_candidate_root(candidate_root)
-    context = _load_run_context(candidate_root, freeze_manifest)
+    protected_roots = (
+        candidate_root,
+        context.tool_root,
+        freeze_manifest.parent.resolve(strict=True),
+        corpus.parent.resolve(strict=True),
+        human_review.parent.resolve(strict=True),
+        independent_review.parent.resolve(strict=True),
+        index.resolve(strict=True),
+        token_key_file.parent.resolve(strict=True),
+    )
+    expected_output = _validate_output_location(output_root, protected_roots)
     output = _require_directory(output_root, "evaluation output", create=True)
-    if _path_is_within(output, candidate_root) or _path_is_within(output, context.tool_root):
-        raise ValueError("evaluation output must be external to candidate and tool repositories")
+    if output != expected_output:
+        raise ValueError("evaluation output changed while creating its root")
 
     corpus_raw = _read_regular(corpus)
     human_raw = _read_regular(human_review)
@@ -1469,6 +1846,41 @@ async def run_blinded_evaluation(
         raise ValueError("result bundle changed after publication")
     _validate_run_context(candidate_root, freeze_manifest, context)
     return bundle
+
+
+async def run_blinded_evaluation(
+    *,
+    candidate_root: Path,
+    freeze_manifest: Path,
+    corpus: Path,
+    human_review: Path,
+    independent_review: Path,
+    output_root: Path,
+    model: str,
+    index: Path,
+    evaluator_name: str,
+    token_key_file: Path,
+) -> EvaluationResultBundle:
+    """Run or resume one externally isolated synthetic-or-held-out evaluation."""
+    canonical_candidate = _canonical_candidate_root(candidate_root)
+    anchor = _open_candidate_anchor(canonical_candidate)
+    try:
+        context = _load_run_context(canonical_candidate, freeze_manifest, anchor)
+        return await _run_blinded_evaluation_anchored(
+            candidate_root=canonical_candidate,
+            freeze_manifest=freeze_manifest,
+            corpus=corpus,
+            human_review=human_review,
+            independent_review=independent_review,
+            output_root=output_root,
+            model=model,
+            index=index,
+            evaluator_name=evaluator_name,
+            token_key_file=token_key_file,
+            context=context,
+        )
+    finally:
+        _close_candidate_anchor(anchor)
 
 
 __all__ = [

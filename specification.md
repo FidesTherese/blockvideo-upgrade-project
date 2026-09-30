@@ -20,10 +20,18 @@ corpus remains mounted outside and unread by the implementation process. Its sou
 attestation automatically covers the complete tracked evaluation Python tree, the CLI,
 the conservative tracked application Python closure, operation definitions, and the
 backend project/lock files; tests, evidence, secrets, and held-out data remain excluded.
-The runner accepts only one canonical non-link candidate identity, validates every
-writable output component without following links, bounds child stdout/stderr, and
-terminates the complete host process tree on timeout, cancellation, or overflow. It
-creates one immutable canonical run protocol and one shared full result schema;
+The runner retains one candidate-directory identity for the full run: a Windows
+no-delete directory handle or a POSIX `O_DIRECTORY|O_NOFOLLOW` descriptor. POSIX host
+execution uses the retained `/proc/<runner-pid>/fd/<fd>` alias and fails closed when no
+stable descriptor path exists. Identity is checked before and after every invocation.
+Output roots must be disjoint in both containment directions from the candidate,
+tooling repository, token-key parent, and mounted input roots. Each host runs in a
+Windows kill-on-close Job Object or POSIX process group; parent exit does not end
+supervision, and bounded pipe drain/teardown kills inherited-pipe descendants on
+normal exit, timeout, cancellation, or overflow. The token-key loader allocates its
+mutable buffer before I/O and zeroes it after every open/read/stat/close failure and
+normal context exit. The runner creates one immutable canonical run protocol and one
+shared full result schema;
 protocol, trial, and bundle publication uses fsynced same-directory random temporaries
 and atomic no-replace hard links, so interruption cannot truncate or replace a canonical
 final. Resume ignores only validated publication temporaries and parses complete

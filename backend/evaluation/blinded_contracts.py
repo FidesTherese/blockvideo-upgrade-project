@@ -60,32 +60,39 @@ def opaque_category_token(key: bytes, category_id: str) -> OpaqueToken:
     return _opaque_token(key, _CATEGORY_DOMAIN, _identifier_bytes(category_id, case_id=False))
 
 
+def _new_token_key_buffer() -> bytearray:
+    return bytearray()
+
+
 @contextmanager
 def token_key(path: Path) -> Iterator[bytearray]:
     """Read one exact external key without following links and erase its buffer."""
-    before = path.lstat()
-    if (
-        stat.S_ISLNK(before.st_mode)
-        or getattr(before, "st_file_attributes", 0) & _REPARSE_POINT
-        or not stat.S_ISREG(before.st_mode)
-    ):
-        raise ValueError("token key must be a regular non-link file")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    key = bytearray()
+    key = _new_token_key_buffer()
+    descriptor: int | None = None
     try:
-        opened = os.fstat(descriptor)
+        before = path.lstat()
         if (
-            not stat.S_ISREG(opened.st_mode)
-            or getattr(opened, "st_file_attributes", 0) & _REPARSE_POINT
-            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            stat.S_ISLNK(before.st_mode)
+            or getattr(before, "st_file_attributes", 0) & _REPARSE_POINT
+            or not stat.S_ISREG(before.st_mode)
         ):
-            raise ValueError("token key identity changed while opening")
-        key.extend(os.read(descriptor, 33))
-        final = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
+            raise ValueError("token key must be a regular non-link file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or getattr(opened, "st_file_attributes", 0) & _REPARSE_POINT
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                raise ValueError("token key identity changed while opening")
+            key.extend(os.read(descriptor, 33))
+            final = os.fstat(descriptor)
+        finally:
+            current = descriptor
+            descriptor = None
+            os.close(current)
         after = path.lstat()
         if (
             stat.S_ISLNK(after.st_mode)
@@ -103,8 +110,13 @@ def token_key(path: Path) -> Iterator[bytearray]:
             raise ValueError("token key must contain exactly 32 raw bytes")
         yield key
     finally:
-        for index in range(len(key)):
-            key[index] = 0
+        try:
+            if descriptor is not None:
+                os.close(descriptor)
+        finally:
+            descriptor = None
+            for index in range(len(key)):
+                key[index] = 0
 
 
 def case_category_bindings(

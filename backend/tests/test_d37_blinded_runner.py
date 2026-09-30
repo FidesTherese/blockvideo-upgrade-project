@@ -241,6 +241,43 @@ def test_protocol_token_key_buffer_is_zeroed_after_use(tmp_path: Path) -> None:
     assert retained == bytearray(32)
 
 
+@pytest.mark.parametrize("failure", ["final_fstat", "close"])
+def test_protocol_token_key_buffer_is_zeroed_on_descriptor_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import evaluation.blinded_contracts as contracts
+
+    path = tmp_path / "token.key"
+    path.write_bytes(SYNTHETIC_KEY)
+    retained = bytearray()
+    monkeypatch.setattr(contracts, "_new_token_key_buffer", lambda: retained)
+    if failure == "final_fstat":
+        real_fstat = os.fstat
+        calls = 0
+
+        def failing_fstat(descriptor: int) -> os.stat_result:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected final fstat failure")
+            return real_fstat(descriptor)
+
+        monkeypatch.setattr(contracts.os, "fstat", failing_fstat)
+    else:
+        real_close = os.close
+
+        def failing_close(descriptor: int) -> None:
+            real_close(descriptor)
+            raise OSError("injected close failure")
+
+        monkeypatch.setattr(contracts.os, "close", failing_close)
+
+    with pytest.raises(OSError, match="injected"):
+        with token_key(path):
+            pass
+    assert retained == bytearray(32)
+
+
 def test_protocol_category_binding_uses_first_d24_tag() -> None:
     bindings = case_category_bindings(_cases(), SYNTHETIC_KEY)
     by_case = {item.case_token: item.category_token for item in bindings}
@@ -2088,6 +2125,7 @@ def _make_task4_publication(
 
 
 def _write_task4_inputs(root: Path, case: Case) -> tuple[Path, Path, Path, Path, Path]:
+    root.mkdir(parents=True, exist_ok=True)
     corpus = root / "held-out.jsonl"
     corpus.write_text(case.model_dump_json() + "\n", encoding="utf-8")
     corpus_hash = corpus_digest([case])
@@ -2136,7 +2174,9 @@ def _task4_environment(
     freeze_manifest = _make_task4_publication(
         tmp_path, candidate_commit, candidate_files, d36_attestation
     )
-    corpus, human, independent, index, key = _write_task4_inputs(tmp_path, case)
+    corpus, human, independent, index, key = _write_task4_inputs(
+        tmp_path / "private-inputs", case
+    )
     monkeypatch.setattr("evaluation.blinded_runner._tool_repo_root", lambda: tool_repo)
     return {
         "candidate_root": candidate,
@@ -2438,6 +2478,12 @@ def test_interrupted_host_subprocess_is_killed_and_awaited(
         await selected.wait()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(runner, "_attach_windows_job", lambda _: None)
+
+    async def release_bootstrap(_: FakeProcess) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_release_windows_bootstrap", release_bootstrap)
     monkeypatch.setattr(runner, "_terminate_process_tree", terminate_tree)
     (tmp_path / "backend").mkdir()
 
@@ -2650,6 +2696,17 @@ def test_writable_directory_rejects_precreated_link_component(
     assert list(outside.iterdir()) == []
 
 
+def test_output_root_rejects_workspace_parent_of_protected_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    arguments["output_root"] = tmp_path
+
+    with pytest.raises(ValueError, match="external|overlap|protected"):
+        asyncio.run(run_blinded_evaluation(**arguments))
+    assert not (tmp_path / "protocol.json").exists()
+
+
 def test_candidate_root_symlink_and_path_swap_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2668,13 +2725,76 @@ def test_candidate_root_symlink_and_path_swap_fail_closed(
 
     async def swap_candidate(**_: object) -> str:
         candidate = Path(arguments["candidate_root"])
-        candidate.rename(candidate.with_name("candidate-moved"))
-        candidate.mkdir()
+        if os.name == "nt":
+            with pytest.raises(OSError):
+                candidate.rename(candidate.with_name("candidate-moved"))
+        else:
+            candidate.rename(candidate.with_name("candidate-moved"))
+            candidate.mkdir()
         return "transport_failure"
 
     monkeypatch.setattr(runner, "_invoke_trial_host", swap_candidate)
-    with pytest.raises(ValueError, match="candidate"):
+    if os.name == "nt":
         asyncio.run(run_blinded_evaluation(**arguments))
+    else:
+        with pytest.raises(ValueError, match="candidate"):
+            asyncio.run(run_blinded_evaluation(**arguments))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX retained fd path only")
+def test_d36_host_accepts_only_stable_proc_fd_candidate_alias(tmp_path: Path) -> None:
+    from evaluation.scripts import evaluation_trial_host as host
+
+    candidate = tmp_path / "candidate"
+    (candidate / "backend").mkdir(parents=True)
+    descriptor = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        alias = Path(f"/proc/{os.getpid()}/fd/{descriptor}")
+        assert host._resolve_candidate_root(alias) == candidate.resolve(strict=True)
+        link = tmp_path / "candidate-link"
+        link.symlink_to(candidate, target_is_directory=True)
+        with pytest.raises(ValueError, match="candidate"):
+            host._resolve_candidate_root(link)
+    finally:
+        os.close(descriptor)
+
+
+def test_candidate_swap_restore_invocation_uses_retained_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    original = Path(arguments["candidate_root"])
+    moved = original.with_name("candidate-moved")
+    observed_paths: list[Path] = []
+    import evaluation.blinded_runner as runner
+
+    async def swap_restore(**kwargs: object) -> str:
+        invocation_root = Path(kwargs["candidate_root"])
+        observed_paths.append(invocation_root)
+        if os.name == "nt":
+            with pytest.raises(OSError):
+                original.rename(moved)
+        else:
+            original.rename(moved)
+            original.mkdir()
+            (original / "backend").mkdir()
+            (original / "backend" / "candidate.txt").write_bytes(b"alternate checkout\n")
+            try:
+                assert (invocation_root / "backend" / "candidate.txt").read_bytes() == (
+                    b"synthetic D35 candidate\n"
+                )
+            finally:
+                alternate = original.with_name("candidate-alternate")
+                original.rename(alternate)
+                moved.rename(original)
+        return "transport_failure"
+
+    monkeypatch.setattr(runner, "_invoke_trial_host", swap_restore)
+    asyncio.run(run_blinded_evaluation(**arguments))
+    assert len(observed_paths) == 2
+    if os.name == "posix":
+        assert all(path != original for path in observed_paths)
+        assert all(str(path).startswith(f"/proc/{os.getpid()}/fd/") for path in observed_paths)
 
 
 def _process_exists(pid: int) -> bool:
@@ -2691,6 +2811,125 @@ def _process_exists(pid: int) -> bool:
     except ProcessLookupError:
         return False
     return True
+
+
+def test_early_parent_exit_with_pipe_holding_descendant_is_terminated_without_hang(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import evaluation.blinded_runner as runner
+
+    backend = tmp_path / "backend"
+    script = backend / "evaluation" / "scripts" / "evaluation_trial_host.py"
+    script.parent.mkdir(parents=True)
+    (backend / "evaluation" / "__init__.py").write_bytes(b"")
+    (script.parent / "__init__.py").write_bytes(b"")
+    script.write_text(
+        "import argparse, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "p=argparse.ArgumentParser()\n"
+        "p.add_argument('--storage'); p.add_argument('--candidate-root'); p.add_argument('--mode'); p.add_argument('--input'); p.add_argument('--output'); p.add_argument('--model'); p.add_argument('--index')\n"
+        "a=p.parse_args(); s=Path(a.storage); s.mkdir()\n"
+        "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'])\n"
+        "(s/'child.pid').write_text(str(child.pid))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "_HOST_PIPE_DRAIN_GRACE_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(runner, "_HOST_TEARDOWN_SECONDS", 2.0, raising=False)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    input_path = tmp_path / "input.json"
+    input_path.write_bytes(b"{}")
+    index = tmp_path / "index"
+    index.mkdir()
+    storage = tmp_path / "storage"
+
+    started = time.monotonic()
+    outcome = asyncio.run(
+        _invoke_trial_host(
+            tool_root=tmp_path,
+            candidate_root=candidate,
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "output.json",
+            storage=storage,
+            model="synthetic",
+            index=index,
+            stdout_path=tmp_path / "stdout.log",
+            stderr_path=tmp_path / "stderr.log",
+        )
+    )
+    elapsed = time.monotonic() - started
+
+    assert outcome == "completed"
+    assert elapsed < 3
+    child_pid = int((storage / "child.pid").read_text())
+    deadline = time.monotonic() + 2
+    while _process_exists(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _process_exists(child_pid)
+
+
+def test_trial_host_cancellation_kills_descendant_without_hang(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import evaluation.blinded_runner as runner
+
+    backend = tmp_path / "backend"
+    script = backend / "evaluation" / "scripts" / "evaluation_trial_host.py"
+    script.parent.mkdir(parents=True)
+    (backend / "evaluation" / "__init__.py").write_bytes(b"")
+    (script.parent / "__init__.py").write_bytes(b"")
+    script.write_text(
+        "import argparse, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "p=argparse.ArgumentParser()\n"
+        "p.add_argument('--storage'); p.add_argument('--candidate-root'); p.add_argument('--mode'); p.add_argument('--input'); p.add_argument('--output'); p.add_argument('--model'); p.add_argument('--index')\n"
+        "a=p.parse_args(); s=Path(a.storage); s.mkdir()\n"
+        "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])\n"
+        "(s/'child.pid').write_text(str(child.pid))\n"
+        "time.sleep(10)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "_HOST_TEARDOWN_SECONDS", 2.0)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    input_path = tmp_path / "input.json"
+    input_path.write_bytes(b"{}")
+    index = tmp_path / "index"
+    index.mkdir()
+    storage = tmp_path / "storage"
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            _invoke_trial_host(
+                tool_root=tmp_path,
+                candidate_root=candidate,
+                mode="all_tools",
+                input_path=input_path,
+                output_path=tmp_path / "output.json",
+                storage=storage,
+                model="synthetic",
+                index=index,
+                stdout_path=tmp_path / "stdout.log",
+                stderr_path=tmp_path / "stderr.log",
+            )
+        )
+        child_path = storage / "child.pid"
+        deadline = asyncio.get_running_loop().time() + 3
+        while not child_path.exists():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("trial descendant did not start")
+            await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=3)
+
+    asyncio.run(exercise())
+    child_pid = int((storage / "child.pid").read_text())
+    deadline = time.monotonic() + 2
+    while _process_exists(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _process_exists(child_pid)
 
 
 def test_trial_host_output_flood_is_bounded_and_descendant_is_killed(

@@ -1214,8 +1214,11 @@ identities. The evaluator owns a secret corpus-token key that never appears in a
 manifest, protocol, bundle, log, source tree, or repository fixture. The key path is
 `lstat`-validated as a regular non-symlink/non-reparse file, opened with `O_NOFOLLOW`
 when available, checked by pre/open/post file identity, and read once with a 33-byte
-bound. Exactly 32 raw bytes are accepted; every rejection and context exit zeroes the
-mutable buffer. For each validated ASCII D24 case ID the evaluator
+bound. The mutable `bytearray` is allocated before the first filesystem operation and
+one outer `finally` zeroes it after every `lstat`, open, read, `fstat`, descriptor-close,
+length/identity rejection, and successful context exit; descriptor cleanup is nested
+so a close failure cannot bypass zeroization. Exactly 32 raw bytes are accepted. For
+each validated ASCII D24 case ID the evaluator
 computes lowercase 64-hex
 `HMAC-SHA256(key, b"blockvideo-case-v1\0" + utf8(case_id))`. Each case's private
 category ID is exactly its first validated non-empty D24 `tags` entry; category tokens
@@ -1485,23 +1488,41 @@ material are not admitted.
 
 The candidate root itself and every supplied ancestor/component are checked without
 following links; symlink and Windows reparse/junction roots fail. D37 resolves the root
-once, binds the detached commit, frozen manifest snapshot, and directory identity,
-passes only that canonical path to the host, and repeats identity/commit/snapshot checks
-before and after every trial. Candidate path replacement fails the run. Every writable
-`groups/<ordinal>/cases/<token>/<mode>/attempts/<ordinal>` component is created or
-validated beneath the canonical external output root as a non-link, non-reparse
+once and retains its directory identity until final run cleanup. Windows opens a
+`CreateFileW` directory handle with backup/open-reparse flags, read/write sharing, and
+no delete sharing; `GetFileInformationByHandle` supplies the volume/file-index identity,
+so cooperative rename or replacement is blocked for the run. POSIX opens
+`O_RDONLY|O_DIRECTORY|O_NOFOLLOW`, stores the `fstat` device/inode identity, and requires
+a stable `/proc/<runner-pid>/fd/<fd>` alias that resolves to the anchored inode; an
+unsupported POSIX host fails closed. The context checks retained and current-path
+identity, detached commit, and frozen snapshot before and after every host invocation.
+The POSIX alias, not the mutable pathname, is passed to the D36 host; the host accepts
+only that exact proc-fd alias form in addition to an ordinary non-link candidate root.
+A pathname swap/restore therefore cannot execute alternate bytes, while any identity
+loss fails the run. The retained descriptor/handle closes only in final cleanup.
+
+Before creating output, D37 requires the prospective canonical output root to be
+disjoint in both containment directions from the candidate root, tooling repository,
+freeze publication/input roots, stateful index, corpus/review roots, and token-key
+parent. Thus neither output-inside-protected nor protected-inside-output layouts are
+accepted, including a workspace-parent output. Every writable
+`groups/<ordinal>/cases/<token>/<mode>/attempts/<ordinal>` component is then created or
+validated beneath that canonical external output root as a non-link, non-reparse
 directory. Resume discovery never uses glob-follow behavior. Trial inputs,
 observations, logs, records, and public outputs are opened or read as regular files
 with no-follow flags and identity checks where supported; a precreated link at any
 writable component fails before use.
 
-Each trial host starts in a separate POSIX session or Windows process group. POSIX
-termination sends `SIGKILL` to the process group. Windows termination awaits
-`taskkill /PID <pid> /T /F`; direct kill is only a final fallback. Stdout and stderr
-are drained concurrently through bounded readers sharing one fixed 2 MiB cap and are
-written only to exclusive regular log files. Timeout, cancellation, or cap overflow
-terminates the complete process tree, awaits confirmed parent exit and pipe closure,
-and only then writes a trial record or seals evidence.
+Each POSIX trial host starts in a separate session/process group. Each Windows host is
+started behind a bootstrap gate, attached before release to a Job Object configured
+with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and only then allowed to spawn the D36 host.
+Parent exit alone never ends supervision. Stdout and stderr are drained concurrently
+through bounded readers sharing one fixed 2 MiB cap and exclusive regular log files.
+After parent exit, readers receive one bounded grace interval; an inherited-pipe
+holder triggers process-group kill or Job close. Timeout, cancellation, cap overflow,
+and normal parent completion all terminate remaining descendants and await parent and
+reader teardown under a bounded timeout. Unconfirmed teardown fails closed before any
+trial record or evidence seal.
 
 ### D38 validation and import bindings
 
@@ -2142,7 +2163,12 @@ from reaching readiness equations.
   bounded job progress/fingerprint/snapshot/plan/recovery/error projection and
   cancellation-only mutation enforcement;
   switch-target response binding; confirmation state-hash and duplicate-response
-  binding; partial resume; mismatch rejection; and output redaction.
+  binding; partial resume; mismatch rejection; bidirectional output/protected-root
+  rejection including a workspace-parent output; retained Windows/POSIX candidate
+  identity, equivalent checkout replacement, and swap/restore execution through only
+  the anchored inode; token-key final-`fstat` and descriptor-close fault zeroization;
+  early parent exit with a pipe-holding descendant, cancellation, bounded drain/
+  teardown, and no hang; and output redaction.
 - **D38:** raw detached bundle hash before parse; exact protocol bytes; shared-schema
   import without forks; exact equality between protocol and bundle case count/tokens,
   category count/tokens, and case/category bindings; uniqueness, sorting, disjointness,
