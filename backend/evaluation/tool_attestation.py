@@ -16,6 +16,13 @@ _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _REPARSE_POINT = 0x400
 _MAX_SOURCE_BYTES = 8 * 1024 * 1024
 _MAX_SOURCE_TOTAL_BYTES = 512 * 1024 * 1024
+_MAX_GIT_METADATA_BYTES = 16 * 1024 * 1024
+_BLINDED_REQUIRED_PATHS = (
+    "backend/app/operations/definitions.json",
+    "backend/pyproject.toml",
+    "backend/scripts/run_blinded_evaluation.py",
+    "backend/uv.lock",
+)
 
 
 class FileFingerprint(BaseModel):
@@ -186,6 +193,116 @@ def fingerprint_committed_file(
     if working != committed_fingerprint:
         raise ValueError(f"working file does not match committed blob: {relative_path}")
     return committed_fingerprint
+
+
+def _bounded_git(repo_root: Path, *arguments: str, maximum: int) -> bytes:
+    pathspec_flags = ["--literal-pathspecs"] if arguments[0] in {"ls-tree", "ls-files"} else []
+    with subprocess.Popen(
+        ["git", "--no-replace-objects", *pathspec_flags, "-C", str(repo_root), *arguments],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+    ) as process:
+        try:
+            assert process.stdout is not None
+            raw = process.stdout.read(maximum + 1)
+            if len(raw) > maximum:
+                raise ValueError("historical Git output exceeds its size limit")
+            if process.wait(timeout=60) != 0:
+                raise ValueError("historical Git objects are unavailable")
+            return raw
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
+def _historical_tree(
+    repo_root: Path, git_commit: str, paths: tuple[str, ...],
+) -> dict[str, tuple[bytes, bytes, str]]:
+    if re.fullmatch(r"[0-9a-f]{40}", git_commit) is None:
+        raise ValueError("historical commit is invalid")
+    root = repo_root.resolve(strict=True)
+    reported = _bounded_git(root, "rev-parse", "--show-toplevel",
+                            maximum=_MAX_GIT_METADATA_BYTES)
+    if Path(reported.decode("utf-8").strip()).resolve(strict=True) != root:
+        raise ValueError("repository root does not match the declared root")
+    if _bounded_git(root, "cat-file", "-t", git_commit, maximum=128) != b"commit\n":
+        raise ValueError("historical object is not a commit")
+    raw = _bounded_git(root, "ls-tree", "-r", "-z", "--full-tree", git_commit, "--", *paths,
+                       maximum=_MAX_GIT_METADATA_BYTES)
+    if raw and not raw.endswith(b"\0"):
+        raise ValueError("historical tree metadata is invalid")
+    entries: dict[str, tuple[bytes, bytes, str]] = {}
+    for entry in raw.split(b"\0"):
+        if not entry:
+            continue
+        metadata, separator, raw_path = entry.partition(b"\t")
+        fields = metadata.split(b" ")
+        if separator != b"\t" or len(fields) != 3 or not re.fullmatch(rb"[0-9a-f]{40}", fields[2]):
+            raise ValueError("historical tree metadata is invalid")
+        path = raw_path.decode("utf-8", errors="strict")
+        FileFingerprint(path=path, size=0, sha256="0" * 64)
+        if path in entries:
+            raise ValueError("historical tree metadata contains duplicate paths")
+        entries[path] = (fields[0], fields[1], fields[2].decode("ascii"))
+    return entries
+
+
+def _require_regular_blob(entry: tuple[bytes, bytes, str]) -> str:
+    mode, kind, object_id = entry
+    if mode not in {b"100644", b"100755"} or kind != b"blob":
+        raise ValueError("historical source must be a regular Git blob")
+    return object_id
+
+
+def historical_blinded_source_paths(*, repo_root: Path, git_commit: str) -> tuple[str, ...]:
+    """Derive D37's exact inventory from its recorded tree without checking it out."""
+    entries = _historical_tree(repo_root, git_commit, (
+        "backend/evaluation", "backend/app", *_BLINDED_REQUIRED_PATHS,
+    ))
+    selected = {path for path in entries if path.endswith(".py") and path.startswith(
+        ("backend/evaluation/", "backend/app/")
+    )} | set(_BLINDED_REQUIRED_PATHS)
+    for path in selected:
+        if path not in entries:
+            raise ValueError("historical inventory is missing a required source")
+        _require_regular_blob(entries[path])
+    return tuple(sorted(selected))
+
+
+def verify_historical_attestation(
+    *, repo_root: Path, attestation: ToolAttestation,
+    expected_tool_name: str, source_paths: tuple[str, ...],
+) -> None:
+    """Verify source identities at the recorded commit, independent of live bytes/HEAD."""
+    if (not source_paths or source_paths != tuple(sorted(set(source_paths)))
+            or attestation.tool_name != expected_tool_name
+            or tuple(item.path for item in attestation.files) != source_paths):
+        raise ValueError("historical source inventory or tool identity mismatch")
+    for path in source_paths:
+        FileFingerprint(path=path, size=0, sha256="0" * 64)
+    entries = _historical_tree(repo_root, attestation.git_commit, source_paths)
+    if set(entries) != set(source_paths):
+        raise ValueError("historical source inventory mismatch")
+    files: list[FileFingerprint] = []
+    total = 0
+    for path in source_paths:
+        object_id = _require_regular_blob(entries[path])
+        size_raw = _bounded_git(repo_root, "cat-file", "-s", object_id, maximum=128)
+        if not re.fullmatch(rb"[0-9]+\n", size_raw):
+            raise ValueError("historical blob size is invalid")
+        size = int(size_raw)
+        total += size
+        if size > _MAX_SOURCE_BYTES or total > _MAX_SOURCE_TOTAL_BYTES:
+            raise ValueError("historical source exceeds its size limit")
+        raw = _bounded_git(repo_root, "cat-file", "blob", object_id, maximum=size)
+        if len(raw) != size:
+            raise ValueError("historical blob size changed")
+        files.append(FileFingerprint(path=path, size=size, sha256=hashlib.sha256(raw).hexdigest()))
+    if files != attestation.files or aggregate_fingerprints(files) != attestation.aggregate_sha256:
+        raise ValueError("historical source fingerprint mismatch")
 
 
 def attest_tool(

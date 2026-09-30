@@ -5,6 +5,7 @@ import hashlib
 import os
 import secrets
 import stat
+import sys
 from pathlib import Path
 
 DEFAULT_JSON_BYTES = 16 * 1024 * 1024
@@ -304,6 +305,144 @@ def write_or_validate_immutable(
     maximum: int = DEFAULT_JSON_BYTES,
 ) -> Path:
     return publish_immutable(path, expected, description, maximum=maximum)
+
+
+def publish_accepted_triplet(
+    *, output_dir: Path, accepted_result_bytes: bytes,
+    validation_bytes: bytes, tool_attestation_bytes: bytes,
+) -> None:
+    """Publish exactly three retained, byte-verified files by native no-replace rename."""
+    from evaluation.release_candidate import freeze
+
+    if os.name != "nt" and not sys.platform.startswith("linux"):
+        raise ValueError("native no-replace publication is unavailable")
+    values = {
+        "accepted-result.json": accepted_result_bytes,
+        "validation.json": validation_bytes,
+        "d38-tool-attestation.json": tool_attestation_bytes,
+    }
+    for name, value in values.items():
+        maximum = 128 * 1024 * 1024 if name == "accepted-result.json" else DEFAULT_JSON_BYTES
+        if type(value) is not bytes or not value or len(value) > maximum:
+            raise ValueError("accepted triplet bytes are invalid")
+    final = output_dir.absolute()
+    parent = validate_directory(final.parent, "accepted triplet parent")
+    if final.name in {"", ".", ".."}:
+        raise ValueError("accepted triplet destination is invalid")
+    try:
+        final.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise ValueError("accepted triplet destination already exists")
+    parent_anchor = freeze._open_directory_anchor(parent)
+    stage = parent / f".d38-stage-{secrets.token_hex(32)}"
+    stage_anchor = None
+    retained: dict[str, tuple[int, tuple[int, int]]] = {}
+    closed_files = False
+
+    def assert_parent() -> None:
+        if (freeze._anchor_identity(parent_anchor) != parent_anchor.identity
+                or freeze._path_directory_identity(parent) != parent_anchor.identity
+                or validate_directory(parent, "accepted triplet parent") != parent):
+            raise ValueError("accepted triplet parent ownership lost")
+
+    def assert_files(directory: Path) -> None:
+        assert_parent()
+        assert stage_anchor is not None
+        if freeze._path_directory_identity(directory) != stage_anchor.identity:
+            raise ValueError("accepted triplet stage ownership lost")
+        descriptor = stage_anchor.descriptor
+        if not stage_anchor.closed and freeze._anchor_identity(stage_anchor) != stage_anchor.identity:
+            raise ValueError("accepted triplet stage ownership lost")
+        entries = set(os.listdir(descriptor if descriptor is not None else directory))
+        if entries != set(values):
+            raise ValueError("accepted triplet entries are invalid")
+        for name, (file_descriptor, identity) in retained.items():
+            metadata = (os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                        if descriptor is not None else (directory / name).lstat())
+            if (not stat.S_ISREG(metadata.st_mode) or is_reparse(metadata)
+                    or (metadata.st_dev, metadata.st_ino) != identity
+                    or metadata.st_size != len(values[name])):
+                raise ValueError("accepted triplet file ownership lost")
+            if not closed_files:
+                opened = os.fstat(file_descriptor)
+                if (not stat.S_ISREG(opened.st_mode) or is_reparse(opened)
+                        or (opened.st_dev, opened.st_ino) != identity
+                        or opened.st_size != len(values[name])):
+                    raise ValueError("accepted triplet file ownership lost")
+                os.lseek(file_descriptor, 0, os.SEEK_SET)
+                remaining = memoryview(values[name])
+                while remaining:
+                    chunk = os.read(file_descriptor, min(len(remaining), 65536))
+                    if not chunk or chunk != remaining[:len(chunk)]:
+                        raise ValueError("accepted triplet readback mismatch")
+                    remaining = remaining[len(chunk):]
+                if os.read(file_descriptor, 1):
+                    raise ValueError("accepted triplet readback mismatch")
+            elif read_regular(directory / name, maximum=len(values[name])) != values[name]:
+                raise ValueError("accepted triplet readback mismatch")
+
+    try:
+        assert_parent()
+        if parent_anchor.descriptor is not None:
+            os.mkdir(stage.name, mode=0o700, dir_fd=parent_anchor.descriptor)
+        else:
+            stage.mkdir(mode=0o700)
+        assert_parent()
+        stage_anchor = freeze._open_directory_anchor(stage)
+        if freeze._path_directory_identity(stage) != stage_anchor.identity:
+            raise ValueError("accepted triplet stage ownership lost")
+        for name, value in values.items():
+            assert_parent()
+            if freeze._path_directory_identity(stage) != stage_anchor.identity:
+                raise ValueError("accepted triplet stage ownership lost")
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = (os.open(name, flags, 0o600, dir_fd=stage_anchor.descriptor)
+                          if stage_anchor.descriptor is not None else os.open(stage / name, flags, 0o600))
+            metadata = os.fstat(descriptor)
+            retained[name] = (descriptor, (metadata.st_dev, metadata.st_ino))
+            if not stat.S_ISREG(metadata.st_mode) or is_reparse(metadata):
+                raise ValueError("accepted triplet file must be regular")
+            remaining = memoryview(value)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    raise ValueError("accepted triplet write failed")
+                remaining = remaining[written:]
+            os.fsync(descriptor)
+        assert_files(stage)
+        if stage_anchor.descriptor is not None:
+            assert parent_anchor.descriptor is not None
+            os.fsync(stage_anchor.descriptor)
+            parent_alias = Path(f"/proc/self/fd/{parent_anchor.descriptor}")
+            stage_alias = Path(f"/proc/self/fd/{stage_anchor.descriptor}")
+            for alias, anchor in ((parent_alias, parent_anchor), (stage_alias, stage_anchor)):
+                metadata = alias.stat()
+                if (not stat.S_ISDIR(metadata.st_mode)
+                        or (metadata.st_dev, metadata.st_ino) != anchor.identity):
+                    raise ValueError("accepted triplet descriptor aliases are unavailable")
+            assert_files(stage)
+            freeze._linux_rename_directory_no_replace(parent_alias / stage.name, parent_alias / final.name)
+            assert_files(final)
+            os.fsync(parent_anchor.descriptor)
+        else:
+            for descriptor, _ in retained.values():
+                os.close(descriptor)
+            closed_files = True
+            assert_files(stage)
+            freeze._close_directory_anchor(stage_anchor)
+            assert_parent()
+            freeze._windows_move_directory_no_replace(stage, final)
+            assert_files(final)
+    finally:
+        if not closed_files:
+            for descriptor, _ in retained.values():
+                os.close(descriptor)
+        if stage_anchor is not None:
+            freeze._close_directory_anchor(stage_anchor)
+        freeze._close_directory_anchor(parent_anchor)
 
 
 def open_exclusive_regular(path: Path, description: str) -> int:
