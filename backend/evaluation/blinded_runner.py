@@ -5,10 +5,12 @@ import asyncio
 import hashlib
 import json
 import os
+import re
+import secrets
+import signal
 import stat
 import subprocess
 import sys
-import tempfile
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -64,13 +66,11 @@ _D36_SOURCE_PATHS = (
     "backend/evaluation/tool_attestation.py",
     "backend/evaluation/unlabeled_contracts.py",
 )
-_D37_SOURCE_PATHS = (
-    "backend/evaluation/blinded_contracts.py",
-    "backend/evaluation/blinded_runner.py",
-    "backend/evaluation/blinded_scoring.py",
-    "backend/evaluation/result_contracts.py",
-    "backend/evaluation/sealed_evidence.py",
+_D37_REQUIRED_PATHS = (
+    "backend/app/operations/definitions.json",
+    "backend/pyproject.toml",
     "backend/scripts/run_blinded_evaluation.py",
+    "backend/uv.lock",
 )
 _PUBLIC_RESULT_NAME = "result-bundle.json"
 _PARTIAL_NAME = "partial-result.json"
@@ -78,6 +78,9 @@ _PROTOCOL_NAME = "protocol.json"
 _REPARSE_POINT = 0x400
 _MAX_JSON_BYTES = 16 * 1024 * 1024
 _HOST_WATCHDOG_SECONDS = 180 * 4 + 30
+_HOST_OUTPUT_CAP_BYTES = 2 * 1024 * 1024
+_TEMP_PATTERN = re.compile(r"^\.(?P<final>[^/\\]+)\.tmp-[0-9a-f]{64}$")
+_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MODES = ("all_tools", "stateful")
 
 
@@ -120,15 +123,63 @@ def _is_reparse(metadata: os.stat_result) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
-def _require_directory(path: Path, description: str, *, create: bool = False) -> Path:
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
+def _validate_directory(path: Path, description: str) -> Path:
     metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISDIR(
         metadata.st_mode
     ):
-        raise ValueError(f"{description} must be a regular directory")
-    return path.resolve(strict=True)
+        raise ValueError(f"{description} must be a non-symlink, non-reparse directory")
+    resolved = path.resolve(strict=True)
+    if resolved != path.absolute():
+        raise ValueError(f"{description} has an unsafe path component")
+    return resolved
+
+
+def _create_directory_tree(path: Path, description: str) -> Path:
+    absolute = path.absolute()
+    missing: list[str] = []
+    current = absolute
+    while True:
+        try:
+            _validate_directory(current, description)
+            break
+        except FileNotFoundError:
+            if current.parent == current:
+                raise ValueError(f"{description} has no existing directory ancestor") from None
+            missing.append(current.name)
+            current = current.parent
+    for name in reversed(missing):
+        if not name or name in {".", ".."} or Path(name).name != name:
+            raise ValueError(f"{description} contains an unsafe component")
+        child = current / name
+        try:
+            child.mkdir()
+        except FileExistsError:
+            pass
+        current = _validate_directory(child, description)
+    return _validate_directory(absolute, description)
+
+
+def _require_directory(path: Path, description: str, *, create: bool = False) -> Path:
+    return (
+        _create_directory_tree(path, description)
+        if create
+        else _validate_directory(path.absolute(), description)
+    )
+
+
+def _ensure_writable_directory(root: Path, *parts: str) -> Path:
+    current = _validate_directory(root.absolute(), "evaluation output")
+    for part in parts:
+        if not part or part in {".", ".."} or Path(part).name != part:
+            raise ValueError("evaluation output directory component is invalid")
+        child = current / part
+        try:
+            child.mkdir()
+        except FileExistsError:
+            pass
+        current = _validate_directory(child, "evaluation output directory")
+    return current
 
 
 def _read_regular(path: Path, *, maximum: int = _MAX_JSON_BYTES) -> bytes:
@@ -141,17 +192,31 @@ def _read_regular(path: Path, *, maximum: int = _MAX_JSON_BYTES) -> bytes:
     descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
             raise ValueError("input identity changed")
         value = os.read(descriptor, maximum + 1)
         final = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    if len(value) > maximum or (
-        opened.st_dev,
-        opened.st_ino,
-        opened.st_size,
-    ) != (final.st_dev, final.st_ino, final.st_size):
+    after = path.lstat()
+    identities = {
+        (metadata.st_dev, metadata.st_ino, metadata.st_size),
+        (opened.st_dev, opened.st_ino, opened.st_size),
+        (final.st_dev, final.st_ino, final.st_size),
+        (after.st_dev, after.st_ino, after.st_size),
+    }
+    if (
+        len(value) > maximum
+        or len(value) != opened.st_size
+        or len(identities) != 1
+        or stat.S_ISLNK(after.st_mode)
+        or _is_reparse(after)
+        or not stat.S_ISREG(after.st_mode)
+    ):
         raise ValueError("input changed or exceeds its size limit")
     return value
 
@@ -167,7 +232,7 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _write_exclusive(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_directory(path.parent.absolute(), "exclusive output parent")
     flags = (
         os.O_CREAT
         | os.O_EXCL
@@ -187,16 +252,39 @@ def _write_exclusive(path: Path, value: bytes) -> None:
 
 
 def _write_atomic(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
+    parent = _validate_directory(path.parent.absolute(), "output parent")
     try:
-        with os.fdopen(descriptor, "wb", closefd=True) as stream:
-            stream.write(value)
-            stream.flush()
-            os.fsync(stream.fileno())
+        current = path.lstat()
+    except FileNotFoundError:
+        current = None
+    if current is not None and (
+        stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        raise ValueError("output must be a regular non-link file")
+    temporary = parent / f".{path.name}.tmp-{secrets.token_hex(32)}"
+    descriptor = os.open(
+        temporary,
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_WRONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        offset = 0
+        while offset < len(value):
+            offset += os.write(descriptor, value[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
         os.replace(temporary, path)
-        _fsync_directory(path.parent)
+        _fsync_directory(parent)
+        if _read_regular(path, maximum=len(value)) != value:
+            raise ValueError("atomic output changed after publication")
     finally:
         try:
             temporary.unlink()
@@ -204,19 +292,74 @@ def _write_atomic(path: Path, value: bytes) -> None:
             pass
 
 
-def _write_or_validate_immutable(path: Path, expected: bytes, description: str) -> Path:
+def _publish_immutable(path: Path, value: bytes, description: str) -> Path:
+    parent = _validate_directory(path.parent.absolute(), f"{description} parent")
+    if path.parent.absolute() != parent:
+        raise ValueError(f"{description} parent identity changed")
+    temporary = parent / f".{path.name}.tmp-{secrets.token_hex(32)}"
+    flags = (
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_WRONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(temporary, flags, 0o600)
     try:
-        _write_exclusive(path, expected)
-    except FileExistsError:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _is_reparse(opened):
+            raise ValueError(f"{description} temporary is not a regular file")
+        offset = 0
+        while offset < len(value):
+            offset += os.write(descriptor, value[offset:])
+        os.fsync(descriptor)
+        final = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino) != (final.st_dev, final.st_ino)
+            or final.st_size != len(value)
+        ):
+            raise ValueError(f"{description} temporary identity changed")
+    finally:
+        os.close(descriptor)
+    try:
         try:
-            existing = _read_regular(path, maximum=len(expected))
-        except (OSError, ValueError) as error:
-            raise ValueError(f"existing {description} is invalid") from error
-        if existing != expected:
-            raise ValueError(f"existing {description} bytes do not match this run") from None
-    if _read_regular(path, maximum=len(expected)) != expected:
-        raise ValueError(f"{description} bytes changed after publication")
-    return path
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError:
+            try:
+                existing = _read_regular(path, maximum=len(value))
+            except (OSError, ValueError) as error:
+                raise ValueError(f"existing {description} is invalid") from error
+            if existing != value:
+                raise ValueError(
+                    f"existing {description} bytes do not match this run"
+                ) from None
+        else:
+            temporary_stat = temporary.lstat()
+            published_stat = path.lstat()
+            if (
+                stat.S_ISLNK(published_stat.st_mode)
+                or _is_reparse(published_stat)
+                or not stat.S_ISREG(published_stat.st_mode)
+                or (temporary_stat.st_dev, temporary_stat.st_ino)
+                != (published_stat.st_dev, published_stat.st_ino)
+            ):
+                raise ValueError(f"{description} publication identity changed")
+            _fsync_directory(parent)
+        if _read_regular(path, maximum=len(value)) != value:
+            raise ValueError(f"{description} bytes changed after publication")
+        return path
+    finally:
+        try:
+            metadata = temporary.lstat()
+            if stat.S_ISREG(metadata.st_mode) and not _is_reparse(metadata):
+                temporary.unlink()
+                _fsync_directory(parent)
+        except FileNotFoundError:
+            pass
+
+
+def _write_or_validate_immutable(path: Path, expected: bytes, description: str) -> Path:
+    return _publish_immutable(path, expected, description)
 
 
 def write_run_protocol_exclusive(
@@ -410,8 +553,63 @@ def _git(root: Path, *arguments: str) -> bytes:
     return completed.stdout
 
 
+def _d37_source_paths(root: Path) -> tuple[str, ...]:
+    tracked = _git(root, "ls-files", "-z").split(b"\0")
+    paths: set[str] = set(_D37_REQUIRED_PATHS)
+    for raw in tracked:
+        if not raw:
+            continue
+        try:
+            relative = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("tracked source path is not UTF-8") from None
+        if (
+            relative.startswith("backend/evaluation/")
+            and relative.endswith(".py")
+        ) or (
+            relative.startswith("backend/app/") and relative.endswith(".py")
+        ):
+            paths.add(relative)
+    missing = paths - {
+        raw.decode("utf-8") for raw in tracked if raw
+    }
+    if missing:
+        raise ValueError("D37 runtime attestation source is not tracked")
+    return tuple(sorted(paths))
+
+
+_D37_SOURCE_PATHS = tuple(
+    sorted(
+        {
+            *_D37_REQUIRED_PATHS,
+            "backend/evaluation/__init__.py",
+            "backend/evaluation/blinded_contracts.py",
+            "backend/evaluation/blinded_runner.py",
+            "backend/evaluation/blinded_scoring.py",
+            "backend/evaluation/result_contracts.py",
+            "backend/evaluation/sealed_evidence.py",
+        }
+    )
+)
+
+
+def _canonical_candidate_root(candidate_root: Path) -> Path:
+    supplied = candidate_root.absolute()
+    metadata = supplied.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISDIR(
+        metadata.st_mode
+    ):
+        raise ValueError("candidate root must be a non-link directory")
+    resolved = supplied.resolve(strict=True)
+    if resolved != supplied:
+        raise ValueError("candidate root contains an unsafe path component")
+    backend = resolved / "backend"
+    _validate_directory(backend, "candidate backend")
+    return resolved
+
+
 def _validate_candidate(candidate_root: Path, manifest: Any) -> None:
-    root = candidate_root.resolve(strict=True)
+    root = _canonical_candidate_root(candidate_root)
     if _git(root, "branch", "--show-current").strip():
         raise ValueError("candidate must be a detached checkout")
     commit = validate_git_repository(root, expected_commit=manifest.git_commit)
@@ -460,7 +658,7 @@ def _load_run_context(candidate_root: Path, freeze_manifest: Path) -> _RunContex
         repo_root=tool_root,
         tool_name="d37_blinded_evaluator",
         git_commit=tool_commit,
-        source_paths=_D37_SOURCE_PATHS,
+        source_paths=_d37_source_paths(tool_root),
     )
     _validate_candidate(candidate_root, manifest)
     return _RunContext(
@@ -609,8 +807,57 @@ def _load_trial_record(path: Path, protocol_sha256: str) -> _TrialRecord:
     return record
 
 
+def _safe_directory_entries(path: Path, description: str) -> list[os.DirEntry[str]]:
+    _validate_directory(path.absolute(), description)
+    entries = sorted(os.scandir(path), key=lambda entry: entry.name)
+    for entry in entries:
+        metadata = entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
+            raise ValueError(f"{description} contains an unsafe entry")
+    return entries
+
+
+def _is_valid_interrupted_temp(entry: os.DirEntry[str]) -> bool:
+    match = _TEMP_PATTERN.fullmatch(entry.name)
+    if match is None:
+        return False
+    metadata = entry.stat(follow_symlinks=False)
+    return stat.S_ISREG(metadata.st_mode) and not _is_reparse(metadata)
+
+
 def _load_records(root: Path, protocol_sha256: str) -> list[_TrialRecord]:
-    paths = sorted(root.glob("groups/*/cases/*/*/trial-result.json"))
+    root = _validate_directory(root.absolute(), "evaluation output")
+    groups = root / "groups"
+    try:
+        group_entries = _safe_directory_entries(groups, "trial groups")
+    except FileNotFoundError:
+        return []
+    paths: list[Path] = []
+    for group in group_entries:
+        metadata = group.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(metadata.st_mode) or not re.fullmatch(r"[0-9]{6}", group.name):
+            raise ValueError("trial groups contain an invalid entry")
+        cases = Path(group.path) / "cases"
+        for case in _safe_directory_entries(cases, "trial cases"):
+            metadata = case.stat(follow_symlinks=False)
+            if not stat.S_ISDIR(metadata.st_mode) or _TOKEN_PATTERN.fullmatch(case.name) is None:
+                raise ValueError("trial cases contain an invalid entry")
+            for mode in _safe_directory_entries(Path(case.path), "trial modes"):
+                metadata = mode.stat(follow_symlinks=False)
+                if not stat.S_ISDIR(metadata.st_mode) or mode.name not in _MODES:
+                    raise ValueError("trial modes contain an invalid entry")
+                for child in _safe_directory_entries(Path(mode.path), "trial mode"):
+                    child_metadata = child.stat(follow_symlinks=False)
+                    if child.name == "trial-result.json":
+                        if not stat.S_ISREG(child_metadata.st_mode):
+                            raise ValueError("completed trial record is not regular")
+                        paths.append(Path(child.path))
+                    elif child.name in {"input.json", "attempts"}:
+                        expected_directory = child.name == "attempts"
+                        if expected_directory != stat.S_ISDIR(child_metadata.st_mode):
+                            raise ValueError("trial mode entry has the wrong type")
+                    elif not _is_valid_interrupted_temp(child):
+                        raise ValueError("trial mode contains an invalid entry")
     records = [_load_trial_record(path, protocol_sha256) for path in paths]
     identities = {(record.case_token, record.mode) for record in records}
     if len(identities) != len(records):
@@ -619,16 +866,16 @@ def _load_records(root: Path, protocol_sha256: str) -> list[_TrialRecord]:
 
 
 def _next_attempt(mode_root: Path) -> Path:
-    attempts = mode_root / "attempts"
-    attempts.mkdir(parents=True, exist_ok=True)
+    root = _validate_directory(mode_root.absolute(), "trial mode")
+    attempts = _ensure_writable_directory(root, "attempts")
     existing = []
-    for path in attempts.iterdir():
-        if not path.is_dir() or not path.name.isdigit():
+    for entry in _safe_directory_entries(attempts, "trial attempts"):
+        metadata = entry.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(metadata.st_mode) or not re.fullmatch(r"[0-9]{6}", entry.name):
             raise ValueError("trial attempts contain an invalid entry")
-        existing.append(int(path.name))
-    attempt = attempts / f"{max(existing, default=0) + 1:06d}"
-    attempt.mkdir()
-    return attempt
+        existing.append(int(entry.name))
+    name = f"{max(existing, default=0) + 1:06d}"
+    return _ensure_writable_directory(attempts, name)
 
 
 def _clean_subprocess_environment(tool_root: Path) -> dict[str, str]:
@@ -644,6 +891,80 @@ def _clean_subprocess_environment(tool_root: Path) -> dict[str, str]:
         }
     )
     return environment
+
+
+def _open_exclusive_regular(path: Path, description: str) -> int:
+    _validate_directory(path.parent.absolute(), f"{description} parent")
+    descriptor = os.open(
+        path,
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_WRONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata):
+        os.close(descriptor)
+        raise ValueError(f"{description} must be a regular file")
+    return descriptor
+
+
+async def _bounded_stream(
+    stream: asyncio.StreamReader,
+    descriptor: int,
+    overflow: asyncio.Event,
+    budget: list[int],
+    budget_lock: asyncio.Lock,
+) -> None:
+    try:
+        while chunk := await stream.read(65536):
+            async with budget_lock:
+                remaining = _HOST_OUTPUT_CAP_BYTES - budget[0]
+                written = chunk[: max(0, remaining)]
+                budget[0] += len(written)
+                if len(chunk) > remaining:
+                    overflow.set()
+            offset = 0
+            while offset < len(written):
+                offset += os.write(descriptor, written[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        await process.wait()
+        return
+    if os.name == "nt" and hasattr(process, "pid"):
+        killer = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/PID",
+            str(process.pid),
+            "/T",
+            "/F",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await killer.wait()
+    elif os.name == "posix" and hasattr(process, "pid"):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        process.kill()
+    if process.returncode is None:
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+    else:
+        await process.wait()
 
 
 async def _invoke_trial_host(
@@ -679,26 +1000,75 @@ async def _invoke_trial_host(
     ]
     if mode == "stateful":
         arguments.extend(("--index", str(index)))
-    with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
+    process_options: dict[str, object] = {}
+    if os.name == "posix":
+        process_options["start_new_session"] = True
+    elif os.name == "nt":
+        process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    stdout_descriptor = _open_exclusive_regular(stdout_path, "trial stdout")
+    try:
+        stderr_descriptor = _open_exclusive_regular(stderr_path, "trial stderr")
+    except BaseException:
+        os.close(stdout_descriptor)
+        raise
+    try:
         process = await asyncio.create_subprocess_exec(
             *arguments,
             cwd=tool_root / "backend",
             env=_clean_subprocess_environment(tool_root),
             stdin=asyncio.subprocess.DEVNULL,
-            stdout=stdout,
-            stderr=stderr,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **process_options,
         )
-        try:
-            await asyncio.wait_for(process.wait(), timeout=_HOST_WATCHDOG_SECONDS)
-        except TimeoutError:
+    except BaseException:
+        os.close(stdout_descriptor)
+        os.close(stderr_descriptor)
+        raise
+    if process.stdout is None or process.stderr is None:
+        os.close(stdout_descriptor)
+        os.close(stderr_descriptor)
+        if process.returncode is None:
             process.kill()
             await process.wait()
+        raise ValueError("trial host output pipes are unavailable")
+    overflow = asyncio.Event()
+    budget = [0]
+    budget_lock = asyncio.Lock()
+    readers = (
+        asyncio.create_task(
+            _bounded_stream(
+                process.stdout, stdout_descriptor, overflow, budget, budget_lock
+            )
+        ),
+        asyncio.create_task(
+            _bounded_stream(
+                process.stderr, stderr_descriptor, overflow, budget, budget_lock
+            )
+        ),
+    )
+    wait_task = asyncio.create_task(process.wait())
+    overflow_task = asyncio.create_task(overflow.wait())
+    try:
+        done, _ = await asyncio.wait(
+            (wait_task, overflow_task),
+            timeout=_HOST_WATCHDOG_SECONDS,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            await _terminate_process_tree(process)
             return "deadline_failure"
-        except BaseException:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-            raise
+        if overflow_task in done and overflow.is_set():
+            await _terminate_process_tree(process)
+            return "transport_failure"
+        await wait_task
+    except BaseException:
+        await _terminate_process_tree(process)
+        raise
+    finally:
+        overflow_task.cancel()
+        await asyncio.gather(overflow_task, return_exceptions=True)
+        await asyncio.gather(*readers, return_exceptions=False)
     return "completed" if process.returncode == 0 else "transport_failure"
 
 
@@ -726,10 +1096,21 @@ async def _run_trial(
     index: Path,
     index_sha256: str,
 ) -> _TrialRecord:
-    mode_root = _record_path(root, group_ordinal, case_token, mode).parent
-    mode_root.mkdir(parents=True, exist_ok=True)
+    mode_root = _ensure_writable_directory(
+        root,
+        "groups",
+        f"{group_ordinal:06d}",
+        "cases",
+        case_token,
+        mode,
+    )
     record_path = mode_root / "trial-result.json"
-    if record_path.exists():
+    try:
+        record_path.lstat()
+        record_exists = True
+    except FileNotFoundError:
+        record_exists = False
+    if record_exists:
         record = _load_trial_record(record_path, protocol_sha256)
         if (
             record.case_token != case_token
@@ -772,6 +1153,13 @@ async def _run_trial(
         if _fingerprint_directory(index) != index_sha256:
             raise ValueError("stateful index changed during trial execution")
 
+    storage_path = attempt / "storage"
+    try:
+        storage_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        _validate_directory(storage_path, "trial storage")
     score: TrialScore | None = None
     candidate_snapshot: str | None = None
     if outcome == "completed":
@@ -793,7 +1181,7 @@ async def _run_trial(
         score=score,
         candidate_snapshot_sha256=candidate_snapshot,
     )
-    _write_exclusive(record_path, _canonical_file_bytes(record))
+    _publish_immutable(record_path, _canonical_file_bytes(record), "trial result")
     return record
 
 
@@ -893,6 +1281,7 @@ async def run_blinded_evaluation(
     token_key_file: Path,
 ) -> EvaluationResultBundle:
     """Run or resume one externally isolated synthetic-or-held-out evaluation."""
+    candidate_root = _canonical_candidate_root(candidate_root)
     context = _load_run_context(candidate_root, freeze_manifest)
     output = _require_directory(output_root, "evaluation output", create=True)
     if _path_is_within(output, candidate_root) or _path_is_within(output, context.tool_root):
@@ -1075,7 +1464,7 @@ async def run_blinded_evaluation(
         modes=modes,
     )
     result_path = output / _PUBLIC_RESULT_NAME
-    _write_exclusive(result_path, _canonical_file_bytes(bundle))
+    _publish_immutable(result_path, _canonical_file_bytes(bundle), "result bundle")
     if _read_regular(result_path) != _canonical_file_bytes(bundle):
         raise ValueError("result bundle changed after publication")
     _validate_run_context(candidate_root, freeze_manifest, context)

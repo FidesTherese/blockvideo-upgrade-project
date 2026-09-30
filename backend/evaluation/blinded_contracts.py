@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
+import stat
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +20,7 @@ _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _CASE_ID_PATTERN = re.compile(r"^D24-[DH]\d{3}$")
 _CASE_DOMAIN = b"blockvideo-case-v1\0"
 _CATEGORY_DOMAIN = b"blockvideo-category-v1\0"
+_REPARSE_POINT = 0x400
 
 OpaqueToken = Annotated[str, Field(pattern=_SHA256_PATTERN)]
 Sha256 = Annotated[str, Field(pattern=_SHA256_PATTERN)]
@@ -59,14 +62,45 @@ def opaque_category_token(key: bytes, category_id: str) -> OpaqueToken:
 
 @contextmanager
 def token_key(path: Path) -> Iterator[bytearray]:
-    """Read one exact external key and erase the mutable buffer after use."""
-    with path.open("rb", buffering=0) as stream:
-        key = bytearray(stream.read(33))
-    if len(key) != 32:
-        for index in range(len(key)):
-            key[index] = 0
-        raise ValueError("token key must contain exactly 32 raw bytes")
+    """Read one exact external key without following links and erase its buffer."""
+    before = path.lstat()
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or getattr(before, "st_file_attributes", 0) & _REPARSE_POINT
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise ValueError("token key must be a regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    key = bytearray()
     try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or getattr(opened, "st_file_attributes", 0) & _REPARSE_POINT
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise ValueError("token key identity changed while opening")
+        key.extend(os.read(descriptor, 33))
+        final = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        after = path.lstat()
+        if (
+            stat.S_ISLNK(after.st_mode)
+            or getattr(after, "st_file_attributes", 0) & _REPARSE_POINT
+            or not stat.S_ISREG(after.st_mode)
+        ):
+            raise ValueError("token key identity changed after reading")
+        identities = (
+            (before.st_dev, before.st_ino, before.st_size),
+            (opened.st_dev, opened.st_ino, opened.st_size),
+            (final.st_dev, final.st_ino, final.st_size),
+            (after.st_dev, after.st_ino, after.st_size),
+        )
+        if len(set(identities)) != 1 or len(key) != 32:
+            raise ValueError("token key must contain exactly 32 raw bytes")
         yield key
     finally:
         for index in range(len(key)):

@@ -53,8 +53,11 @@ HTML, or detailed evaluator evidence. D37 does not report final quality itself.
 
 Synthetic tests prove isolation, opaque-token privacy, exact included/excluded union
 accounting, deterministic exclusion precedence, non-empty overall/per-category
-coverage, crash-safe partial reporting, mode symmetry, scoring correctness, exact
-proposal/clarification matching, and rejection of secondary-project mutation,
+coverage, crash-safe no-replace interruption and resume for trial/bundle publication,
+mode symmetry, scoring correctness, exact proposal/clarification matching, complete
+runtime-source attestation mutation detection, canonical candidate/path-swap rejection,
+non-link writable directory enforcement, bounded output, descendant termination, and
+nofollow token-key handling. They also prove rejection of secondary-project mutation,
 primary unrelated-field mutation, project insertion/deletion, unapproved, selectively
 filtered, duplicate, zero-coverage, or mismatched input. Every repository-owned
 synthetic/development revision race uses `initial + 1`; a nonconforming mounted

@@ -15,10 +15,19 @@ is the release candidate. Its canonical external candidate control is
 is `dda5f8b5e1ca95ca0b709122d1fa2826ba647e05d720d829b9e06b4b3f88e833`.
 D36 and all later tools are external post-candidate tooling: D36 pins that D35 parent
 through the strict canonical candidate control plus detached expected hash and freezes
-an isolated checkout. D37
-supplies a separately attested blinded runner whose held-out corpus remains mounted
-outside and unread by the implementation process; it creates one immutable canonical
-run protocol and one shared full result schema. Public evaluation evidence uses only
+an isolated checkout. D37 supplies a separately attested blinded runner whose held-out
+corpus remains mounted outside and unread by the implementation process. Its source
+attestation automatically covers the complete tracked evaluation Python tree, the CLI,
+the conservative tracked application Python closure, operation definitions, and the
+backend project/lock files; tests, evidence, secrets, and held-out data remain excluded.
+The runner accepts only one canonical non-link candidate identity, validates every
+writable output component without following links, bounds child stdout/stderr, and
+terminates the complete host process tree on timeout, cancellation, or overflow. It
+creates one immutable canonical run protocol and one shared full result schema;
+protocol, trial, and bundle publication uses fsynced same-directory random temporaries
+and atomic no-replace hard links, so interruption cannot truncate or replace a canonical
+final. Resume ignores only validated publication temporaries and parses complete
+canonical finals. Public evaluation evidence uses only
 non-sensitive evaluator-keyed opaque case/category tokens: the protocol carries the
 non-empty complete sorted token set/count, while the bundle carries a non-empty exact
 sorted included set and exact sorted excluded set plus one deterministic reason per

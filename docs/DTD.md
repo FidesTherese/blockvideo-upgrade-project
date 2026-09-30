@@ -162,7 +162,7 @@ Direct in-scope dependencies are:
 
 | Dependency | Version/constraint | Symbols and role |
 |---|---|---|
-| Python standard library | Python 3.12.12 verified | `unicodedata.normalize`, `re`, `hashlib.sha256`, `json`, `sqlite3.connect`, `sqlite3.Connection.backup`, `os.open`, `os.close`, `os.fstat`, `os.fsync`, `os.link`, `os.replace`, `stat.S_ISREG`, `shutil.disk_usage`, `subprocess.run`, `pathlib.Path` |
+| Python standard library | Python 3.12.12 verified | `unicodedata.normalize`, `re`, `hashlib.sha256`, `hmac.new`, `json`, `sqlite3.connect`, `sqlite3.Connection.backup`, `os.open`, `os.close`, `os.fstat`, `os.fsync`, `os.link`, `os.replace`, `os.scandir`, `os.killpg`, `stat.S_ISREG`, `secrets.token_hex`, `shutil.disk_usage`, `subprocess.run`, `subprocess.CREATE_NEW_PROCESS_GROUP`, `asyncio.create_subprocess_exec`, `pathlib.Path` |
 | SQLAlchemy | locked by `uv.lock`; project `>=2.0.36` | existing `Session`, `select`, `inspect`, `text`; ORM and writer transactions |
 | Pydantic | locked by `uv.lock`; project `>=2.9.0` | `BaseModel`, `ConfigDict`, `Field`, validators; strict manifests and API DTOs |
 | FastAPI | locked by `uv.lock`; project `>=0.115.0` | `APIRouter`, `Depends`, `HTTPException`; startup status transport |
@@ -1211,8 +1211,11 @@ no future freezer or trial-tool attestation hash because those bytes do not yet 
 approval hashes, D36 freeze hash, D36 candidate trial-tool hash, D37 evaluator/runner
 tool hash, model-configuration hash, stateful-index hash, and only opaque case/category
 identities. The evaluator owns a secret corpus-token key that never appears in a CLI,
-manifest, protocol, bundle, log, source tree, or repository fixture. The key file contains exactly 32 raw bytes and is read once with a 33-byte bounded
-read; shorter or longer files fail. For each validated ASCII D24 case ID the evaluator
+manifest, protocol, bundle, log, source tree, or repository fixture. The key path is
+`lstat`-validated as a regular non-symlink/non-reparse file, opened with `O_NOFOLLOW`
+when available, checked by pre/open/post file identity, and read once with a 33-byte
+bound. Exactly 32 raw bytes are accepted; every rejection and context exit zeroes the
+mutable buffer. For each validated ASCII D24 case ID the evaluator
 computes lowercase 64-hex
 `HMAC-SHA256(key, b"blockvideo-case-v1\0" + utf8(case_id))`. Each case's private
 category ID is exactly its first validated non-empty D24 `tags` entry; category tokens
@@ -1264,10 +1267,19 @@ class EvaluationProtocol(BaseModel):
 ```
 
 Each run exclusively creates one immutable canonical `<run-output>/protocol.json`
-before its first trial. The SHA-256 of those exact bytes is `protocol_sha256`.
-Resume requires the same existing bytes. Mutation, replacement, regeneration, or use
-of D36 `final_protocol.json` as the result protocol fails closed. D38 validates this
-run artifact; D40 consumes its identity only through D38-accepted evidence.
+before its first trial. Protocol, completed trial records, and the final result bundle
+all use the same crash-atomic no-replace publication: create an unpredictable same-
+directory temporary with `O_CREAT|O_EXCL` and `O_NOFOLLOW` when available; write,
+`fsync`, and close it; atomically hard-link it to the absent canonical final; validate
+regular-file identity and canonical bytes; `fsync` the directory where supported; and
+remove only the validated temporary name. A concurrent or pre-existing final is never
+overwritten. A crash can leave a complete canonical final and/or a bounded-name regular
+temporary, never a truncated canonical final. Resume uses `scandir` plus no-follow
+metadata, ignores only validated publication temporaries, and parses only a complete
+canonical final. The SHA-256 of exact protocol bytes is `protocol_sha256`; resume
+requires those same bytes. Mutation, replacement, regeneration, or use of D36
+`final_protocol.json` as the result protocol fails closed. D38 validates this run
+artifact; D40 consumes its identity only through D38-accepted evidence.
 
 `evaluation/blinded_contracts.py` owns only token, key, case/category-binding, and
 protocol primitives and MUST NOT import `evaluation.result_contracts`, including from
@@ -1461,7 +1473,35 @@ directory is private evidence and MUST affect the sealed aggregate.
 D36 candidate trial-tool, D37 evaluator/runner, D38 importer, D39 verifier, and D40
 decision sources each have separate canonical `ToolAttestation.aggregate_sha256`
 values. They are never combined with each other, the approvals, or the candidate
-fingerprint.
+fingerprint. D37 discovers its attestation closure from sorted tracked Git paths at
+runtime rather than a hand-maintained list. The closure contains every regular
+non-symlink `backend/evaluation/**/*.py`, the D37 CLI,
+`backend/app/**/*.py` as a conservative behavior-affecting runtime closure,
+`backend/app/operations/definitions.json`, `backend/pyproject.toml`, and
+`backend/uv.lock`. Existing `attest_tool()` requires committed blobs, clean matching
+working bytes, normal index entries, deterministic sorted unique paths, and stable
+pre/post validation. Tests, generated evidence, `.env` files, secrets, and held-out
+material are not admitted.
+
+The candidate root itself and every supplied ancestor/component are checked without
+following links; symlink and Windows reparse/junction roots fail. D37 resolves the root
+once, binds the detached commit, frozen manifest snapshot, and directory identity,
+passes only that canonical path to the host, and repeats identity/commit/snapshot checks
+before and after every trial. Candidate path replacement fails the run. Every writable
+`groups/<ordinal>/cases/<token>/<mode>/attempts/<ordinal>` component is created or
+validated beneath the canonical external output root as a non-link, non-reparse
+directory. Resume discovery never uses glob-follow behavior. Trial inputs,
+observations, logs, records, and public outputs are opened or read as regular files
+with no-follow flags and identity checks where supported; a precreated link at any
+writable component fails before use.
+
+Each trial host starts in a separate POSIX session or Windows process group. POSIX
+termination sends `SIGKILL` to the process group. Windows termination awaits
+`taskkill /PID <pid> /T /F`; direct kill is only a final fallback. Stdout and stderr
+are drained concurrently through bounded readers sharing one fixed 2 MiB cap and are
+written only to exclusive regular log files. Timeout, cancellation, or cap overflow
+terminates the complete process tree, awaits confirmed parent exit and pipe closure,
+and only then writes a trial record or seals evidence.
 
 ### D38 validation and import bindings
 
@@ -1972,8 +2012,10 @@ sequenceDiagram
   aliases, reason code, candidate ID, counts, durations, and exception class. They
   must not contain free text, model request/response bodies, prompts, source scripts,
   secrets, provider headers, held-out labels, or absolute private paths.
-- D37/D39 result files use atomic temporary-write plus `os.replace`; partial evidence
-  remains inspectable after interruption.
+- D37 immutable protocol/trial/bundle files use same-directory fsynced temporary files
+  plus atomic no-replace hard-link publication; D37 mutable partial status and existing
+  D39 contracts retain their separately documented replacement behavior. Partial D37
+  evidence remains inspectable after interruption.
 
 ### Security design
 

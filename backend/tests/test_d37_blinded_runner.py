@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,12 @@ from evaluation.blinded_contracts import (
 from evaluation.blinded_runner import (
     _D36_SOURCE_PATHS,
     _D37_SOURCE_PATHS,
+    _d37_source_paths,
+    _canonical_candidate_root,
+    _ensure_writable_directory,
+    _invoke_trial_host,
+    _load_records,
+    _publish_immutable,
     case_to_unlabeled,
     run_blinded_evaluation,
     write_run_protocol_exclusive,
@@ -2013,7 +2021,11 @@ def _make_task4_tool_repo(
         path.write_bytes(
             _task4_host_source(observation, mutate_candidate=mutate_candidate)
             if relative == host_path
-            else f"synthetic committed source: {relative}\n".encode("utf-8")
+            else (
+                f"# synthetic committed source: {relative}\n".encode("utf-8")
+                if relative.endswith(".py")
+                else f"synthetic committed source: {relative}\n".encode("utf-8")
+            )
         )
     _git(repository, "init", "-q")
     _git(repository, "config", "user.email", "d37@example.invalid")
@@ -2404,6 +2416,8 @@ def test_interrupted_host_subprocess_is_killed_and_awaited(
             self.returncode: int | None = None
             self.killed = False
             self.finished = asyncio.Event()
+            self.stdout: asyncio.StreamReader | None = None
+            self.stderr: asyncio.StreamReader | None = None
 
         async def wait(self) -> int:
             await self.finished.wait()
@@ -2419,10 +2433,19 @@ def test_interrupted_host_subprocess_is_killed_and_awaited(
     async def create_process(*_: object, **__: object) -> FakeProcess:
         return process
 
+    async def terminate_tree(selected: FakeProcess) -> None:
+        selected.kill()
+        await selected.wait()
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(runner, "_terminate_process_tree", terminate_tree)
     (tmp_path / "backend").mkdir()
 
     async def exercise() -> None:
+        process.stdout = asyncio.StreamReader()
+        process.stderr = asyncio.StreamReader()
+        process.stdout.feed_eof()
+        process.stderr.feed_eof()
         task = asyncio.create_task(
             runner._invoke_trial_host(
                 tool_root=tmp_path,
@@ -2467,3 +2490,276 @@ def test_blinded_runner_cli_exposes_only_explicit_external_inputs() -> None:
         "--token-key-file",
     ):
         assert option in completed.stdout
+
+
+@pytest.mark.parametrize("name", ["trial-result.json", "result-bundle.json"])
+def test_interrupted_immutable_publication_leaves_complete_resumable_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
+) -> None:
+    final = tmp_path / name
+    value = b"canonical complete bytes\n"
+    real_link = os.link
+
+    def interrupt_after_link(source: Path, destination: Path, **kwargs: object) -> None:
+        real_link(source, destination, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "link", interrupt_after_link)
+    with pytest.raises(KeyboardInterrupt):
+        _publish_immutable(final, value, name)
+    assert final.read_bytes() == value
+
+    monkeypatch.setattr(os, "link", real_link)
+    assert _publish_immutable(final, value, name) == final
+    assert final.read_bytes() == value
+
+
+@pytest.mark.parametrize("name", ["trial-result.json", "result-bundle.json"])
+def test_immutable_publication_never_replaces_existing_final_and_ignores_temp(
+    tmp_path: Path, name: str,
+) -> None:
+    final = tmp_path / name
+    _publish_immutable(final, b"first\n", "trial result")
+    leftover = tmp_path / f".{name}.tmp-{'a' * 64}"
+    leftover.write_bytes(b"incomplete")
+
+    with pytest.raises(ValueError, match="trial result"):
+        _publish_immutable(final, b"second\n", "trial result")
+
+    assert final.read_bytes() == b"first\n"
+    assert _load_records(tmp_path, "0" * 64) == []
+
+
+def test_d37_attestation_closure_is_sorted_and_covers_runtime_sources() -> None:
+    root = Path(__file__).parents[2]
+    paths = _d37_source_paths(root)
+    tracked = set(_git(root, "ls-files").splitlines())
+
+    expected = {
+        path
+        for path in tracked
+        if (
+            path.startswith("backend/evaluation/")
+            and path.endswith(".py")
+        )
+        or (path.startswith("backend/app/") and path.endswith(".py"))
+    } | {
+        "backend/app/operations/definitions.json",
+        "backend/pyproject.toml",
+        "backend/scripts/run_blinded_evaluation.py",
+        "backend/uv.lock",
+    }
+    assert paths == tuple(sorted(expected))
+    assert len(paths) == len(set(paths))
+    assert set(paths) <= tracked
+    assert "backend/pyproject.toml" in paths
+    assert "backend/uv.lock" in paths
+    assert "backend/app/operations/definitions.json" in paths
+    assert "backend/evaluation/contracts.py" in paths
+    assert "backend/evaluation/corpus.py" in paths
+    assert "backend/evaluation/fixtures.py" in paths
+    assert "backend/app/operations/catalog.py" in paths
+    assert "backend/scripts/run_blinded_evaluation.py" in paths
+    assert all(not path.startswith("backend/tests/") for path in paths)
+    assert all("release-evidence/" not in path and ".env" not in path for path in paths)
+
+
+def test_d37_attestation_closure_mutation_invalidates_or_changes_attestation(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    representative = (
+        "backend/evaluation/contracts.py",
+        "backend/evaluation/corpus.py",
+        "backend/evaluation/fixtures.py",
+        "backend/app/operations/catalog.py",
+        "backend/app/operations/definitions.json",
+        "backend/scripts/run_blinded_evaluation.py",
+        "backend/pyproject.toml",
+        "backend/uv.lock",
+    )
+    for relative in representative:
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"{relative}\n".encode("utf-8"))
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.email", "d37@example.invalid")
+    _git(repository, "config", "user.name", "D37 Test")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-q", "-m", "runtime closure")
+    first_commit = _git(repository, "rev-parse", "HEAD")
+    paths = _d37_source_paths(repository)
+    first = attest_tool(
+        repo_root=repository,
+        tool_name="d37_blinded_evaluator",
+        git_commit=first_commit,
+        source_paths=paths,
+    )
+
+    for relative in representative[:5]:
+        target = repository / relative
+        original = target.read_bytes()
+        target.write_bytes(original + b"changed\n")
+        with pytest.raises(ValueError, match="clean|committed"):
+            attest_tool(
+                repo_root=repository,
+                tool_name="d37_blinded_evaluator",
+                git_commit=first_commit,
+                source_paths=paths,
+            )
+        target.write_bytes(original)
+
+    target = repository / "backend/app/operations/definitions.json"
+    target.write_bytes(target.read_bytes() + b"committed change\n")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-q", "-m", "change definition")
+    second_commit = _git(repository, "rev-parse", "HEAD")
+    second = attest_tool(
+        repo_root=repository,
+        tool_name="d37_blinded_evaluator",
+        git_commit=second_commit,
+        source_paths=_d37_source_paths(repository),
+    )
+    assert second.aggregate_sha256 != first.aggregate_sha256
+
+
+@pytest.mark.parametrize("linked_component", ["groups", "cases", "mode", "attempts"])
+def test_writable_directory_rejects_precreated_link_component(
+    tmp_path: Path, linked_component: str,
+) -> None:
+    root = tmp_path / "output"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    components = ["groups", "000001", "cases", "a" * 64, "all_tools", "attempts"]
+    indices = {"groups": 0, "cases": 2, "mode": 4, "attempts": 5}
+    current = root
+    for index, component in enumerate(components):
+        child = current / component
+        if index == indices[linked_component]:
+            try:
+                child.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlink creation unavailable")
+            break
+        child.mkdir()
+        current = child
+
+    with pytest.raises(ValueError, match="directory|reparse|symlink|unsafe"):
+        _ensure_writable_directory(root, *components)
+    assert list(outside.iterdir()) == []
+
+
+def test_candidate_root_symlink_and_path_swap_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = tmp_path / "candidate"
+    (real / "backend").mkdir(parents=True)
+    link = tmp_path / "candidate-link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation unavailable")
+    with pytest.raises(ValueError, match="candidate"):
+        _canonical_candidate_root(link)
+
+    arguments = _task4_environment(tmp_path / "swap", monkeypatch)
+    import evaluation.blinded_runner as runner
+
+    async def swap_candidate(**_: object) -> str:
+        candidate = Path(arguments["candidate_root"])
+        candidate.rename(candidate.with_name("candidate-moved"))
+        candidate.mkdir()
+        return "transport_failure"
+
+    monkeypatch.setattr(runner, "_invoke_trial_host", swap_candidate)
+    with pytest.raises(ValueError, match="candidate"):
+        asyncio.run(run_blinded_evaluation(**arguments))
+
+
+def _process_exists(pid: int) -> bool:
+    if os.name == "nt":
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return str(pid) in result.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_trial_host_output_flood_is_bounded_and_descendant_is_killed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import evaluation.blinded_runner as runner
+
+    backend = tmp_path / "backend"
+    script = backend / "evaluation" / "scripts" / "evaluation_trial_host.py"
+    script.parent.mkdir(parents=True)
+    (backend / "evaluation" / "__init__.py").write_bytes(b"")
+    (script.parent / "__init__.py").write_bytes(b"")
+    script.write_text(
+        "import argparse, subprocess, sys, time\n"
+        "p=argparse.ArgumentParser()\n"
+        "p.add_argument('--storage'); p.add_argument('--candidate-root'); p.add_argument('--mode'); p.add_argument('--input'); p.add_argument('--output'); p.add_argument('--model'); p.add_argument('--index')\n"
+        "a=p.parse_args()\n"
+        "from pathlib import Path\n"
+        "s=Path(a.storage); s.mkdir()\n"
+        "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "(s/'child.pid').write_text(str(child.pid))\n"
+        "sys.stdout.buffer.write(b'x' * (3 * 1024 * 1024)); sys.stdout.buffer.flush()\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "_HOST_WATCHDOG_SECONDS", 10)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    input_path = tmp_path / "input.json"
+    input_path.write_bytes(b"{}")
+    index = tmp_path / "index"
+    index.mkdir()
+    storage = tmp_path / "storage"
+    stdout = tmp_path / "stdout.log"
+    stderr = tmp_path / "stderr.log"
+
+    outcome = asyncio.run(
+        _invoke_trial_host(
+            tool_root=tmp_path,
+            candidate_root=candidate,
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "output.json",
+            storage=storage,
+            model="synthetic",
+            index=index,
+            stdout_path=stdout,
+            stderr_path=stderr,
+        )
+    )
+
+    assert outcome == "transport_failure"
+    assert stdout.stat().st_size == runner._HOST_OUTPUT_CAP_BYTES
+    child_pid = int((storage / "child.pid").read_text())
+    deadline = time.monotonic() + 3
+    while _process_exists(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _process_exists(child_pid)
+
+
+def test_token_key_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target.key"
+    target.write_bytes(SYNTHETIC_KEY)
+    link = tmp_path / "token.key"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+
+    with pytest.raises((OSError, ValueError)):
+        with token_key(link):
+            pass

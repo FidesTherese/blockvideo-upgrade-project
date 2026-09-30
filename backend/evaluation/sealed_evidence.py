@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 from pathlib import Path, PurePosixPath
 
 from evaluation.tool_attestation import FileFingerprint, aggregate_fingerprints
 
 _REPARSE_POINT = 0x400
+_PUBLICATION_TEMP = re.compile(r"^\.[^/\\]+\.tmp-[0-9a-f]{64}$")
 _EXCLUDED_OUTPUT_NAMES = frozenset(
     {
         "aggregate.json",
@@ -89,12 +91,16 @@ def seal_evidence(root: Path) -> tuple[list[FileFingerprint], str]:
             path = current_path / file_name
             relative = path.relative_to(root).as_posix()
             FileFingerprint(path=relative, sha256="0" * 64, size=0)
+            metadata = path.lstat()
             if current_path == root and file_name in _EXCLUDED_OUTPUT_NAMES:
-                metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISREG(
                     metadata.st_mode
                 ):
                     raise ValueError(f"excluded sealed output is not a regular file: {relative}")
+                continue
+            if _PUBLICATION_TEMP.fullmatch(file_name):
+                if not stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata):
+                    raise ValueError(f"publication temporary is not regular: {relative}")
                 continue
             relative_files.append(relative)
     if len(relative_files) != len(set(relative_files)):
