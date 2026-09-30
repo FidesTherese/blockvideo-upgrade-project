@@ -47,7 +47,10 @@ process or allowing mode-specific test conditions.
   E2E tests do not prove exact-D35 stateful execution. Follow the DTD ordered blueprint:
   strict canonical/literal parser, 64/128 MiB caps, streamed index hashing, and the
   paired external loopback-profile host/runner prerequisite before a real candidate-
-  rooted synthetic index/chat/embeddings roundtrip. No dummy index or weights download.
+  rooted synthetic index/chat/embeddings roundtrip. Those prerequisites and the exact
+  pinned-D35 roundtrip are now implemented; the genuine tests verify every archive blob,
+  actual embeddings and narrowed grammar, restart resend, original-target preservation,
+  unchanged source/index hashes, and invalid bindings. No dummy index or weights download.
 - Keep protocol/result model inventories unchanged. Bundle protocol_sha256 commits
   the protocol's model/index hashes; model_configuration_sha256 currently pins only
   the identifier, not provider weights. Require independent provenance before real
@@ -75,8 +78,9 @@ bounded confirmed teardown, and token-key zeroization after final-`fstat` and cl
 faults as well as normal exit. Shared JSON rejects duplicate/nonfinite/raw Literal
 primitive coercions without normalization; durable hashes include LF and source
 aggregates do not. Native integration facts and independent final-fix acceptance
-remain pending until the specified verification; this docs-only audit establishes
-no new runtime acceptance. They also prove rejection of secondary-project mutation,
+remain pending for later units and independent review; the D37 prerequisite tests
+provide synthetic runtime evidence only, not release approval. D36 inventories now
+bind shared parser/IO dependencies and require a fresh attestation after final tooling. They also prove rejection of secondary-project mutation,
 primary unrelated-field mutation, project insertion/deletion, unapproved, selectively
 filtered, duplicate, zero-coverage, or mismatched input. Every repository-owned
 synthetic/development revision race uses `initial + 1`; a nonconforming mounted

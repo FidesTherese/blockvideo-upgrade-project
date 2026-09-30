@@ -249,14 +249,21 @@ there is no automatic rebuild, v12 flag, lock repair, or candidate-config rewrit
 A future narrow v10 authorization needs a new documented, version-probed tooling
 contract and new run; it is not part of the current nine-command inventory.
 
-#### Shared evidence parsing and resource contract (planned prerequisite)
+#### Shared evidence parsing and resource contract (D37 prerequisites implemented)
 
-Add `backend/evaluation/evidence_json.py` as a pure parser, importing only stdlib,
+`backend/evaluation/evidence_json.py` is implemented as a pure parser, importing only stdlib,
 Pydantic, and `canonical_json_bytes` from `tool_attestation`. It imports no runner,
 application, filesystem executor, or result/protocol model. `blinded_io` remains
 filesystem-only; callers supply the model and explicit cap. Dependencies stay
 `tool_attestation -> evidence_json -> boundary callers` and
 `blinded_io -> boundary callers`; these arrows mean provider to consumer.
+The external D36 host imports these two helpers only inside host-side functions;
+its standalone candidate-worker bootstrap MUST NOT import them from the candidate's
+older evaluation package. The D36 freezer and D37 verifier fixed trial-tool inventories
+include `backend/evaluation/blinded_io.py` and `backend/evaluation/evidence_json.py`
+in lexical order. This dependency-closure update requires a fresh D36 attestation;
+existing publications are never rewritten. D37's conservative tracked-source inventory
+also binds these helpers and the operator validator's tooling-side retrieval contracts.
 
 ```python
 TModel = TypeVar("TModel", bound=BaseModel)
@@ -307,15 +314,21 @@ Large blobs are not JSON inputs. Hash source, media, and index files in 1 MiB ch
 with pre/open/post identity/size checks, finite inventory counts and total bytes;
 never apply the 16 MiB JSON default to an index blob. Candidate index limits are
 64,000 bytes for `manifest.json` and 64,000,000 bytes for a bundle (decimal, not MiB).
-D37 `_fingerprint_directory` currently calls the 16 MiB reader; replace that hash-only
-path with streamed fingerprints as a prerequisite, without changing index bytes or
-protocol/result schemas. Tool-source files cap at 8 MiB each / 512 MiB total; index
+D37 `_fingerprint_directory` streams blobs through `blinded_io.fingerprint_regular`
+in 1 MiB chunks, checks pre/open/post path and descriptor identities, and sorts the
+complete fingerprint inventory lexically. Manifest and blob caps are applied before
+reading; index bytes and protocol/result field inventories remain unchanged. On
+Windows Python 3.12, path and descriptor `st_ctime_ns` can have different meanings;
+compare ctime within each path/descriptor pair, not across APIs. Device/inode/size
+and mtime must agree across all four observations. Tool-source files cap at 8 MiB each / 512 MiB total; index
 inventory cap is 4,096 files / 512 MiB total. Parse large artifacts sequentially and
 release raw/decoded duplicates once hashes and validated models are retained.
 Maximum-topology byte arithmetic is proven; maximum-size parse time/memory is not.
-A bounded single-pass category denominator tally must replace quadratic recounting
-before claiming full-range operational acceptance; names, fields, and thresholds stay
-unchanged.
+The runner and result validator now tally included category denominators once with
+`Counter`, then project the declared category order. A 4,096-case/2,048-category
+regression bounds actual equality operations without a wall-clock threshold; names,
+fields, equations, and thresholds stay unchanged. Maximum-size model parsing is not
+yet an operational acceptance claim.
 
 All agent/controller descendants share hard aggregate RAM <=16 GiB; target <=12 GiB,
 reserve runtime headroom, and start no nontrivial process at >=14 GiB. One command or
@@ -325,7 +338,7 @@ child, and NumPy/ONNX thread limits of one; it measures working sets and aborts 
 owned jobs on memory pressure. All child output is bounded and every started child
 has an owner and teardown deadline.
 
-#### Executable-probe blueprint and acceptance checklist (not executed here)
+#### Executable-probe blueprint and acceptance checklist (D37 orders 1–2 and 5 implemented)
 
 | Order / owner | Action | Exact acceptance / failure |
 |---|---|---|
@@ -336,12 +349,15 @@ has an owner and teardown deadline.
 | 5 / D37 integration harness | Exact committed D35 bytes in a verified external sandbox, genuine catalog/profile-bound synthetic index, fake loopback chat+embeddings; both modes and restart resend | Real candidate imports only in candidate-rooted workers, not stub candidate/host or dummy index. Exact expected response/effects, <=4 actual model calls, same source/index hashes before/after, fresh case storage; no default fallback accepted as stateful success |
 | 6 / D39–D40 | Six typed receipts, exact command/native-binding inventory, failure-prefix and cleanup tests, all detached inputs, Not-ready baseline | Rehash every receipt's complete canonical bytes/size and artifact hash/size; reject arbitrary six hashes, wrong bindings, stale attestation, missing inputs, and unconfirmed cleanup; no inferred human review |
 
-Orders 3–6 require real lightweight integration execution in the later implementation
-phase, not additional design-time assertions. Fresh-install/native build availability,
-browser executable provenance/automation roundtrip, and the exact pinned-worker
-integration remain **Blocked facts** until those probes pass. Existing D37 E2E uses
-stub candidate/host/index; existing D36 real-worker tests use the current tree. Neither
-is exact-D35 stateful proof. Do not repeat broad debug loops: fail the first unmet
+Orders 3–4 and 6 remain deferred to later units. Fresh-install/native build availability
+and browser provenance/automation are still **Blocked facts**. Order 5 is covered by
+`test_pinned_d35_genuine_stateful_index_crossprocess_and_original_target` and
+`test_pinned_d35_invalid_index_never_executes_or_falls_back`, using the verified exact
+D35 Git archive and pinned candidate APIs through `tests/d37_pinned_support.py`.
+Both modes, restart resend, original-target reread, actual embeddings/narrowed
+retrieval grammar, unchanged complete source/index hashes, and stale catalog/scope/
+profile/missing-bundle negatives are checked. Existing stub/current-tree tests remain
+unit/regression coverage, not pinned integration proof. Do not repeat broad debug loops: fail the first unmet
 prerequisite, record its fixed reason, update this contract only if evidence disproves
 it, and resume from that dependency boundary.
 
@@ -383,7 +399,7 @@ backend/evaluation/
 │   ├── d39_candidate_smoke.py         # planned internal candidate-rooted bootstrap
 │   ├── verify_release_candidate.py    # D39 final external verifier CLI
 │   └── attest_release_decision.py     # D40 source-attestation generate/validate CLI
-├── evidence_json.py                   # planned pure strict canonical parser
+├── evidence_json.py                   # pure bounded strict canonical parser
 ├── smoke_contracts.py                 # planned six typed smoke receipts; no execution
 ├── blinded_contracts.py
 ├── blinded_io.py                    # bounded no-follow reads and crash-safe publication
@@ -1563,8 +1579,14 @@ operator parameters, never case data or inherited ambient settings. Include the
 profile's parent in protected-root/output checks. Profile identity is already inside
 the genuine index manifest/hash; endpoint identity is operational, not a weights claim.
 The worker sets candidate Settings from those explicit values before service creation.
-Current `_clean_environment` drops both settings and defaults to the ONNX E5 profile:
-the loopback synthetic route is **not implemented** or verified yet. Tests use a
+The host validates paired overrides, protects the external profile parent from output/
+storage overlap, binds its no-link identity before/after execution, checks manifest
+profile equality, and explicitly sets both clean-environment values. The worker assigns
+both Settings values before service creation. The runner validates the same pair and
+index match before protocol publication/resume, protects the profile parent, and sends
+overrides only to stateful host calls. Both CLIs expose the paired options. Omission
+preserves the ONNX E5 defaults and discards ambient embedding settings. The loopback
+route is implemented and exercised by the exact pinned-D35 synthetic tests. Tests use a
 profile clearly named synthetic, fixed normalized vectors, and synthetic identity
 bytes; they must never represent them as real model provenance. Build/load that index
 through pinned candidate `load_sources`, `publish_index`, and `load_index` in a
@@ -3009,8 +3031,11 @@ rejection and single-pass topology accounting, paired external loopback-profile 
 configuration, and new synthetic boundary tests. `evidence_json`/runtime helpers cannot
 import result/protocol/runner/app. Extend only documented optional host/runner parameters,
 keep D24 event meanings and shared model inventories unchanged, and rerun focused D36/D37
-verification after source corrections. Exact pinned-worker integration is prerequisite
-evidence, not implied by stub tests. Commit tooling before source attestation; refresh
+verification after source corrections. These prerequisites and exact pinned-worker
+synthetic integration are now implemented; later units and independent review remain
+pending. Direct schema/clean-flag guards also cover the reused freeze/control/marker,
+unlabeled-case, observation, trial-record, protocol and result boundaries without adding
+fields. Exact pinned integration is separate evidence, never implied by stub tests. Commit tooling before source attestation; refresh
 D36 and pin the final tooling boundary before any real run. The original D37 construction
 scope below is retained as context, not an instruction to overwrite existing files.
 

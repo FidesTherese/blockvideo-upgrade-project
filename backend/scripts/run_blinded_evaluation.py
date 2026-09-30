@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 from evaluation.blinded_runner import run_blinded_evaluation
+from evaluation.blinded_io import read_regular
+from evaluation.result_contracts import MAX_RESULT_BUNDLE_BYTES
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -23,6 +25,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--index", type=Path, required=True)
     parser.add_argument("--evaluator-name", required=True)
     parser.add_argument("--token-key-file", type=Path, required=True)
+    parser.add_argument("--embedding-profile", type=Path)
+    parser.add_argument("--embedding-base-url")
     return parser
 
 
@@ -36,7 +40,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    raw = (arguments.output_root / "result-bundle.json").read_bytes()
+    raw = read_regular(arguments.output_root / "result-bundle.json", maximum=MAX_RESULT_BUNDLE_BYTES)
     result = {
         "candidate_id": bundle.candidate_id,
         "protocol_sha256": bundle.protocol_sha256,

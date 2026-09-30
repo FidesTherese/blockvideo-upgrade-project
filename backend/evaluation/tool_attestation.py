@@ -19,7 +19,7 @@ _REPARSE_POINT = 0x400
 class FileFingerprint(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    path: str
+    path: Annotated[str, Field(min_length=1, max_length=512)]
     sha256: Annotated[str, Field(pattern=_SHA256_PATTERN)]
     size: Annotated[int, Field(ge=0)]
 
@@ -40,7 +40,7 @@ class ToolAttestation(BaseModel):
     schema_version: Annotated[int, Field(strict=True, ge=1, le=1)]
     tool_name: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[a-z0-9_]+$")]
     git_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    files: list[FileFingerprint]
+    files: Annotated[list[FileFingerprint], Field(min_length=1, max_length=8192)]
     aggregate_sha256: Annotated[str, Field(pattern=_SHA256_PATTERN)]
 
     @field_validator("files")

@@ -1,6 +1,7 @@
 """Filesystem validation and crash-safe publication for the blinded evaluator."""
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import stat
@@ -110,6 +111,44 @@ def read_regular(path: Path, *, maximum: int = DEFAULT_JSON_BYTES) -> bytes:
     ):
         raise ValueError("input changed or exceeds its size limit")
     return value
+
+
+def fingerprint_regular(path: Path, *, maximum: int) -> tuple[int, str]:
+    """Stream a bounded blob, rejecting link, identity, size, or timestamp changes."""
+    before = path.lstat()
+    if stat.S_ISLNK(before.st_mode) or is_reparse(before) or not stat.S_ISREG(before.st_mode):
+        raise ValueError("blob must be a regular non-link file")
+    if before.st_size > maximum:
+        raise ValueError("blob exceeds its size limit")
+
+    def identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+        return (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or is_reparse(opened)
+                or identity(before) != identity(opened)):
+            raise ValueError("blob identity changed")
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := os.read(descriptor, min(1024 * 1024, maximum + 1 - size)):
+            size += len(chunk)
+            if size > maximum:
+                raise ValueError("blob exceeds its size limit")
+            digest.update(chunk)
+        final = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after = path.lstat()
+    if (stat.S_ISLNK(after.st_mode) or is_reparse(after) or not stat.S_ISREG(after.st_mode)
+            or len({identity(before), identity(opened), identity(final), identity(after)}) != 1
+            or before.st_ctime_ns != after.st_ctime_ns
+            or opened.st_ctime_ns != final.st_ctime_ns
+            or size != before.st_size):
+        raise ValueError("blob changed while hashing")
+    return size, digest.hexdigest()
 
 
 def fsync_directory(path: Path) -> None:

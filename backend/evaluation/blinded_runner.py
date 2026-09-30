@@ -7,15 +7,17 @@ import os
 import re
 import stat
 import subprocess
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from evaluation.blinded_io import (
+    DEFAULT_JSON_BYTES,
     ensure_writable_directory as _ensure_writable_directory,
+    fingerprint_regular as _fingerprint_regular,
     is_reparse as _is_reparse,
     publish_immutable as _publish_immutable,
     read_regular as _read_regular,
@@ -42,6 +44,7 @@ from evaluation.blinded_contracts import (
     token_key,
 )
 from evaluation.blinded_scoring import TrialScore, score_trial
+from evaluation.evidence_json import parse_canonical_model
 from evaluation.contracts import Case
 from evaluation.corpus import load_cases, load_review
 from evaluation.release_candidate.freeze import read_frozen_candidate
@@ -56,7 +59,9 @@ from evaluation.result_contracts import (
     approval_partition,
 )
 from evaluation.sealed_evidence import seal_evidence
-from evaluation.scripts.evaluation_trial_host import TrialObservation
+from evaluation.scripts.evaluation_trial_host import (
+    TrialObservation, _embedding_configuration, _check_embedding_index,
+)
 from evaluation.tool_attestation import (
     FileFingerprint,
     ToolAttestation,
@@ -74,6 +79,8 @@ from evaluation.unlabeled_contracts import (
 
 _D36_HOST_PATH = "backend/evaluation/scripts/evaluation_trial_host.py"
 _D36_SOURCE_PATHS = (
+    "backend/evaluation/blinded_io.py",
+    "backend/evaluation/evidence_json.py",
     "backend/evaluation/final_protocol.json",
     "backend/evaluation/release_candidate/__init__.py",
     "backend/evaluation/release_candidate/contracts.py",
@@ -110,6 +117,13 @@ class _TrialRecord(BaseModel):
     score: TrialScore | None
     candidate_snapshot_sha256: str | None
 
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_primitive(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("trial schema version must be an integer")
+        return value
+
 
 class _RunContext(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
@@ -141,6 +155,9 @@ def write_run_protocol_exclusive(
     root = _require_directory(output_root, "evaluation output", create=True)
     path = root / _PROTOCOL_NAME
     expected = _canonical_file_bytes(protocol)
+    if len(expected) > MAX_PROTOCOL_BYTES:
+        raise ValueError("protocol exceeds its maximum canonical size")
+    parse_canonical_model(expected, EvaluationProtocol, maximum=MAX_PROTOCOL_BYTES)
     return _write_or_validate_immutable(
         path, expected, "protocol", maximum=MAX_PROTOCOL_BYTES
     )
@@ -398,6 +415,13 @@ def _load_run_context(
     if freeze_manifest.name != "freeze-manifest.json":
         raise ValueError("freeze manifest must belong to a completed D36 publication")
     publication = freeze_manifest.parent
+    parse_canonical_model(
+        _read_regular(freeze_manifest), FreezeManifest, maximum=DEFAULT_JSON_BYTES,
+    )
+    parse_canonical_model(
+        _read_regular(publication / "d36-tool-attestation.json"), ToolAttestation,
+        maximum=DEFAULT_JSON_BYTES,
+    )
     manifest, d36_attestation = read_frozen_candidate(publication)
     if freeze_manifest.resolve(strict=True) != (
         publication.resolve(strict=True) / "freeze-manifest.json"
@@ -458,7 +482,14 @@ def _validate_run_context(
 def _fingerprint_directory(root: Path) -> str:
     directory = _require_directory(root, "stateful index")
     files: list[FileFingerprint] = []
-    for current, directories, names in os.walk(directory, topdown=True, followlinks=False):
+    total = 0
+
+    def walk_error(error: OSError) -> None:
+        raise ValueError("stateful index cannot be read") from None
+
+    for current, directories, names in os.walk(
+        directory, topdown=True, followlinks=False, onerror=walk_error,
+    ):
         current_path = Path(current)
         _require_directory(current_path, "stateful index directory")
         for name in sorted(directories):
@@ -473,14 +504,17 @@ def _fingerprint_directory(root: Path) -> str:
                 metadata.st_mode
             ):
                 raise ValueError("stateful index contains a non-regular entry")
-            content = _read_regular(path)
-            files.append(
-                FileFingerprint(
-                    path=relative, sha256=_sha256_bytes(content), size=len(content)
-                )
-            )
+            if len(files) >= 4096:
+                raise ValueError("stateful index exceeds its file count limit")
+            maximum = min(512 * 1024 * 1024 - total, 64_000_000)
+            if name == "manifest.json":
+                maximum = min(maximum, 64_000)
+            size, digest = _fingerprint_regular(path, maximum=maximum)
+            total += size
+            files.append(FileFingerprint(path=relative, sha256=digest, size=size))
     if not files:
         raise ValueError("stateful index must contain at least one regular file")
+    files.sort(key=lambda item: item.path)
     return aggregate_tool_fingerprints(files)
 
 
@@ -582,7 +616,7 @@ def _record_path(root: Path, group_ordinal: int, case_token: str, mode: str) -> 
 
 def _load_trial_record(path: Path, protocol_sha256: str) -> _TrialRecord:
     raw = _read_regular(path)
-    record = _TrialRecord.model_validate_json(raw, strict=True)
+    record = parse_canonical_model(raw, _TrialRecord, maximum=DEFAULT_JSON_BYTES)
     if raw != _canonical_file_bytes(record) or record.protocol_sha256 != protocol_sha256:
         raise ValueError("completed trial record is invalid")
     return record
@@ -661,7 +695,7 @@ def _next_attempt(mode_root: Path) -> Path:
 
 def _observation(path: Path) -> tuple[TrialObservation, bytes]:
     raw = _read_regular(path)
-    observation = TrialObservation.model_validate_json(raw, strict=True)
+    observation = parse_canonical_model(raw, TrialObservation, maximum=DEFAULT_JSON_BYTES)
     if raw != _canonical_file_bytes(observation):
         raise ValueError("trial observation is not canonical")
     return observation, raw
@@ -682,6 +716,8 @@ async def _run_trial(
     model: str,
     index: Path,
     index_sha256: str,
+    embedding_profile: Path | None = None,
+    embedding_base_url: str | None = None,
 ) -> _TrialRecord:
     mode_root = _ensure_writable_directory(
         root,
@@ -735,6 +771,8 @@ async def _run_trial(
             stdout_path=attempt / "stdout.log",
             stderr_path=attempt / "stderr.log",
             candidate_identity=context.candidate_anchor.identity,
+            embedding_profile=embedding_profile if mode == "stateful" else None,
+            embedding_base_url=embedding_base_url if mode == "stateful" else None,
         )
     finally:
         _validate_run_context(candidate_root, freeze_manifest, context)
@@ -827,7 +865,7 @@ def _validate_existing_bundle(
     if not path.exists():
         return None
     raw = _read_regular(path, maximum=MAX_RESULT_BUNDLE_BYTES)
-    bundle = EvaluationResultBundle.model_validate_json(raw, strict=True)
+    bundle = parse_canonical_model(raw, EvaluationResultBundle, maximum=MAX_RESULT_BUNDLE_BYTES)
     if raw != _canonical_file_bytes(bundle):
         raise ValueError("existing result bundle is not canonical")
     if (
@@ -868,7 +906,15 @@ async def _run_blinded_evaluation_anchored(
     evaluator_name: str,
     token_key_file: Path,
     context: _RunContext,
+    embedding_profile: Path | None = None,
+    embedding_base_url: str | None = None,
 ) -> EvaluationResultBundle:
+    embedding = _embedding_configuration(
+        mode="stateful", embedding_profile=embedding_profile, embedding_base_url=embedding_base_url,
+    )
+    if embedding is not None:
+        embedding_profile, embedding_base_url, _, profile_raw = embedding
+        _check_embedding_index(profile_raw, index)
     protected_roots = (
         candidate_root,
         context.tool_root,
@@ -878,7 +924,7 @@ async def _run_blinded_evaluation_anchored(
         independent_review.parent.resolve(strict=True),
         index.resolve(strict=True),
         token_key_file.parent.resolve(strict=True),
-    )
+    ) + ((embedding_profile.parent,) if embedding_profile is not None else ())
     expected_output = _validate_output_location(output_root, protected_roots)
     output = _require_directory(output_root, "evaluation output", create=True)
     if output != expected_output:
@@ -931,6 +977,7 @@ async def _run_blinded_evaluation_anchored(
         case_categories=bindings,
     )
     d37_attestation_raw = _canonical_file_bytes(context.d37_attestation)
+    parse_canonical_model(d37_attestation_raw, ToolAttestation, maximum=DEFAULT_JSON_BYTES)
     _write_or_validate_immutable(
         output / "tool-attestation.json",
         d37_attestation_raw,
@@ -938,6 +985,7 @@ async def _run_blinded_evaluation_anchored(
     )
     protocol_path = write_run_protocol_exclusive(output, protocol)
     protocol_raw = _read_regular(protocol_path, maximum=MAX_PROTOCOL_BYTES)
+    parse_canonical_model(protocol_raw, EvaluationProtocol, maximum=MAX_PROTOCOL_BYTES)
     protocol_sha256 = _sha256_bytes(protocol_raw)
     _validate_run_artifacts(output, protocol_raw, d37_attestation_raw)
     existing_bundle = _validate_existing_bundle(
@@ -955,13 +1003,10 @@ async def _run_blinded_evaluation_anchored(
 
     included_set = set(included)
     binding_by_token = {item.case_token: item.category_token for item in bindings}
-    denominators = {
-        category: sum(
-            token in included_set and binding_by_token[token] == category
-            for token in case_tokens
-        )
-        for category in category_tokens
-    }
+    tally = Counter(
+        binding.category_token for binding in bindings if binding.case_token in included_set
+    )
+    denominators = {category: tally[category] for category in category_tokens}
     if not included or any(value < 1 for value in denominators.values()):
         raise ValueError("approved evaluation coverage must be non-empty in every category")
 
@@ -1006,6 +1051,8 @@ async def _run_blinded_evaluation_anchored(
                     model=model,
                     index=index,
                     index_sha256=index_sha256,
+                    embedding_profile=embedding_profile,
+                    embedding_base_url=embedding_base_url,
                 )
                 records = [
                     item
@@ -1031,6 +1078,10 @@ async def _run_blinded_evaluation_anchored(
         raise ValueError("candidate trial snapshots differ across runs")
     _validate_run_context(candidate_root, freeze_manifest, context)
     _validate_run_artifacts(output, protocol_raw, d37_attestation_raw)
+    if _embedding_configuration(
+        mode="stateful", embedding_profile=embedding_profile, embedding_base_url=embedding_base_url,
+    ) != embedding:
+        raise ValueError("embedding configuration changed during evaluation")
     _, sealed_sha256 = seal_evidence(output)
     modes = tuple(
         _mode_result(mode, records, category_tokens, denominators) for mode in _MODES
@@ -1067,7 +1118,10 @@ async def _run_blinded_evaluation_anchored(
         "result bundle",
         maximum=MAX_RESULT_BUNDLE_BYTES,
     )
-    if _read_regular(result_path, maximum=MAX_RESULT_BUNDLE_BYTES) != _canonical_file_bytes(bundle):
+    published_raw = _read_regular(result_path, maximum=MAX_RESULT_BUNDLE_BYTES)
+    if parse_canonical_model(
+        published_raw, EvaluationResultBundle, maximum=MAX_RESULT_BUNDLE_BYTES,
+    ) != bundle:
         raise ValueError("result bundle changed after publication")
     _validate_run_context(candidate_root, freeze_manifest, context)
     return bundle
@@ -1085,6 +1139,8 @@ async def run_blinded_evaluation(
     index: Path,
     evaluator_name: str,
     token_key_file: Path,
+    embedding_profile: Path | None = None,
+    embedding_base_url: str | None = None,
 ) -> EvaluationResultBundle:
     """Run or resume one externally isolated synthetic-or-held-out evaluation."""
     canonical_candidate = _canonical_candidate_root(candidate_root)
@@ -1102,6 +1158,8 @@ async def run_blinded_evaluation(
             index=index,
             evaluator_name=evaluator_name,
             token_key_file=token_key_file,
+            embedding_profile=embedding_profile,
+            embedding_base_url=embedding_base_url,
             context=context,
         )
     finally:

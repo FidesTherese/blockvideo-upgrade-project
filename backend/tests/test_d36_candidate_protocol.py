@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, get_args, get_origin
 
@@ -21,6 +21,7 @@ from evaluation.corpus import load_cases
 from evaluation.unlabeled_contracts import MAX_REVISION, UnlabeledTrialCase, canonical_case_sha256
 from evaluation.scripts import evaluation_trial_host as trial_host
 from evaluation.scripts.evaluation_trial_host import run_trial_host
+from tests.d37_pinned_support import PINNED_D35, build_verified_index, source_hashes, verified_archive
 
 
 PROTOCOL = (
@@ -832,6 +833,122 @@ def test_mode_index_rules_fail_before_candidate_invocation(
     assert not called
 
 
+@pytest.mark.parametrize("value", [True, 1.0])
+def test_unlabeled_case_rejects_literal_primitive_coercion(value: object) -> None:
+    with pytest.raises(ValidationError):
+        UnlabeledTrialCase.model_validate_json(json.dumps({**_bound_case(), "schema_version": value}))
+
+
+@pytest.mark.parametrize("value", [True, 1.0])
+def test_host_observation_direct_call_rejects_literal_primitive_coercion(value: object) -> None:
+    with pytest.raises(ValidationError):
+        trial_host._WorkerObservation.model_validate({**_worker_observation(), "schema_version": value})
+
+
+@pytest.mark.parametrize(
+    ("mode", "profile", "endpoint"),
+    [("stateful", True, None), ("stateful", False, "http://127.0.0.1:1234/v1"),
+     ("all_tools", True, "http://127.0.0.1:1234/v1"),
+     ("stateful", True, "https://127.0.0.1:1234/v1"),
+     ("stateful", True, "http://example.invalid:1234/v1"),
+     ("stateful", True, "http://127.0.0.1:1234/not-v1")],
+)
+def test_embedding_overrides_fail_closed_before_candidate_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+    profile: bool, endpoint: str | None,
+) -> None:
+    def forbidden_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("invalid embedding configuration must not launch candidate")
+
+    monkeypatch.setattr(trial_host, "_run_candidate", forbidden_run)
+    with pytest.raises(ValueError, match="embedding configuration"):
+        run_trial_host(
+            candidate_root=tmp_path / "candidate", mode=mode,
+            input_path=tmp_path / "case.json", output_path=tmp_path / "observation.json",
+            storage=tmp_path / "storage", model="test-model",
+            index=tmp_path / "index" if mode == "stateful" else None,
+            embedding_profile=tmp_path / "synthetic-profile.json" if profile else None,
+            embedding_base_url=endpoint,
+        )
+
+
+def _synthetic_embedding_profile() -> dict[str, Any]:
+    return {"model": "synthetic-d37-embedding", "weights_sha256": "0" * 64,
+            "dimensions": 2, "document_prefix": "synthetic passage: ",
+            "query_prefix": "synthetic query: ", "normalization": "l2-full-v1",
+            "transport": "local-openai-embeddings-v1", "tokenizer_sha256": None,
+            "source_revision": "synthetic-not-real-weights"}
+
+
+@pytest.mark.parametrize("failure", ["oversize", "onnx", "profile_mismatch", "containment", "replacement"])
+def test_host_embedding_profile_is_bounded_protected_and_identity_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    candidate = tmp_path / "candidate"
+    (candidate / "backend").mkdir(parents=True)
+    index = tmp_path / "index"
+    index.mkdir()
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    profile = profiles / "synthetic-profile.json"
+    value = _synthetic_embedding_profile()
+    profile.write_bytes(json.dumps(value).encode("ascii"))
+    manifest = {"profile": value}
+    (index / "manifest.json").write_bytes(json.dumps(manifest).encode("ascii"))
+    if failure == "oversize":
+        profile.write_bytes(b" " * 16_001)
+    elif failure == "onnx":
+        profile.write_bytes(json.dumps({**value, "transport": "local-onnx-e5-v1"}).encode("ascii"))
+    elif failure == "profile_mismatch":
+        profile.write_bytes(json.dumps({**value, "weights_sha256": "1" * 64}).encode("ascii"))
+    input_path = tmp_path / "case.json"
+    input_path.write_text(json.dumps(_bound_case()), encoding="utf-8")
+    output = (profiles if failure == "containment" else tmp_path) / "observation.json"
+    called = False
+
+    def completed(argv: list[str], **kwargs: Any) -> None:
+        nonlocal called
+        called = True
+        assert failure == "replacement"
+        original = profile.read_bytes()
+        profile.unlink()
+        profile.write_bytes(original)
+        Path(kwargs["env"]["D36_WORKER_OUTPUT"]).write_bytes(
+            trial_host._canonical_json_bytes(_worker_observation())
+        )
+
+    monkeypatch.setattr(trial_host, "_run_candidate", completed)
+    with pytest.raises(ValueError, match="embedding configuration"):
+        run_trial_host(
+            candidate_root=candidate, mode="stateful", input_path=input_path, output_path=output,
+            storage=tmp_path / "storage", model="synthetic", index=index,
+            embedding_profile=profile, embedding_base_url="http://127.0.0.1:1235/v1",
+        )
+    assert called == (failure == "replacement")
+    assert not output.exists()
+
+
+def test_clean_worker_environment_drops_ambient_embedding_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGUAGE_RETRIEVAL_PROFILE", "untrusted-ambient")
+    monkeypatch.setenv("LANGUAGE_EMBEDDING_BASE_URL", "http://example.invalid:80/v1")
+    defaults = trial_host._clean_environment(
+        tmp_path, tmp_path, tmp_path / "case", tmp_path / "result", "stateful",
+        "synthetic", tmp_path / "index", "http://127.0.0.1:1234/v1", phase="single",
+    )
+    assert "LANGUAGE_RETRIEVAL_PROFILE" not in defaults
+    assert "LANGUAGE_EMBEDDING_BASE_URL" not in defaults
+    explicit = trial_host._clean_environment(
+        tmp_path, tmp_path, tmp_path / "case", tmp_path / "result", "stateful",
+        "synthetic", tmp_path / "index", "http://127.0.0.1:1234/v1", phase="single",
+        embedding_profile=tmp_path / "synthetic-profile.json",
+        embedding_base_url="http://127.0.0.1:1235/v1",
+    )
+    assert explicit["LANGUAGE_RETRIEVAL_PROFILE"] == str(tmp_path / "synthetic-profile.json")
+    assert explicit["LANGUAGE_EMBEDDING_BASE_URL"] == "http://127.0.0.1:1235/v1"
+
+
 def test_restart_host_passes_protocol_then_remaining_model_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -852,8 +969,8 @@ def test_restart_host_passes_protocol_then_remaining_model_budget(
         else:
             observation["model_calls"] = 4
             observation["replay"]["model_calls"] = 1
-        Path(kwargs["env"]["D36_WORKER_OUTPUT"]).write_text(
-            json.dumps(observation), encoding="ascii"
+        Path(kwargs["env"]["D36_WORKER_OUTPUT"]).write_bytes(
+            trial_host._canonical_json_bytes(observation)
         )
 
     monkeypatch.setattr("evaluation.scripts.evaluation_trial_host._run_candidate", completed)
@@ -941,8 +1058,8 @@ def test_host_uses_candidate_rooted_subprocess_and_writes_redacted_observation(
 
     def completed(argv: list[str], **kwargs: Any) -> None:
         captured.update(argv=argv, **kwargs)
-        Path(kwargs["env"]["D36_WORKER_OUTPUT"]).write_text(
-            json.dumps(_worker_observation()), encoding="ascii"
+        Path(kwargs["env"]["D36_WORKER_OUTPUT"]).write_bytes(
+            trial_host._canonical_json_bytes(_worker_observation())
         )
 
     monkeypatch.setattr("evaluation.scripts.evaluation_trial_host._run_candidate", completed)
@@ -1401,6 +1518,187 @@ def test_seeded_pending_job_stays_quiescent_during_slow_model_call(tmp_path: Pat
     assert observation.effects.external_calls == 0
     assert observation.effects.receipts == 1
     assert observation.effects.language_records == 1
+
+
+@pytest.fixture(scope="module")
+def pinned_d35_index(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    root = tmp_path_factory.mktemp("d37-pinned-synthetic")
+    candidate = root / "candidate"
+    before = verified_archive(Path(__file__).parents[2], candidate)
+    profiles = root / "profiles"
+    profiles.mkdir()
+    profile = profiles / "synthetic-not-real-weights.json"
+    profile.write_bytes(json.dumps(_synthetic_embedding_profile(), sort_keys=True).encode("ascii"))
+    index = root / "index"
+    receipt = build_verified_index(candidate, index, profile, root / "synthetic-index-receipt.json")
+    assert receipt["candidate_commit"] == PINNED_D35
+    assert receipt["candidate_module_origins_verified"] is True
+    assert receipt["document_count"] > receipt["operation_count"] > 5
+    assert receipt["negative_reasons"] == {
+        "stale_catalog": "stale_index", "stale_scope": "stale_index",
+        "stale_profile": "embedding_profile_mismatch", "missing_bundle": "file_unavailable",
+    }
+    assert source_hashes(candidate) == before
+    return {"candidate": candidate, "source_hashes": before, "profile": profile,
+            "index": index, "index_hashes": source_hashes(index), "receipt": receipt}
+
+
+@pytest.fixture
+def pinned_loopback_provider() -> Any:
+    state: dict[str, Any] = {"chat_schemas": [], "embedding_calls": 0, "errors": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            assert 0 < length <= 2_000_000
+            request = json.loads(self.rfile.read(length))
+            if self.path == "/v1/embeddings":
+                assert request["model"] == "synthetic-d37-embedding"
+                assert len(request["input"]) == 1
+                assert request["input"][0].startswith("synthetic query: ")
+                state["embedding_calls"] += 1
+                payload = {"model": "synthetic-d37-embedding",
+                           "data": [{"index": 0, "embedding": [1.0, 0.0]}]}
+            elif self.path == "/v1/chat/completions":
+                assert request["model"] == "synthetic-d37-chat"
+                state["chat_schemas"].append(request["response_format"]["json_schema"]["schema"])
+                payload = {"model": "synthetic-d37-chat", "choices": [{"finish_reason": "stop",
+                    "message": {"role": "assistant", "content": json.dumps({"result": {
+                        "kind": "operation", "operation_id": "project.subtitle-font-size.set",
+                        "operation_version": 1, "arguments": {"value": 64},
+                        "generate_after_save": False,
+                    }})}}]}
+            else:
+                state["errors"].append("unexpected_endpoint")
+                self.send_error(404)
+                return
+            body = json.dumps(payload).encode("ascii")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *args: object) -> None:
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/v1", state
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("kind", ["none", "restart_resend", "switch_target"])
+def test_pinned_d35_genuine_stateful_index_crossprocess_and_original_target(
+    tmp_path: Path, pinned_d35_index: dict[str, Any], pinned_loopback_provider: Any, kind: str,
+) -> None:
+    base_url, provider = pinned_loopback_provider
+    fixture = pinned_d35_index
+    case = _case()
+    case["event"]["kind"] = kind
+    if kind == "switch_target":
+        case["initial"]["additional_projects"] = [{
+            "project_id": 202, "revision": 3, "settings": case["initial"]["settings"],
+            "project_status": "completed", "current_artifact_id": None,
+        }]
+        case["event"].update(selected_project_id_after=202, action="read_original_request")
+    case["case_sha256"] = canonical_case_sha256(case)
+    input_path = tmp_path / "synthetic-case.json"
+    input_path.write_bytes(json.dumps(case).encode("ascii"))
+    observations = {}
+    grammar_sizes = {}
+    for mode in ("all_tools", "stateful"):
+        provider["chat_schemas"].clear()
+        provider["embedding_calls"] = 0
+        optional = ({"index": fixture["index"], "embedding_profile": fixture["profile"],
+                     "embedding_base_url": base_url} if mode == "stateful" else {})
+        observation = run_trial_host(
+            candidate_root=fixture["candidate"], mode=mode, input_path=input_path,
+            output_path=tmp_path / f"{mode}-observation.json", storage=tmp_path / f"{mode}-storage",
+            model="synthetic-d37-chat", base_url=base_url, **optional,
+        )
+        observations[mode] = observation
+        assert (observation.response.http_status, observation.response.status,
+                observation.response.operation_id, observation.response.operation_version,
+                observation.response.arguments_sha256, observation.response.generate_after_save) == (
+            200, "completed", "project.subtitle-font-size.set", 1,
+            hashlib.sha256(b'{"value":64}').hexdigest(), False,
+        )
+        assert observation.response.executed is True
+        assert observation.failure_class is None
+        assert 1 == observation.model_calls == len(provider["chat_schemas"]) <= 4
+        assert provider["embedding_calls"] == (1 if mode == "stateful" else 0)
+        assert observation.effects.settings == observation.effects.revision == 1
+        assert observation.effects.receipts == observation.effects.history == 1
+        assert observation.effects.jobs == observation.effects.artifacts == observation.effects.external_calls == 0
+        assert observation.effects.language_requests == observation.effects.language_turns == 1
+        assert next(p for p in observation.after.project_entries if p.id == 101).revision == 6
+        assert observation.after.project_count == observation.before.project_count
+        if kind != "none":
+            assert observation.replay.attempted and observation.replay.state_unchanged
+            assert observation.replay.same_response and observation.replay.model_calls == 0
+            assert observation.replay.response == observation.response
+        if kind == "switch_target":
+            assert next(p for p in observation.after.project_entries if p.id == 202) == (
+                next(p for p in observation.before.project_entries if p.id == 202)
+            )
+        grammar_sizes[mode] = len(json.dumps(provider["chat_schemas"][0]))
+        assert source_hashes(fixture["candidate"]) == fixture["source_hashes"]
+        assert source_hashes(fixture["index"]) == fixture["index_hashes"]
+        assert not list(fixture["candidate"].rglob("__pycache__"))
+        assert not any(str(getattr(module, "__file__", "")).startswith(str(fixture["candidate"]))
+                       for module in sys.modules.values())
+    assert grammar_sizes["stateful"] < grammar_sizes["all_tools"]
+    assert observations["all_tools"].candidate_snapshot_sha256 == observations["stateful"].candidate_snapshot_sha256
+    assert not provider["errors"]
+
+
+@pytest.mark.parametrize("failure", ["stale_catalog", "stale_scope", "stale_profile", "missing_bundle"])
+def test_pinned_d35_invalid_index_never_executes_or_falls_back(
+    tmp_path: Path, pinned_d35_index: dict[str, Any], pinned_loopback_provider: Any, failure: str,
+) -> None:
+    fixture = pinned_d35_index
+    base_url, provider = pinned_loopback_provider
+    index = tmp_path / "bad-index"
+    index.mkdir()
+    manifest = json.loads((fixture["index"] / "manifest.json").read_bytes())
+    if failure == "stale_catalog":
+        manifest["catalog_sha256"] = "0" * 64
+    elif failure == "stale_scope":
+        manifest["scope_sha256"] = "0" * 64
+    elif failure == "stale_profile":
+        manifest["profile"]["weights_sha256"] = "1" * 64
+    (index / "manifest.json").write_bytes(json.dumps(manifest).encode("ascii"))
+    if failure != "missing_bundle":
+        for source in fixture["index"].glob("bundle-*.json"):
+            (index / source.name).write_bytes(source.read_bytes())
+    input_path = tmp_path / "synthetic-case.json"
+    input_path.write_bytes(json.dumps(_bound_case()).encode("ascii"))
+    kwargs = {"candidate_root": fixture["candidate"], "mode": "stateful", "input_path": input_path,
+              "output_path": tmp_path / "observation.json", "storage": tmp_path / "storage",
+              "model": "synthetic-d37-chat", "base_url": base_url, "index": index,
+              "embedding_profile": fixture["profile"], "embedding_base_url": base_url}
+    if failure == "stale_profile":
+        with pytest.raises(ValueError, match="embedding configuration"):
+            run_trial_host(**kwargs)
+        assert not kwargs["output_path"].exists()
+    else:
+        observation = run_trial_host(**kwargs)
+        assert observation.response.status == "error"
+        assert observation.response.reason_code == "retrieval_integrity_failed"
+        assert observation.response.executed is False
+        assert observation.model_calls == 0
+        assert observation.before.settings_sha256 == observation.after.settings_sha256
+        assert observation.effects.settings == observation.effects.revision == observation.effects.receipts == 0
+    assert not provider["chat_schemas"] and provider["embedding_calls"] == 0
+    assert source_hashes(fixture["candidate"]) == fixture["source_hashes"]
+    assert source_hashes(fixture["index"]) == fixture["index_hashes"]
 
 
 def test_real_candidate_worker_executes_language_route(tmp_path: Path) -> None:
@@ -2175,8 +2473,8 @@ def test_candidate_snapshot_detects_worker_mutation(
 
     def mutating_worker(argv: list[str], **kwargs: Any) -> None:
         source.write_text("VALUE = 2\n", encoding="utf-8")
-        Path(kwargs["env"]["D36_WORKER_OUTPUT"]).write_text(
-            json.dumps(_worker_observation()), encoding="ascii"
+        Path(kwargs["env"]["D36_WORKER_OUTPUT"]).write_bytes(
+            trial_host._canonical_json_bytes(_worker_observation())
         )
 
     monkeypatch.setattr("evaluation.scripts.evaluation_trial_host._run_candidate", mutating_worker)

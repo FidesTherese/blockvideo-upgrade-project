@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 MAX_INPUT_BYTES = 2 * 1024 * 1024
 MAX_WORKER_OUTPUT_BYTES = 512 * 1024
@@ -484,6 +484,13 @@ class _WorkerObservation(_StrictRecord):
     replay: ReplayObservation
     confirmation: ConfirmationObservation
 
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_primitive(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("observation schema version must be an integer")
+        return value
+
 
 class TrialObservation(_WorkerObservation):
     case_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -767,7 +774,9 @@ def _fsync_directory(path: Path) -> None:
 
 def _clean_environment(candidate_backend: Path, storage: Path, case_path: Path, worker_output: Path,
                        mode: str, model: str, index: Path | None, base_url: str, *, phase: str,
-                       previous_output: Path | None = None) -> dict[str, str]:
+                       previous_output: Path | None = None,
+                       embedding_profile: Path | None = None,
+                       embedding_base_url: str | None = None) -> dict[str, str]:
     retained = ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP")
     env = {name: os.environ[name] for name in retained if name in os.environ}
     env.update({
@@ -785,7 +794,57 @@ def _clean_environment(candidate_backend: Path, storage: Path, case_path: Path, 
     if index is not None:
         env.update({"D36_INDEX": str(index), "LANGUAGE_RETRIEVAL_INDEX": str(index),
                     "LANGUAGE_RETRIEVAL_READINESS": "true"})
+    if mode == "stateful" and embedding_profile is not None and embedding_base_url is not None:
+        env.update({"LANGUAGE_RETRIEVAL_PROFILE": str(embedding_profile),
+                    "LANGUAGE_EMBEDDING_BASE_URL": embedding_base_url})
     return env
+
+
+def _embedding_configuration(
+    *, mode: str, embedding_profile: Path | None, embedding_base_url: str | None,
+) -> tuple[Path, str, tuple[int, int, int, int, int], bytes] | None:
+    if embedding_profile is None and embedding_base_url is None:
+        return None
+    if mode != "stateful" or embedding_profile is None or embedding_base_url is None:
+        raise ValueError("invalid embedding configuration")
+    try:
+        from app.retrieval.contracts import EmbeddingProfile
+        from app.retrieval.embeddings import local_url
+        from app.retrieval.serialization import decode
+        from evaluation.blinded_io import read_regular, validate_directory
+
+        if type(embedding_base_url) is not str or len(embedding_base_url) > 512:
+            raise ValueError()
+        endpoint = local_url(embedding_base_url)
+        path = embedding_profile.absolute()
+        validate_directory(path.parent, "embedding profile parent")
+        metadata = _lstat_regular(path, "invalid embedding configuration")
+        if path.resolve(strict=True) != path:
+            raise ValueError()
+        raw = read_regular(path, maximum=16_000)
+        profile = EmbeddingProfile.model_validate(decode(raw), strict=True)
+        if profile.transport != "local-openai-embeddings-v1":
+            raise ValueError()
+        identity = (metadata.st_dev, metadata.st_ino, metadata.st_size,
+                    metadata.st_mtime_ns, metadata.st_ctime_ns)
+        return path, endpoint, identity, raw
+    except (OSError, ValueError, TypeError):
+        raise ValueError("invalid embedding configuration") from None
+
+
+def _check_embedding_index(profile_raw: bytes, index: Path) -> None:
+    try:
+        from app.retrieval.contracts import EmbeddingProfile
+        from app.retrieval.serialization import decode
+        from evaluation.blinded_io import read_regular
+
+        manifest = decode(read_regular(index / "manifest.json", maximum=64_000))
+        if EmbeddingProfile.model_validate(manifest["profile"], strict=True) != (
+            EmbeddingProfile.model_validate(decode(profile_raw), strict=True)
+        ):
+            raise ValueError()
+    except (OSError, ValueError, TypeError, KeyError):
+        raise ValueError("invalid embedding configuration") from None
 
 
 def _run_candidate(command: list[str], *, cwd: Path, env: dict[str, str], storage: Path) -> None:
@@ -850,15 +909,23 @@ def _atomic_publish(output_path: Path, payload: bytes, *, candidate_root: Path) 
 def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_path: Path,
                    storage: Path, model: str, index: Path | None = None,
                    base_url: str = "http://127.0.0.1:1234/v1",
+                   embedding_profile: Path | None = None,
+                   embedding_base_url: str | None = None,
                    expected_candidate_dev: int | None = None,
                    expected_candidate_ino: int | None = None) -> TrialObservation:
-    if mode not in {"all_tools", "stateful"}:
+    embedding = _embedding_configuration(
+        mode=mode, embedding_profile=embedding_profile, embedding_base_url=embedding_base_url,
+    )
+    if embedding is not None:
+        embedding_profile, embedding_base_url, _, profile_raw = embedding
+    if type(mode) is not str or mode not in {"all_tools", "stateful"}:
         raise ValueError("unsupported evaluation mode")
     if mode == "stateful" and index is None:
         raise ValueError("stateful mode requires an index")
     if mode == "all_tools" and index is not None:
         raise ValueError("all_tools mode rejects an index")
-    if not model.strip() or len(model) > 128 or len(base_url) > 512:
+    if (type(model) is not str or not model or model != model.strip()
+            or len(model) > 128 or type(base_url) is not str or len(base_url) > 512):
         raise ValueError("model configuration is invalid")
 
     raw_input = _bounded_bytes(input_path, MAX_INPUT_BYTES, "invalid unlabeled trial input")
@@ -883,6 +950,14 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
     candidate_snapshot_sha256 = _candidate_snapshot(candidate_root)
     if not _outside_candidate(storage, candidate_root) or not _outside_candidate(output_path, candidate_root):
         raise ValueError("trial storage and output must be external to candidate")
+    if embedding is not None:
+        assert embedding_profile is not None and index is not None
+        parent = embedding_profile.parent
+        if (not _outside_candidate(embedding_profile, candidate_root)
+                or any(_contained(path, parent) or _contained(parent, path)
+                       for path in (storage, output_path))):
+            raise ValueError("invalid embedding configuration")
+        _check_embedding_index(profile_raw, index)
     if output_path.exists() or output_path.is_symlink():
         raise ValueError("output must not exist")
     storage = _secure_directory(storage, create=True, empty=True, error="storage must be empty")
@@ -924,29 +999,45 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
     if event_kind == "restart_resend":
         first_output = storage / f"worker-phase1-{secrets.token_hex(16)}.json"
         env = _clean_environment(candidate_backend, storage, worker_input, first_output, mode, model, index, base_url,
-                                 phase="restart_prepare")
+                                 phase="restart_prepare", embedding_profile=embedding_profile,
+                                 embedding_base_url=embedding_base_url)
         run_candidate(worker_command(MODEL_CALL_LIMIT), env=env)
         first_raw = _bounded_bytes(first_output, MAX_WORKER_OUTPUT_BYTES, "invalid candidate observation")
         try:
-            first_worker = _WorkerObservation.model_validate_json(first_raw)
+            from evaluation.evidence_json import parse_canonical_model
+            first_worker = parse_canonical_model(
+                first_raw, _WorkerObservation, maximum=MAX_WORKER_OUTPUT_BYTES,
+            )
         except (ValidationError, ValueError):
             raise ValueError("invalid candidate observation") from None
         worker_output = storage / f"worker-observation-{secrets.token_hex(16)}.json"
         env = _clean_environment(candidate_backend, storage, worker_input, worker_output, mode, model, index, base_url,
-                                 phase="restart_replay", previous_output=first_output)
+                                 phase="restart_replay", previous_output=first_output,
+                                 embedding_profile=embedding_profile, embedding_base_url=embedding_base_url)
         remaining = MODEL_CALL_LIMIT - first_worker.model_calls
         run_candidate(worker_command(remaining), env=env)
     else:
         worker_output = storage / f"worker-observation-{secrets.token_hex(16)}.json"
         env = _clean_environment(candidate_backend, storage, worker_input, worker_output, mode, model, index, base_url,
-                                 phase="single")
+                                 phase="single", embedding_profile=embedding_profile,
+                                 embedding_base_url=embedding_base_url)
         run_candidate(worker_command(MODEL_CALL_LIMIT), env=env)
 
+    if embedding is not None:
+        if _embedding_configuration(
+            mode=mode, embedding_profile=embedding_profile, embedding_base_url=embedding_base_url,
+        ) != embedding:
+            raise ValueError("embedding configuration changed during trial")
+        assert index is not None
+        _check_embedding_index(profile_raw, index)
     if _candidate_snapshot(candidate_root) != candidate_snapshot_sha256:
         raise ValueError("candidate changed during trial")
     raw_observation = _bounded_bytes(worker_output, MAX_WORKER_OUTPUT_BYTES, "invalid candidate observation")
     try:
-        worker = _WorkerObservation.model_validate_json(raw_observation)
+        from evaluation.evidence_json import parse_canonical_model
+        worker = parse_canonical_model(
+            raw_observation, _WorkerObservation, maximum=MAX_WORKER_OUTPUT_BYTES,
+        )
     except (ValidationError, ValueError):
         raise ValueError("invalid candidate observation") from None
     if first_worker is not None and worker.model_calls != first_worker.model_calls + worker.replay.model_calls:
@@ -991,6 +1082,9 @@ def _candidate_worker(model_call_budget: int) -> int:
         settings = get_settings()
         settings.language_model, settings.language_base_url = os.environ["D36_MODEL"], os.environ["D36_BASE_URL"]
         settings.language_retrieval_index = Path(os.environ["D36_INDEX"]) if os.environ["D36_MODE"] == "stateful" else None
+        if "LANGUAGE_RETRIEVAL_PROFILE" in os.environ:
+            settings.language_retrieval_profile = Path(os.environ["LANGUAGE_RETRIEVAL_PROFILE"])
+            settings.language_embedding_base_url = os.environ["LANGUAGE_EMBEDDING_BASE_URL"]
         model_budget = _ModelCallBudget(model_call_budget)
         race_applied = False
 
@@ -1529,6 +1623,8 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--index", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
+    parser.add_argument("--embedding-profile", type=Path)
+    parser.add_argument("--embedding-base-url")
     parser.add_argument("--expected-candidate-dev", type=int)
     parser.add_argument("--expected-candidate-ino", type=int)
     args = parser.parse_args()

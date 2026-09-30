@@ -11,7 +11,23 @@ CANDIDATE_COMMIT_SUBJECT = "[DONE] Mission 35 Add recovery-oriented operational 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 
-class CandidateControl(BaseModel):
+class _StrictFreezeModel(BaseModel):
+    @field_validator("schema_version", mode="before", check_fields=False)
+    @classmethod
+    def validate_schema_primitive(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("freeze schema version must be an integer")
+        return value
+
+    @field_validator("git_tree_clean", mode="before", check_fields=False)
+    @classmethod
+    def validate_clean_primitive(cls, value: object) -> object:
+        if type(value) is not bool:
+            raise ValueError("freeze clean flag must be a boolean")
+        return value
+
+
+class CandidateControl(_StrictFreezeModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1]
@@ -20,7 +36,7 @@ class CandidateControl(BaseModel):
     git_tree_clean: Literal[True]
 
 
-class CompletionMarker(BaseModel):
+class CompletionMarker(_StrictFreezeModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1]
@@ -37,7 +53,7 @@ class CompletionMarker(BaseModel):
         return value
 
 
-class FreezeManifest(BaseModel):
+class FreezeManifest(_StrictFreezeModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1]

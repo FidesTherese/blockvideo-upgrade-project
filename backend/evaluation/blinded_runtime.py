@@ -399,6 +399,8 @@ async def invoke_trial_host(
     stdout_path: Path,
     stderr_path: Path,
     candidate_identity: tuple[int, int] | None = None,
+    embedding_profile: Path | None = None,
+    embedding_base_url: str | None = None,
 ) -> str:
     arguments = [
         sys.executable,
@@ -427,8 +429,15 @@ async def invoke_trial_host(
                 str(candidate_identity[1]),
             )
         )
+    if (embedding_profile is None) != (embedding_base_url is None):
+        raise ValueError("invalid embedding configuration")
+    if mode == "all_tools" and embedding_profile is not None:
+        raise ValueError("invalid embedding configuration")
     if mode == "stateful":
         arguments.extend(("--index", str(index)))
+        if embedding_profile is not None and embedding_base_url is not None:
+            arguments.extend(("--embedding-profile", str(embedding_profile),
+                              "--embedding-base-url", embedding_base_url))
     process_options: dict[str, object] = {}
     launch_arguments = arguments
     process_stdin: int = asyncio.subprocess.DEVNULL

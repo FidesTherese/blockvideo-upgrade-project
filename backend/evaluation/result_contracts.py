@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Literal, Self
@@ -242,6 +243,13 @@ class EvaluationResultBundle(_StrictModel):
     sealed_evidence_sha256: Sha256
     modes: tuple[ModeResult, ModeResult]
 
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_primitive(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("result schema version must be an integer")
+        return value
+
     @field_validator("evaluator_name")
     @classmethod
     def validate_evaluator_name(cls, value: str) -> str:
@@ -312,16 +320,11 @@ class EvaluationResultBundle(_StrictModel):
         if tuple(mode.mode for mode in self.modes) != ("all_tools", "stateful"):
             raise ValueError("result modes must use the exact canonical order")
         included = set(self.included_case_tokens)
-        category_by_case = {
-            binding.case_token: binding.category_token for binding in self.case_categories
-        }
-        denominators = {
-            category: sum(
-                token in included and category_by_case[token] == category
-                for token in self.protocol_case_tokens
-            )
-            for category in self.protocol_category_tokens
-        }
+        tally = Counter(
+            binding.category_token for binding in self.case_categories
+            if binding.case_token in included
+        )
+        denominators = {category: tally[category] for category in self.protocol_category_tokens}
         if any(value < 1 for value in denominators.values()):
             raise ValueError("every protocol category must include at least one case")
         for mode in self.modes:

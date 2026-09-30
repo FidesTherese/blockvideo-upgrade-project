@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from evaluation.contracts import Case
 
@@ -216,6 +216,13 @@ class EvaluationProtocol(_StrictModel):
     case_categories: Annotated[
         tuple[CaseCategoryBinding, ...], Field(min_length=1, max_length=MAX_PROTOCOL_CASES)
     ]
+
+    @field_validator("schema_version", "per_call_deadline_seconds", "maximum_model_calls", mode="before")
+    @classmethod
+    def validate_literal_integers(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("protocol literal must be an integer")
+        return value
 
     @model_validator(mode="after")
     def validate_topology(self) -> Self:

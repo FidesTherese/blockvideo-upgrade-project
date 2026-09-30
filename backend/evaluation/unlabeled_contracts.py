@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Annotated, Literal, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_IDENTIFIER = 128
 MAX_REVISION = 10**12
@@ -542,6 +542,13 @@ def canonical_case_sha256(value: object) -> str:
 
 
 class UnlabeledTrialCase(StrictUnlabeledRecord):
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_primitive(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("unlabeled schema version must be an integer")
+        return value
+
     schema_version: Literal[1]
     case_id: str = Field(pattern=r"^D24-H\d{3}$")
     group_id: str = Field(pattern=r"^D24-HG\d{2}$")

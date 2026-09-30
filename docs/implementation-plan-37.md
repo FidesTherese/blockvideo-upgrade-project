@@ -16,7 +16,15 @@ models are absent or permission to overwrite them. Independent final-fix accepta
 is not inferred from the previous report. The current audit is docs-only: no tests,
 real evaluation, implementation, push, or candidate change.
 
-Before D38 source work, follow the existing DTD executable-probe blueprint in order:
+The audited D37 prerequisites are implemented: bounded canonical parser and exact
+primitive guards, streamed lexical index fingerprints, single-pass denominators,
+paired protected operator embedding configuration, and a verified exact-D35 synthetic
+index/worker proof in both modes with restart and original-target checks. The D36
+source inventories now bind the parser/IO host dependencies; old attestations must not
+be reused or rewritten. Focused/full verification and independent review are recorded
+in the requested prerequisite report, not inferred from earlier delivery.
+
+Before D38 source work, verify the existing DTD executable-probe blueprint in order:
 shared `evidence_json.py` strict raw/canonical/Literal boundary, 64/128 MiB consumer
 caps, streamed index hashing instead of the current 16 MiB hash-only read, single-pass
 category accounting, and the explicitly paired external loopback embedding-profile

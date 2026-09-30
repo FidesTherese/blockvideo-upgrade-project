@@ -42,6 +42,8 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REPARSE_POINT = 0x400
 _TOOL_NAME = "d36_candidate_freezer_and_trial_host"
 _TOOL_SOURCE_PATHS = (
+    "backend/evaluation/blinded_io.py",
+    "backend/evaluation/evidence_json.py",
     "backend/evaluation/final_protocol.json",
     "backend/evaluation/release_candidate/__init__.py",
     "backend/evaluation/release_candidate/contracts.py",

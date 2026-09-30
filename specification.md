@@ -95,7 +95,7 @@ contracts refer to it. No D38–D40 source, candidate, lock or release evidence 
 in this audit. D35 remains immutable; D37 integration/final independent acceptance
 is not inferred from previous synthetic reports.
 
-- **Evidence boundaries:** a planned pure canonical JSON parser and existing bounded
+- **Evidence boundaries:** the implemented pure canonical JSON parser and existing bounded
   filesystem helper reject duplicates, nonfinite values, bool/int Literal coercion,
   noncanonical bytes and oversize input before acceptance. Protocol/result caps are
   64/128 MiB across writers/readers; large index/media/source blobs are stream-hashed.
@@ -121,12 +121,21 @@ is not inferred from previous synthetic reports.
   Optional limitation input is a Python tuple / JSON array; decision collections are
   deterministic Python lists / JSON arrays. Missing real aggregate or reviews keeps
   actual readiness Not ready.
-- **Acceptance still pending:** fresh installs/native builds, Windows launcher/tree
-  roundtrip, owned browser/CDP roundtrip, and exact-D35 real worker with a genuine
-  candidate-format synthetic index and fake loopback adapters. Current host drops
-  synthetic embedding-profile settings; the DTD defines the narrow external
-  configuration prerequisite rather than pretending a dummy index verifies stateful.
-  No model weights, paid service or restricted input is needed for these probes.
+- **D37 prerequisites:** canonical parsing preserves exact ASCII/LF bytes and applies
+  lexical bounds before schema construction; reused Python-facing literal boundaries
+  reject primitive coercion. Index fingerprints are streamed with identity, decimal
+  manifest/blob, inventory-count and total-byte bounds. Category denominators are
+  tallied once. Paired external loopback embedding parameters are validated, protected
+  from output containment, and sent only to stateful workers; omitted parameters keep
+  the production ONNX defaults. The D36 source inventory now binds the shared parser
+  and IO dependencies, requiring a fresh attestation after final committed tooling.
+- **Pinned synthetic proof:** a verified exact-D35 archive builds/loads a genuine
+  source/profile-bound index through candidate-rooted APIs. Both modes, restart resend
+  and original-target reread preserve source/index hashes; stateful uses actual
+  embeddings and a narrower grammar. Stale catalog/scope/profile and missing bundles
+  cannot execute or fall back. This uses no model weights, paid service or restricted
+  input. Fresh installs/native builds, the later native Windows launcher/tree gate,
+  owned browser/CDP and independent prerequisite review remain pending.
   Pinned D35 demo settings also ignore profile/endpoint env overrides; smoke must use
   its existing public seams through an external bootstrap, not change source. Pinned
   README's Python 3.13+/Node 20+ claims are a known mandatory documentation-gate

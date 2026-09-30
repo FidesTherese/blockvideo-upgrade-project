@@ -1163,6 +1163,8 @@ def test_d36_tool_attestation_has_exact_allowlist_and_valid_aggregate(tmp_path: 
     raw = path.read_bytes()
     parsed = attestation.ToolAttestation.model_validate_json(raw)
     expected = {
+        "backend/evaluation/blinded_io.py",
+        "backend/evaluation/evidence_json.py",
         "backend/evaluation/final_protocol.json",
         "backend/evaluation/release_candidate/__init__.py",
         "backend/evaluation/release_candidate/contracts.py",

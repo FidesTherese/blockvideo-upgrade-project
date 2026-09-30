@@ -17,6 +17,7 @@ from evaluation.blinded_contracts import (
     MAX_PROTOCOL_BYTES,
     MAX_PROTOCOL_CASES,
     EvaluationProtocol,
+    CaseCategoryBinding,
     case_category_bindings,
     maximum_protocol_serialized_bytes,
     opaque_case_token,
@@ -60,7 +61,7 @@ from evaluation.result_contracts import (
     approval_partition,
     maximum_result_bundle_serialized_bytes,
 )
-from evaluation.release_candidate.contracts import FreezeManifest
+from evaluation.release_candidate.contracts import CandidateControl, CompletionMarker, FreezeManifest
 from evaluation.release_candidate.fingerprints import aggregate_fingerprints
 from evaluation.sealed_evidence import seal_evidence
 from evaluation.tool_attestation import (
@@ -219,6 +220,196 @@ def _bundle_data() -> dict[str, Any]:
     }
 
 
+def test_trial_resume_rejects_lexical_overflow_before_model_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from evaluation import blinded_runner as runner
+
+    raw = canonical_json_bytes({
+        "schema_version": 1, "protocol_sha256": "1" * 64,
+        "case_token": "x" * 8191, "category_token": "2" * 64,
+        "mode": "all_tools", "outcome": "transport_failure", "score": None,
+        "candidate_snapshot_sha256": None,
+    }) + b"\n"
+    path = tmp_path / "trial-result.json"
+    path.write_bytes(raw)
+
+    def forbidden_parse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("oversized lexical token reached schema construction")
+
+    monkeypatch.setattr(runner._TrialRecord, "model_validate_json", forbidden_parse)
+    with pytest.raises(ValueError, match="evidence string limit"):
+        runner._load_trial_record(path, "1" * 64)
+
+
+def test_index_fingerprint_streams_blobs_above_json_cap_in_lexical_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from evaluation import blinded_runner as runner
+
+    index = tmp_path / "index"
+    (index / "a").mkdir(parents=True)
+    (index / "z").write_bytes(b"z")
+    blob = index / "a" / "bundle-synthetic.json"
+    digest = hashlib.sha256()
+    with blob.open("wb") as stream:
+        for _ in range(17):
+            chunk = b"x" * (1024 * 1024)
+            stream.write(chunk)
+            digest.update(chunk)
+    expected = hashlib.sha256(canonical_json_bytes([
+        {"path": "a/bundle-synthetic.json", "size": 17 * 1024 * 1024,
+         "sha256": digest.hexdigest()},
+        {"path": "z", "size": 1, "sha256": hashlib.sha256(b"z").hexdigest()},
+    ])).hexdigest()
+
+    def forbidden_read(*args: Any, **kwargs: Any) -> bytes:
+        raise AssertionError("index fingerprint must not construct JSON/blob bytes")
+
+    monkeypatch.setattr(runner, "_read_regular", forbidden_read)
+    assert runner._fingerprint_directory(index) == expected
+
+
+@pytest.mark.parametrize(("name", "size"), [("manifest.json", 64_001),
+                                            ("bundle-synthetic.json", 64_000_001)])
+def test_index_fingerprint_rejects_decimal_schema_caps_before_read(
+    tmp_path: Path, name: str, size: int,
+) -> None:
+    from evaluation.blinded_runner import _fingerprint_directory
+
+    index = tmp_path / "index"
+    index.mkdir()
+    with (index / name).open("wb") as stream:
+        stream.truncate(size)
+    with pytest.raises(ValueError, match="size limit"):
+        _fingerprint_directory(index)
+
+
+def test_category_denominator_tally_is_linear_without_wallclock_assertions() -> None:
+    comparisons = [0]
+
+    class CountedCategory(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other: object) -> bool:
+            comparisons[0] += 1
+            return super().__eq__(other)
+
+    count = 2048
+    cases = tuple(f"{i:064x}" for i in range(count * 2))
+    categories = tuple(CountedCategory(f"{i + count * 2:064x}") for i in range(count))
+    bindings = tuple(
+        CaseCategoryBinding.model_construct(case_token=token, category_token=categories[i // 2])
+        for i, token in enumerate(cases)
+    )
+    results = tuple(CategoryResult(
+        category_token=str(token), included=1, completed=1, task_complete=1,
+        unauthorized_effects=0, unauthorized_replays=0, secret_disclosures=0,
+    ) for token in categories)
+    modes = tuple(ModeResult(
+        mode=mode, included=count, completed=count, task_complete=count,
+        unauthorized_effects=0, unauthorized_replays=0, secret_disclosures=0,
+        transport_failures=0, deadline_failures=0, categories=results,
+    ) for mode in ("all_tools", "stateful"))
+    data = {**_bundle_data(), "protocol_case_count": len(cases),
+            "protocol_case_tokens": cases, "protocol_category_count": count,
+            "protocol_category_tokens": categories, "case_categories": bindings,
+            "included_count": count, "excluded_count": count,
+            "included_case_tokens": cases[::2],
+            "excluded_cases": tuple({"case_token": t, "reason": "both_not_approved"}
+                                    for t in cases[1::2]), "modes": modes}
+    bundle = EvaluationResultBundle.model_construct(**data)
+    assert bundle.validate_mode_and_category_counts() is bundle
+    assert comparisons[0] < 16 * len(cases)
+    EvaluationResultBundle.model_validate_json(json.dumps(data, default=lambda x: x.model_dump(mode="json")))
+
+
+def test_runner_rejects_profile_index_mismatch_before_protocol_or_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from evaluation import blinded_runner as runner
+
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    profile = profiles / "synthetic-profile.json"
+    profile.write_bytes(canonical_json_bytes({
+        "model": "synthetic", "weights_sha256": "0" * 64, "dimensions": 2,
+        "document_prefix": "", "query_prefix": "", "normalization": "l2-full-v1",
+        "transport": "local-openai-embeddings-v1", "tokenizer_sha256": None,
+        "source_revision": None,
+    }))
+    (arguments["index"] / "manifest.json").write_bytes(b'{"profile":{}}')
+    with pytest.raises(ValueError, match="embedding configuration"):
+        asyncio.run(runner.run_blinded_evaluation(
+            **arguments, embedding_profile=profile, embedding_base_url="http://127.0.0.1:1235/v1",
+        ))
+    assert not (arguments["output_root"] / "protocol.json").exists()
+
+
+def test_d36_attestation_binds_shared_host_parser_and_filesystem_dependencies(tmp_path: Path) -> None:
+    from evaluation.release_candidate.freeze import _TOOL_SOURCE_PATHS
+
+    repository, _ = _tool_repository(tmp_path)
+    dependencies = ("backend/evaluation/blinded_io.py", "backend/evaluation/evidence_json.py")
+    for relative in {*_D36_SOURCE_PATHS, *_TOOL_SOURCE_PATHS, *dependencies}:
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic dependency\n")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-q", "-m", "synthetic host dependencies")
+    before = [attest_tool(repo_root=repository, tool_name="d36_synthetic", git_commit=_git(repository, "rev-parse", "HEAD"),
+                          source_paths=paths).aggregate_sha256
+              for paths in (_D36_SOURCE_PATHS, _TOOL_SOURCE_PATHS)]
+    for relative in dependencies:
+        (repository / relative).write_bytes(b"changed synthetic dependency\n")
+        _git(repository, "add", ".")
+        _git(repository, "commit", "-q", "-m", "change host dependency")
+        after = [attest_tool(repo_root=repository, tool_name="d36_synthetic", git_commit=_git(repository, "rev-parse", "HEAD"),
+                             source_paths=paths).aggregate_sha256
+                 for paths in (_D36_SOURCE_PATHS, _TOOL_SOURCE_PATHS)]
+        assert all(current != previous for current, previous in zip(after, before, strict=True))
+        before = after
+
+
+def test_tool_fingerprint_path_has_explicit_boundary_limit() -> None:
+    with pytest.raises(ValidationError):
+        FileFingerprint(path="x" * 513, sha256="1" * 64, size=0)
+
+
+def test_tool_inventory_has_explicit_boundary_limit() -> None:
+    files = [FileFingerprint(path=f"{i:05d}.py", sha256="1" * 64, size=0) for i in range(8193)]
+    with pytest.raises(ValidationError):
+        ToolAttestation(schema_version=1, tool_name="synthetic", git_commit="1" * 40,
+                        files=files, aggregate_sha256="1" * 64)
+
+
+def test_streamed_blob_detects_same_size_mutation_and_bounds_each_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from evaluation import blinded_io as io
+
+    path = tmp_path / "blob"
+    path.write_bytes(b"a" * (2 * 1024 * 1024))
+    read = os.read
+    calls = 0
+
+    def mutating_read(descriptor: int, length: int) -> bytes:
+        nonlocal calls
+        assert length <= 1024 * 1024
+        data = read(descriptor, length)
+        calls += 1
+        if calls == 1:
+            with path.open("r+b") as stream:
+                stream.seek(1024 * 1024)
+                stream.write(b"b")
+        return data
+
+    monkeypatch.setattr(io.os, "read", mutating_read)
+    with pytest.raises(ValueError, match="changed"):
+        io.fingerprint_regular(path, maximum=64_000_000)
+
+
 def test_blinded_contracts_do_not_depend_on_result_contracts() -> None:
     source = (Path(__file__).parents[1] / "evaluation" / "blinded_contracts.py").read_text(
         encoding="utf-8"
@@ -322,6 +513,50 @@ def test_protocol_rejects_incomplete_or_noncanonical_topology(field: str, value:
     data[field] = value
     with pytest.raises(ValidationError):
         EvaluationProtocol.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("schema_version", True), ("schema_version", 1.0),
+     ("per_call_deadline_seconds", 180.0), ("maximum_model_calls", 4.0)],
+)
+def test_protocol_direct_call_rejects_literal_primitive_coercion(
+    field: str, value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        EvaluationProtocol.model_validate({**_protocol_data(), field: value})
+
+
+@pytest.mark.parametrize("value", [True, 1.0])
+def test_bundle_direct_call_rejects_literal_primitive_coercion(value: object) -> None:
+    with pytest.raises(ValidationError):
+        EvaluationResultBundle.model_validate({**_bundle_data(), "schema_version": value})
+
+
+@pytest.mark.parametrize(("field", "value"), [("schema_version", True), ("schema_version", 1.0),
+                                              ("git_tree_clean", 1), ("git_tree_clean", 1.0)])
+def test_freeze_direct_call_rejects_literal_primitive_coercion(field: str, value: object) -> None:
+    data = {"schema_version": 1, "candidate_id": "0" * 16 + "-" + "1" * 12,
+            "git_commit": "1" * 40, "git_tree_clean": True, "candidate_control_sha256": "2" * 64,
+            "created_at": "2026-09-20T00:00:00Z", "runtime": {}, "schema_version_number": 1,
+            "mode_configuration": {}, "files": [{"path": "synthetic.py", "sha256": "3" * 64, "size": 0}],
+            "aggregate_sha256": "4" * 64}
+    with pytest.raises(ValidationError):
+        FreezeManifest.model_validate({**data, field: value})
+
+
+@pytest.mark.parametrize("value", [True, 1.0])
+def test_freeze_control_and_marker_reject_literal_primitive_coercion(value: object) -> None:
+    control = {"schema_version": 1, "git_commit": "1" * 40,
+               "git_commit_subject": "[DONE] Mission 35 Add recovery-oriented operational UI",
+               "git_tree_clean": True}
+    for data in ({**control, "schema_version": value}, {**control, "git_tree_clean": 1}):
+        with pytest.raises(ValidationError):
+            CandidateControl.model_validate(data)
+    files = [FileFingerprint(path=path, size=0, sha256="1" * 64)
+             for path in ("d36-tool-attestation.json", "freeze-manifest.json")]
+    with pytest.raises(ValidationError):
+        CompletionMarker(schema_version=value, files=files)
 
 
 def test_approval_gate_requires_both_bound_review_ledgers() -> None:
