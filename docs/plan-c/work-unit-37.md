@@ -56,8 +56,10 @@ accounting, deterministic exclusion precedence, non-empty overall/per-category
 coverage, crash-safe no-replace interruption and resume for trial/bundle publication,
 mode symmetry, scoring correctness, exact proposal/clarification matching, complete
 runtime-source attestation mutation detection, bidirectional protected-root/output rejection (including workspace-parent output),
-full-run retained candidate identity, anchored-inode execution across checkout
-replacement and swap/restore attempts, non-link writable directory enforcement,
+full-run retained candidate identity, Linux parent-proc-fd alias preservation with
+expected device/inode verification before and after each worker, anchored-inode
+snapshot and execution across checkout replacement without touching replacement bytes,
+non-link writable directory enforcement,
 bounded output, early-parent inherited-pipe descendant termination, cancellation with
 bounded confirmed teardown, and token-key zeroization after final-`fstat` and close
 faults as well as normal exit. They also prove rejection of secondary-project mutation,

@@ -1493,13 +1493,26 @@ once and retains its directory identity until final run cleanup. Windows opens a
 no delete sharing; `GetFileInformationByHandle` supplies the volume/file-index identity,
 so cooperative rename or replacement is blocked for the run. POSIX opens
 `O_RDONLY|O_DIRECTORY|O_NOFOLLOW`, stores the `fstat` device/inode identity, and requires
-a stable `/proc/<runner-pid>/fd/<fd>` alias that resolves to the anchored inode; an
-unsupported POSIX host fails closed. The context checks retained and current-path
-identity, detached commit, and frozen snapshot before and after every host invocation.
-The POSIX alias, not the mutable pathname, is passed to the D36 host; the host accepts
-only that exact proc-fd alias form in addition to an ordinary non-link candidate root.
-A pathname swap/restore therefore cannot execute alternate bytes, while any identity
-loss fails the run. The retained descriptor/handle closes only in final cleanup.
+a stable `/proc/<runner-pid>/fd/<decimal-fd>` alias to the anchored inode; an unsupported
+POSIX host fails closed. The context checks retained and current-path identity, detached
+commit, and frozen snapshot before and after every host invocation.
+
+On Linux, `_invoke_trial_host()` passes the retained device and inode as
+`--expected-candidate-dev` and `--expected-candidate-ino` with that alias. D36
+`_resolve_candidate_root()` accepts a symlink candidate only when its absolute spelling
+exactly matches `/proc/<parent-pid>/fd/<decimal-fd>`, the PID equals `os.getppid()`,
+`lstat` identifies the proc link, and `stat` plus an opened descriptor's `fstat`
+identify the supplied non-reparse directory. Both identity arguments MUST be present
+and non-negative for an alias. The function returns the absolute alias unchanged; it
+MUST NOT call `resolve()` on it or substitute the mutable checkout pathname. Candidate
+snapshot traversal, backend paths, `PYTHONPATH`, worker `cwd`, and candidate file reads
+therefore remain beneath the alias. D36 repeats the `lstat`/`stat`/`fstat` identity check
+immediately before and in `finally` after each worker invocation, including both restart
+workers. A pathname rename followed by replacement can neither redirect execution nor
+modify the replacement; identity loss fails closed. Ordinary non-link candidate roots
+retain their existing strict canonical resolution. Windows receives no new identity
+arguments and is unchanged. The retained descriptor/handle closes only in final
+cleanup.
 
 Before creating output, D37 requires the prospective canonical output root to be
 disjoint in both containment directions from the candidate root, tooling repository,

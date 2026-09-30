@@ -29,6 +29,8 @@ from evaluation.blinded_runner import (
     _ensure_writable_directory,
     _invoke_trial_host,
     _load_records,
+    _open_candidate_anchor,
+    _close_candidate_anchor,
     _publish_immutable,
     case_to_unlabeled,
     run_blinded_evaluation,
@@ -2741,22 +2743,130 @@ def test_candidate_root_symlink_and_path_swap_fail_closed(
             asyncio.run(run_blinded_evaluation(**arguments))
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX retained fd path only")
-def test_d36_host_accepts_only_stable_proc_fd_candidate_alias(tmp_path: Path) -> None:
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux proc-fd anchor only")
+def test_d36_host_accepts_only_parent_proc_fd_candidate_alias(tmp_path: Path) -> None:
     from evaluation.scripts import evaluation_trial_host as host
 
     candidate = tmp_path / "candidate"
     (candidate / "backend").mkdir(parents=True)
     descriptor = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    metadata = os.fstat(descriptor)
     try:
         alias = Path(f"/proc/{os.getpid()}/fd/{descriptor}")
-        assert host._resolve_candidate_root(alias) == candidate.resolve(strict=True)
+        child = os.fork()
+        if child == 0:
+            try:
+                resolved = host._resolve_candidate_root(
+                    alias,
+                    expected_candidate_dev=metadata.st_dev,
+                    expected_candidate_ino=metadata.st_ino,
+                )
+                os._exit(0 if resolved == alias else 1)
+            except BaseException:
+                os._exit(1)
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+
+        with pytest.raises(ValueError, match="candidate"):
+            host._resolve_candidate_root(
+                alias,
+                expected_candidate_dev=metadata.st_dev,
+                expected_candidate_ino=metadata.st_ino,
+            )
         link = tmp_path / "candidate-link"
         link.symlink_to(candidate, target_is_directory=True)
         with pytest.raises(ValueError, match="candidate"):
             host._resolve_candidate_root(link)
     finally:
         os.close(descriptor)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux proc-fd anchor integration only")
+def test_posix_trial_host_keeps_original_inode_after_candidate_path_replacement(
+    tmp_path: Path,
+) -> None:
+    from evaluation.scripts import evaluation_trial_host as host
+
+    original = tmp_path / "candidate"
+    backend = original / "backend"
+    backend.mkdir(parents=True)
+    (backend / "candidate.txt").write_bytes(b"original candidate\n")
+    moved = tmp_path / "candidate-moved"
+    ready_read, ready_write = os.pipe()
+    continue_read, continue_write = os.pipe()
+    result_read, result_write = os.pipe()
+    anchor = _open_candidate_anchor(original)
+    child = os.fork()
+    if child == 0:
+        os.close(ready_read)
+        os.close(continue_write)
+        os.close(result_read)
+        try:
+            alias = host._resolve_candidate_root(
+                anchor.execution_path,
+                expected_candidate_dev=anchor.identity[0],
+                expected_candidate_ino=anchor.identity[1],
+            )
+            before = host._candidate_snapshot(alias)
+            os.write(ready_write, b"1")
+            if os.read(continue_read, 1) != b"1":
+                raise RuntimeError("parent did not replace candidate path")
+            host._assert_candidate_root_identity(alias, anchor.identity)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; print(Path('candidate.txt').read_text(), end='')",
+                ],
+                cwd=alias / "backend",
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            after = host._candidate_snapshot(alias)
+            host._assert_candidate_root_identity(alias, anchor.identity)
+            result = json.dumps(
+                {
+                    "alias_unchanged": alias == anchor.execution_path,
+                    "snapshot_unchanged": before == after,
+                    "worker_bytes": completed.stdout,
+                }
+            ).encode("ascii")
+        except BaseException as error:
+            os.write(ready_write, b"0")
+            result = json.dumps({"error": type(error).__name__}).encode("ascii")
+        os.write(result_write, result)
+        os._exit(0)
+
+    os.close(ready_write)
+    os.close(continue_read)
+    os.close(result_write)
+    try:
+        ready = os.read(ready_read, 1)
+        if ready != b"1":
+            result = json.loads(os.read(result_read, 4096))
+            _, status = os.waitpid(child, 0)
+            pytest.fail(f"trial host setup failed: {result}, status={status}")
+        original.rename(moved)
+        replacement_backend = original / "backend"
+        replacement_backend.mkdir(parents=True)
+        replacement = replacement_backend / "candidate.txt"
+        replacement.write_bytes(b"alternate candidate\n")
+        os.write(continue_write, b"1")
+        result = json.loads(os.read(result_read, 4096))
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert result == {
+            "alias_unchanged": True,
+            "snapshot_unchanged": True,
+            "worker_bytes": "original candidate\n",
+        }
+        assert replacement.read_bytes() == b"alternate candidate\n"
+        assert (moved / "backend" / "candidate.txt").read_bytes() == b"original candidate\n"
+    finally:
+        for descriptor in (ready_read, continue_write, result_read):
+            os.close(descriptor)
+        _close_candidate_anchor(anchor)
 
 
 def test_candidate_swap_restore_invocation_uses_retained_anchor(
@@ -2770,6 +2880,8 @@ def test_candidate_swap_restore_invocation_uses_retained_anchor(
 
     async def swap_restore(**kwargs: object) -> str:
         invocation_root = Path(kwargs["candidate_root"])
+        candidate_identity = kwargs["candidate_identity"]
+        assert candidate_identity is not None
         observed_paths.append(invocation_root)
         if os.name == "nt":
             with pytest.raises(OSError):

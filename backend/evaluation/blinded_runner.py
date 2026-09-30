@@ -1300,6 +1300,7 @@ async def _invoke_trial_host(
     index: Path,
     stdout_path: Path,
     stderr_path: Path,
+    candidate_identity: tuple[int, int] | None = None,
 ) -> str:
     arguments = [
         sys.executable,
@@ -1319,6 +1320,15 @@ async def _invoke_trial_host(
         "--model",
         model,
     ]
+    if os.name == "posix" and candidate_identity is not None:
+        arguments.extend(
+            (
+                "--expected-candidate-dev",
+                str(candidate_identity[0]),
+                "--expected-candidate-ino",
+                str(candidate_identity[1]),
+            )
+        )
     if mode == "stateful":
         arguments.extend(("--index", str(index)))
     process_options: dict[str, object] = {}
@@ -1515,6 +1525,7 @@ async def _run_trial(
             index=index,
             stdout_path=attempt / "stdout.log",
             stderr_path=attempt / "stderr.log",
+            candidate_identity=context.candidate_anchor.identity,
         )
     finally:
         _validate_run_context(candidate_root, freeze_manifest, context)

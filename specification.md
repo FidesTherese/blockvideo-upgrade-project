@@ -21,9 +21,15 @@ attestation automatically covers the complete tracked evaluation Python tree, th
 the conservative tracked application Python closure, operation definitions, and the
 backend project/lock files; tests, evidence, secrets, and held-out data remain excluded.
 The runner retains one candidate-directory identity for the full run: a Windows
-no-delete directory handle or a POSIX `O_DIRECTORY|O_NOFOLLOW` descriptor. POSIX host
-execution uses the retained `/proc/<runner-pid>/fd/<fd>` alias and fails closed when no
-stable descriptor path exists. Identity is checked before and after every invocation.
+no-delete directory handle or a POSIX `O_DIRECTORY|O_NOFOLLOW` descriptor. On Linux,
+D37 passes the retained device/inode identity and exact
+`/proc/<runner-pid>/fd/<decimal-fd>` alias to D36. D36 accepts that alias only when the
+PID is its parent, the path remains a proc symlink, and both `stat` and `fstat` identify
+the expected non-reparse directory. It preserves the alias unchanged for snapshots,
+worker environment, working directory, and candidate file access; it never resolves the
+alias to the mutable checkout pathname. Identity is checked before and after every
+worker. Unsupported POSIX hosts fail closed, ordinary candidate roots retain strict
+non-link canonical resolution, and Windows behavior is unchanged.
 Output roots must be disjoint in both containment directions from the candidate,
 tooling repository, token-key parent, and mounted input roots. Each host runs in a
 Windows kill-on-close Job Object or POSIX process group; parent exit does not end

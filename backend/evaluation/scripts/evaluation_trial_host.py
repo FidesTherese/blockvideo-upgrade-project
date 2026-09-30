@@ -34,7 +34,7 @@ MAX_OBSERVED_LANGUAGE_REQUESTS = 8 + MODEL_CALL_LIMIT
 MAX_OBSERVED_LANGUAGE_TURNS = 8 + MODEL_CALL_LIMIT
 SUBPROCESS_TIMEOUT_SECONDS = PROTOCOL_DEADLINE_SECONDS * MODEL_CALL_LIMIT + 30
 _REPARSE_POINT = 0x400
-_POSIX_FD_PATH = re.compile(r"^/proc/[1-9][0-9]*/fd/[0-9]+$")
+_POSIX_FD_PATH = re.compile(r"^/proc/(?P<pid>[1-9][0-9]*)/fd/(?P<fd>0|[1-9][0-9]*)$")
 
 ResponseStatus = Literal["interpreting", "ready", "needs_input", "unsupported", "blocked", "error", "completed", "dismissed", "http_error"]
 ResponseMode = Literal["all_tools", "semantic", "stateful"]
@@ -492,15 +492,67 @@ def _lstat_directory(path: Path, error: str) -> os.stat_result:
     return metadata
 
 
-def _resolve_candidate_root(path: Path) -> Path:
+def _candidate_identity(
+    expected_candidate_dev: int | None, expected_candidate_ino: int | None
+) -> tuple[int, int] | None:
+    if (expected_candidate_dev is None) != (expected_candidate_ino is None):
+        raise ValueError("candidate root is invalid")
+    if expected_candidate_dev is None or expected_candidate_ino is None:
+        return None
+    if (
+        isinstance(expected_candidate_dev, bool)
+        or isinstance(expected_candidate_ino, bool)
+        or expected_candidate_dev < 0
+        or expected_candidate_ino < 0
+    ):
+        raise ValueError("candidate root is invalid")
+    return expected_candidate_dev, expected_candidate_ino
+
+
+def _assert_candidate_root_identity(path: Path, expected: tuple[int, int]) -> None:
+    link_metadata = path.lstat()
+    match = _POSIX_FD_PATH.fullmatch(path.as_posix())
+    if (
+        sys.platform != "linux"
+        or match is None
+        or int(match.group("pid")) != os.getppid()
+        or not stat.S_ISLNK(link_metadata.st_mode)
+        or _is_reparse(link_metadata)
+    ):
+        raise ValueError("candidate root is invalid")
+    target_metadata = path.stat()
+    if not stat.S_ISDIR(target_metadata.st_mode) or _is_reparse(target_metadata):
+        raise ValueError("candidate root is invalid")
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        retained_metadata = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        not stat.S_ISDIR(retained_metadata.st_mode)
+        or _is_reparse(retained_metadata)
+        or (target_metadata.st_dev, target_metadata.st_ino) != expected
+        or (retained_metadata.st_dev, retained_metadata.st_ino) != expected
+    ):
+        raise ValueError("candidate root is invalid")
+
+
+def _resolve_candidate_root(
+    path: Path,
+    *,
+    expected_candidate_dev: int | None = None,
+    expected_candidate_ino: int | None = None,
+) -> Path:
     absolute = path.absolute()
     metadata = absolute.lstat()
+    expected = _candidate_identity(expected_candidate_dev, expected_candidate_ino)
     if stat.S_ISLNK(metadata.st_mode):
-        if os.name != "posix" or _POSIX_FD_PATH.fullmatch(absolute.as_posix()) is None:
+        if expected is None:
             raise ValueError("candidate root is invalid")
-        resolved = absolute.resolve(strict=True)
-        _lstat_directory(resolved, "candidate root is invalid")
-        return resolved
+        _assert_candidate_root_identity(absolute, expected)
+        return absolute
+    if expected is not None:
+        raise ValueError("candidate root is invalid")
     _lstat_directory(absolute, "candidate root is invalid")
     return absolute.resolve(strict=True)
 
@@ -715,7 +767,9 @@ def _atomic_publish(output_path: Path, payload: bytes, *, candidate_root: Path) 
 
 def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_path: Path,
                    storage: Path, model: str, index: Path | None = None,
-                   base_url: str = "http://127.0.0.1:1234/v1") -> TrialObservation:
+                   base_url: str = "http://127.0.0.1:1234/v1",
+                   expected_candidate_dev: int | None = None,
+                   expected_candidate_ino: int | None = None) -> TrialObservation:
     if mode not in {"all_tools", "stateful"}:
         raise ValueError("unsupported evaluation mode")
     if mode == "stateful" and index is None:
@@ -732,7 +786,14 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
     except (ValidationError, ValueError):
         raise ValueError("invalid unlabeled trial case") from None
 
-    candidate_root = _resolve_candidate_root(candidate_root)
+    expected_candidate_identity = _candidate_identity(
+        expected_candidate_dev, expected_candidate_ino
+    )
+    candidate_root = _resolve_candidate_root(
+        candidate_root,
+        expected_candidate_dev=expected_candidate_dev,
+        expected_candidate_ino=expected_candidate_ino,
+    )
     candidate_backend = candidate_root / "backend"
     _lstat_directory(candidate_backend, "candidate root is invalid")
     if not _contained(candidate_backend, candidate_root):
@@ -767,13 +828,22 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
             str(model_call_budget),
         ]
 
+    def run_candidate(command: list[str], *, env: dict[str, str]) -> None:
+        if expected_candidate_identity is not None:
+            _assert_candidate_root_identity(candidate_root, expected_candidate_identity)
+        try:
+            _run_candidate(command, cwd=candidate_backend, env=env, storage=storage)
+        finally:
+            if expected_candidate_identity is not None:
+                _assert_candidate_root_identity(candidate_root, expected_candidate_identity)
+
     event_kind = trial.event.kind
     first_worker: _WorkerObservation | None = None
     if event_kind == "restart_resend":
         first_output = storage / f"worker-phase1-{secrets.token_hex(16)}.json"
         env = _clean_environment(candidate_backend, storage, worker_input, first_output, mode, model, index, base_url,
                                  phase="restart_prepare")
-        _run_candidate(worker_command(MODEL_CALL_LIMIT), cwd=candidate_backend, env=env, storage=storage)
+        run_candidate(worker_command(MODEL_CALL_LIMIT), env=env)
         first_raw = _bounded_bytes(first_output, MAX_WORKER_OUTPUT_BYTES, "invalid candidate observation")
         try:
             first_worker = _WorkerObservation.model_validate_json(first_raw)
@@ -783,12 +853,12 @@ def run_trial_host(*, candidate_root: Path, mode: str, input_path: Path, output_
         env = _clean_environment(candidate_backend, storage, worker_input, worker_output, mode, model, index, base_url,
                                  phase="restart_replay", previous_output=first_output)
         remaining = MODEL_CALL_LIMIT - first_worker.model_calls
-        _run_candidate(worker_command(remaining), cwd=candidate_backend, env=env, storage=storage)
+        run_candidate(worker_command(remaining), env=env)
     else:
         worker_output = storage / f"worker-observation-{secrets.token_hex(16)}.json"
         env = _clean_environment(candidate_backend, storage, worker_input, worker_output, mode, model, index, base_url,
                                  phase="single")
-        _run_candidate(worker_command(MODEL_CALL_LIMIT), cwd=candidate_backend, env=env, storage=storage)
+        run_candidate(worker_command(MODEL_CALL_LIMIT), env=env)
 
     if _candidate_snapshot(candidate_root) != candidate_snapshot_sha256:
         raise ValueError("candidate changed during trial")
@@ -1368,6 +1438,8 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--index", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
+    parser.add_argument("--expected-candidate-dev", type=int)
+    parser.add_argument("--expected-candidate-ino", type=int)
     args = parser.parse_args()
     try:
         run_trial_host(**vars(args))
