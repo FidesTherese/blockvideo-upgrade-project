@@ -221,15 +221,22 @@ class RedactedArtifactEntry(_StrictRecord):
     revision: int | None = Field(default=None, ge=1, le=10**12)
     input_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     video_path_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    video_size: int | None = Field(default=None, ge=0, le=2**63 - 1)
     video_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     subtitle_path_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    subtitle_size: int | None = Field(default=None, ge=0, le=2**63 - 1)
     subtitle_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
-    def subtitle_content_requires_a_stored_path(self) -> RedactedArtifactEntry:
-        if self.subtitle_sha256 is not None and self.subtitle_path_sha256 is None:
-            raise ValueError("subtitle content hash requires subtitle path hash")
+    def content_identities_are_complete(self) -> RedactedArtifactEntry:
+        if (self.video_size is None) != (self.video_sha256 is None):
+            raise ValueError("video size and content hash must both be present or absent")
+        if self.subtitle_path_sha256 is None:
+            if self.subtitle_size is not None or self.subtitle_sha256 is not None:
+                raise ValueError("subtitle content identity requires subtitle path hash")
+        elif (self.subtitle_size is None) != (self.subtitle_sha256 is None):
+            raise ValueError("subtitle size and content hash must both be present or absent")
         return self
 
 
@@ -1037,9 +1044,13 @@ def _candidate_worker(model_call_budget: int) -> int:
                           "job_id": item["job_id"], "revision": item["revision"],
                           "input_fingerprint": item["input_fingerprint"],
                           "video_path_sha256": item["video"]["path_sha256"],
+                          "video_size": item["video"]["size"],
                           "video_sha256": item["video"]["sha256"],
                           "subtitle_path_sha256": (
                               item["subtitle"]["path_sha256"] if item["subtitle"] is not None else None
+                          ),
+                          "subtitle_size": (
+                              item["subtitle"]["size"] if item["subtitle"] is not None else None
                           ),
                           "subtitle_sha256": (
                               item["subtitle"]["sha256"] if item["subtitle"] is not None else None

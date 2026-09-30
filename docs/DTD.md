@@ -1082,12 +1082,14 @@ History entries contain only `project_id`, `revision`, `settings_sha256`, sorted
 Job entries contain only `id`, `project_id`, `status`, bounded `current_stage`,
 `input_revision`, `cancel_requested`, `kind`, `block_index`, and `parent_job_id`,
 ordered by `id`. Artifact entries contain only `id`, `project_id`, `job_id`,
-`revision`, `input_fingerprint`, `video_path_sha256`, `video_sha256`, optional
-`subtitle_path_sha256`, optional `subtitle_sha256`, and `manifest_sha256`, ordered by
-`id`. The video path hash is required because an artifact always stores a video path.
-A subtitle content hash requires a subtitle path hash; a non-null subtitle path hash
-with null content hash represents a missing referenced subtitle. No entry contains raw
-or resolved paths, source/model text, messages, labels, or settings values. Tuple
+`revision`, `input_fingerprint`, `video_path_sha256`, optional `video_size`, optional
+`video_sha256`, optional `subtitle_path_sha256`, optional `subtitle_size`, optional
+`subtitle_sha256`, and `manifest_sha256`, ordered by `id`. The video path hash is
+required because an artifact always stores a video path. Size and content hash are
+both non-null exactly when the referenced file exists. A subtitle size or content hash
+requires a subtitle path hash; a non-null path hash with null size and content hash
+represents a missing referenced file. No entry contains raw or resolved paths,
+source/model text, messages, labels, or settings values. Tuple
 lengths MUST equal their corresponding
 counts, identities MUST be unique, and ordering MUST be canonical. The input validator accepts `artifact_revisions` only as strict integers from 1 through
 `10**12`, requires each to be no newer than the primary project, and requires the
@@ -1393,15 +1395,21 @@ against the selected redacted job, including count/new-ID/parent/revision/status
 cancel flags. An asserted input-settings object is accepted only when it equals the
 fully reconstructed settings for the observed `input_revision`. Cancellation must
 change only its asserted job. Every before-artifact tuple must remain an exact subset
-of the after tuple. `preserve_all_no_new_publication` permits no added artifact;
-`job_may_publish_on_success` permits zero or one new artifact, and one is legitimate
-only when it belongs to the target project and an observed new job, its revision
-equals that job's input revision, and its input fingerprint is a non-null lowercase
-SHA-256 identity. Artifact preservation compares video/subtitle path hashes together
-with content and metadata hashes. A permitted publication must bind each project
-output pointer's path hash and content hash to the added artifact's corresponding
-hashes. Same-content path replacement, missing-path substitution, and every other
-same-count artifact replacement are unauthorized. `after.project_status` must equal the
+of the after tuple. `preserve_all_no_new_publication` permits no added artifact.
+Under `job_may_publish_on_success`, the artifact count delta MUST be zero or one. A
+zero delta permits no change to `current_artifact_id`, `output_video`, or
+`output_subtitle`. A one delta requires exactly one canonical added artifact and one
+publication job: the sole added job when one is expected, otherwise the exact job named
+by the final job assertion. The artifact's non-null `job_id` MUST equal that job ID;
+its `project_id` and `revision` MUST equal the primary project's ID and expected final
+revision; the publication job MUST have that project and input revision. Its input
+fingerprint MUST be a lowercase SHA-256 identity. Both video and subtitle MUST be
+stored, present, and carry non-null size and content SHA-256 identities. The primary
+project's `current_artifact_id` MUST equal the artifact ID, and its `output_video` and
+`output_subtitle` identities MUST equal the artifact path hash, size, and content hash
+value-for-value. Artifact preservation compares all path, size, content, and metadata
+fields. An orphan, missing file, stale pointer, wrong job, same-content path
+replacement, or any same-count replacement is unauthorized. `after.project_status` must equal the
 status implied by the expected outcome and job assertions; a newly queued job implies
 `generating`, while other outcomes preserve the initial status unless the asserted
 job transition requires the candidate's defined terminal status. The shared model owns named

@@ -355,11 +355,13 @@ def _worker_observation() -> dict[str, Any]:
             "artifact_entries": [
                 {"id": 1, "project_id": 1, "job_id": None, "revision": 1,
                  "input_fingerprint": None, "video_path_sha256": "0" * 64,
-                 "video_sha256": "1" * 64, "subtitle_path_sha256": None,
+                 "video_size": 1, "video_sha256": "1" * 64,
+                 "subtitle_path_sha256": None, "subtitle_size": None,
                  "subtitle_sha256": None, "manifest_sha256": "2" * 64},
                 {"id": 2, "project_id": 1, "job_id": None, "revision": 1,
                  "input_fingerprint": None, "video_path_sha256": "2" * 64,
-                 "video_sha256": "3" * 64, "subtitle_path_sha256": None,
+                 "video_size": 1, "video_sha256": "3" * 64,
+                 "subtitle_path_sha256": None, "subtitle_size": None,
                  "subtitle_sha256": None, "manifest_sha256": "4" * 64},
             ],
         },
@@ -401,11 +403,13 @@ def _worker_observation() -> dict[str, Any]:
             "artifact_entries": [
                 {"id": 1, "project_id": 1, "job_id": None, "revision": 1,
                  "input_fingerprint": None, "video_path_sha256": "0" * 64,
-                 "video_sha256": "1" * 64, "subtitle_path_sha256": None,
+                 "video_size": 1, "video_sha256": "1" * 64,
+                 "subtitle_path_sha256": None, "subtitle_size": None,
                  "subtitle_sha256": None, "manifest_sha256": "2" * 64},
                 {"id": 2, "project_id": 1, "job_id": None, "revision": 1,
                  "input_fingerprint": None, "video_path_sha256": "2" * 64,
-                 "video_sha256": "3" * 64, "subtitle_path_sha256": None,
+                 "video_size": 1, "video_sha256": "3" * 64,
+                 "subtitle_path_sha256": None, "subtitle_size": None,
                  "subtitle_sha256": None, "manifest_sha256": "4" * 64},
             ],
         },
@@ -1677,6 +1681,28 @@ def test_redacted_response_requires_exact_operation_and_clarification_shapes() -
         invalid = {**clarification, "clarification_missing_fields": missing_fields}
         with pytest.raises(ValidationError, match="clarification|missing fields"):
             trial_host.RedactedResponse.model_validate(invalid)
+
+
+def test_redacted_artifact_entry_carries_complete_file_content_identities() -> None:
+    entry = trial_host.RedactedArtifactEntry.model_validate(
+        {
+            "id": 1,
+            "project_id": 1,
+            "job_id": 2,
+            "revision": 3,
+            "input_fingerprint": "0" * 64,
+            "video_path_sha256": "1" * 64,
+            "video_size": 10,
+            "video_sha256": "2" * 64,
+            "subtitle_path_sha256": "3" * 64,
+            "subtitle_size": 20,
+            "subtitle_sha256": "4" * 64,
+            "manifest_sha256": "5" * 64,
+        }
+    )
+
+    assert entry.video_size == 10
+    assert entry.subtitle_size == 20
 
 
 def test_redacted_state_requires_exact_sorted_label_free_persisted_projections() -> None:

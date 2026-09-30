@@ -21,10 +21,14 @@ process or allowing mode-specific test conditions.
   exact project-status, history-row,
   settings-hash/revision/changed-field, job-assertion,
   initial-job, cancellation, and artifact-subset evidence from D36. Missing projections
-  are unverifiable and fail closed. Artifact publication permits only a legitimate
-  related +0/+1 whose output-pointer path/content hashes match the added artifact;
-  same-content different-path replacement, missing-path substitution, and every
-  same-count replacement are unauthorized.
+  are unverifiable and fail closed. Under the publication policy, artifact delta +0
+  permits no current/output pointer change. Delta +1 requires exactly one artifact
+  bound to the sole added or explicitly expected job and to the primary expected
+  project/revision; its video and subtitle must exist with size/content hashes, and
+  the primary current/output pointers must exactly match its full path/size/content
+  identities. Orphans, stale pointers, wrong-job artifacts, same-content
+  different-path replacement, missing files, and every same-count replacement are
+  unauthorized.
 - Derive domain-separated evaluator-keyed HMAC-SHA-256 case/category tokens. Publish
   only a non-empty complete sorted opaque token set/count and non-empty opaque category
   bindings in the canonical protocol; never publish raw case IDs, text, category names,

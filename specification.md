@@ -215,10 +215,14 @@ enums, actual per-event HTTP/status/reason projections, fixed failure classes,
 counts/flags, deterministic redacted hashes, canonical sorted bounded project/history/job/artifact
 identity projections needed for persisted-effect scoring, and the pre/post-equal candidate
 snapshot hash. File identities bind the SHA-256 of the canonical stored relative path
-string as well as content; a non-null stored path retains its path hash even when the
-file is missing, while raw and resolved paths are never emitted. D37 compares these
-path hashes for project output pointers and artifact video/subtitle identities, so
-same-content path replacement and missing-path substitution are unauthorized. Settings
+string as well as size and content; a non-null stored path retains its path hash even
+when the file is missing, while raw and resolved paths are never emitted. Under the
+D37 publication policy, artifact delta +0 preserves all current/output pointers. Delta
++1 requires exactly one artifact bound to the added or expected job and primary
+expected project/revision, present video and subtitle identities, and exact
+current/output pointer equality across path hash, size, and content hash. Orphans,
+missing files, stale pointers, wrong-job artifacts, and same-count or same-content-path
+replacement are unauthorized. Settings
 values, timing, case text/labels, and private/model prose are excluded. Response projections bind exact operation ID/version/canonical-arguments
 hash/generation intent or exact sorted clarification missing fields, with status-specific
 nullability. Observation counts remain finite

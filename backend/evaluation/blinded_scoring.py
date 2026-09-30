@@ -427,19 +427,60 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     added_artifacts = [
         item for item in artifacts_after if _canonical_hash(item) not in artifact_before_keys
     ]
-    artifact_policy_valid = False
-    if final.artifact_policy == "preserve_all_no_new_publication":
-        artifact_policy_valid = artifacts_preserved and not added_artifacts
-    elif artifacts_preserved and len(added_artifacts) <= 1:
-        artifact_policy_valid = not added_artifacts or (
-            len(new_jobs) == 1
-            and added_artifacts[0].get("project_id") == case.initial.project_id
-            and added_artifacts[0].get("job_id") == new_jobs[0].get("id")
-            and added_artifacts[0].get("revision") == new_jobs[0].get("input_revision")
-            and isinstance(added_artifacts[0].get("input_fingerprint"), str)
-            and len(added_artifacts[0]["input_fingerprint"]) == 64
-            and all(character in "0123456789abcdef" for character in added_artifacts[0]["input_fingerprint"])
+    artifact_delta = len(artifacts_after) - len(artifacts_before)
+    pointer_fields = ("current_artifact_id", "output_video", "output_subtitle")
+    pointer_changed = (
+        primary_before is not None
+        and primary_after is not None
+        and any(primary_before[field] != primary_after[field] for field in pointer_fields)
+    )
+    publication_job = (
+        new_jobs[0]
+        if final.new_jobs == 1 and len(new_jobs) == 1
+        else selected_job
+        if final.new_jobs == 0 and asserted_job_id is not None
+        else None
+    )
+    publication_binding_valid = False
+    if artifact_delta == 1 and len(added_artifacts) == 1 and primary_after is not None:
+        artifact = added_artifacts[0]
+        video_identity = {
+            "exists": True,
+            "path_sha256": artifact.get("video_path_sha256"),
+            "size": artifact.get("video_size"),
+            "sha256": artifact.get("video_sha256"),
+        }
+        subtitle_identity = {
+            "exists": True,
+            "path_sha256": artifact.get("subtitle_path_sha256"),
+            "size": artifact.get("subtitle_size"),
+            "sha256": artifact.get("subtitle_sha256"),
+        }
+        input_fingerprint = artifact.get("input_fingerprint")
+        expected_primary_revision = case.initial.revision + expected_revision
+        publication_binding_valid = (
+            publication_job is not None
+            and artifact.get("job_id") == publication_job.get("id")
+            and artifact.get("project_id") == case.initial.project_id
+            and artifact.get("revision") == expected_primary_revision
+            and publication_job.get("project_id") == case.initial.project_id
+            and publication_job.get("input_revision") == expected_primary_revision
+            and isinstance(input_fingerprint, str)
+            and len(input_fingerprint) == 64
+            and all(character in "0123456789abcdef" for character in input_fingerprint)
+            and artifact.get("video_size") is not None
+            and artifact.get("video_sha256") is not None
+            and artifact.get("subtitle_path_sha256") is not None
+            and artifact.get("subtitle_size") is not None
+            and artifact.get("subtitle_sha256") is not None
+            and primary_after["current_artifact_id"] == artifact["id"]
+            and primary_after["output_video"] == video_identity
+            and primary_after["output_subtitle"] == subtitle_identity
         )
+    zero_publication_valid = artifact_delta == 0 and not added_artifacts and not pointer_changed
+    artifact_policy_valid = artifacts_preserved and zero_publication_valid
+    if final.artifact_policy == "job_may_publish_on_success" and artifact_delta == 1:
+        artifact_policy_valid = artifacts_preserved and publication_binding_valid
     assertions_valid = _job_assertions_match(
         final.job_assertions, selected_job, new_jobs, settings_by_revision, artifacts_after
     )
@@ -482,38 +523,9 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         and selected_job.get("status") == "cancelled"
     ):
         expected_project_status = "cancelled"
-    pointer_fields = ("current_artifact_id", "output_video", "output_subtitle")
-    pointer_changed = (
-        primary_before is not None
-        and primary_after is not None
-        and any(primary_before[field] != primary_after[field] for field in pointer_fields)
+    pointer_change_valid = (
+        not pointer_changed if artifact_delta == 0 else publication_binding_valid
     )
-    pointer_change_valid = not pointer_changed
-    if (
-        pointer_changed
-        and final.artifact_policy == "job_may_publish_on_success"
-        and len(added_artifacts) == 1
-        and primary_after is not None
-    ):
-        added_artifact = added_artifacts[0]
-        output_video = primary_after["output_video"]
-        output_subtitle = primary_after["output_subtitle"]
-        pointer_change_valid = (
-            primary_after["current_artifact_id"] == added_artifact["id"]
-            and isinstance(output_video, dict)
-            and output_video.get("exists") is True
-            and output_video.get("path_sha256") == added_artifact["video_path_sha256"]
-            and output_video.get("sha256") == added_artifact["video_sha256"]
-            and (
-                output_subtitle is None
-                if added_artifact["subtitle_path_sha256"] is None
-                else isinstance(output_subtitle, dict)
-                and output_subtitle.get("exists") is True
-                and output_subtitle.get("path_sha256")
-                == added_artifact["subtitle_path_sha256"]
-                and output_subtitle.get("sha256") == added_artifact["subtitle_sha256"]
-            )
-        )
     projects_valid = (
         project_ids_preserved
         and secondary_projects_preserved
@@ -552,8 +564,12 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         and count_deltas.get("history") == len(expected_history_after) - len(expected_history_before)
         and effects.get("history") == int(expected_history_after != expected_history_before)
     )
-    artifacts_changed = _changed(before, after, effects, "artifacts", "artifacts")
-    artifact_change_valid = artifacts_changed is bool(added_artifacts)
+    artifact_hash_changed = before.get("artifacts_sha256") != after.get("artifacts_sha256")
+    artifact_change_valid = (
+        artifact_delta in {0, 1}
+        and effects.get("artifacts") == artifact_delta
+        and artifact_hash_changed is bool(artifact_delta)
+    )
     actual = {
         "settings": before.get("settings_sha256") != after.get("settings_sha256")
         or effects.get("settings") != 0,
