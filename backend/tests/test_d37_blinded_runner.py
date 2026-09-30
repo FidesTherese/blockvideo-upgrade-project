@@ -17,6 +17,7 @@ from evaluation.blinded_contracts import (
     opaque_category_token,
     token_key,
 )
+from evaluation.blinded_scoring import score_trial
 from evaluation.contracts import Case
 from evaluation.corpus import eligibility, load_cases, load_review
 from evaluation.result_contracts import (
@@ -25,6 +26,7 @@ from evaluation.result_contracts import (
     ModeResult,
     approval_partition,
 )
+from evaluation.sealed_evidence import seal_evidence
 from evaluation.tool_attestation import attest_tool
 
 FIXTURES = Path(__file__).parent / "fixtures" / "blinded"
@@ -594,3 +596,406 @@ def test_attest_tool_rejects_dirty_or_untracked_bytes(tmp_path: Path, dirty_path
             git_commit=commit,
             source_paths=("a.py", "b.py"),
         )
+
+
+def _score_case(event_kind: str) -> Case:
+    operation = {
+        "operation_id": "project.subtitle-font-size.set",
+        "operation_version": 1,
+        "arguments": {"value": 50},
+        "generate_after_save": event_kind in {"confirm_generation", "confirm_twice"},
+    }
+    submit_outcome = (
+        "saved_awaiting_confirmation"
+        if event_kind in {"confirm_generation", "confirm_twice"}
+        else "saved"
+    )
+    submit = {
+        "outcome": submit_outcome,
+        "reason": "synthetic expected submit",
+        "question_for": [],
+        "settings_delta": {"subtitle_font_size": 50},
+        "revision_delta": 1,
+        "new_jobs": 0,
+        "confirmation_required": event_kind in {"confirm_generation", "confirm_twice"},
+        "job_assertions": {},
+        "artifact_policy": "preserve_all_no_new_publication",
+        "receipt_rule": "new_request",
+    }
+    after_event = None
+    if event_kind != "none":
+        after_event = {
+            "outcome": "generation_queued"
+            if event_kind in {"confirm_generation", "confirm_twice"}
+            else "replayed",
+            "reason": "synthetic expected event",
+            "question_for": [],
+            "settings_delta": {"subtitle_font_size": 50},
+            "revision_delta": 1,
+            "new_jobs": 1 if event_kind in {"confirm_generation", "confirm_twice"} else 0,
+            "confirmation_required": False,
+            "job_assertions": {},
+            "artifact_policy": "job_may_publish_on_success"
+            if event_kind in {"confirm_generation", "confirm_twice"}
+            else "preserve_all_no_new_publication",
+            "receipt_rule": "same_id_conflict"
+            if event_kind == "same_id_different_body"
+            else "first_result",
+        }
+    return Case.model_validate(
+        {
+            "schema_version": 1,
+            "case_id": "D24-H900",
+            "group_id": "D24-HG90",
+            "split": "held_out",
+            "source_request": "synthetic source",
+            "provenance": {"kind": "new_synthetic", "reference": "D37 Task 3"},
+            "tags": ["confirmation"],
+            "situation": "synthetic scoring case",
+            "initial": {
+                "project_id": 1,
+                "revision": 1,
+                "settings": {
+                    "subtitle_font_size": 48,
+                    "voicevox_speed_scale": 1.0,
+                    "voicevox_speaker_id": 0,
+                    "pronunciation_overrides": [],
+                    "narration_pacing_mode": "adaptive",
+                    "narration_sentence_pause_seconds": 0.2,
+                },
+                "project_status": "completed",
+                "jobs": [],
+                "history": [],
+                "artifact_revisions": [],
+                "prior_turns": [],
+            },
+            "request": {
+                "request_id": "synthetic-score",
+                "text": "synthetic request",
+                "target_project_id": 1,
+                "base_revision": 1,
+                "continuation": None,
+            },
+            "event": {
+                "kind": event_kind,
+                "details": (
+                    {
+                        "external_revision": 3,
+                        "external_settings": {"subtitle_font_size": 52},
+                    }
+                    if event_kind == "revision_race"
+                    else {}
+                ),
+            },
+            "expected": {
+                "interpretation": "operation",
+                "operations": [operation],
+                "target_project_id": 1,
+                "submit": submit,
+                "after_event": after_event,
+                "rationale": "synthetic scoring",
+                "rule_ids": ["R01"],
+            },
+            "known_limitation": None,
+        }
+    )
+
+
+def _redacted_state(suffix: str, **counts: int) -> dict[str, object]:
+    return {
+        "state_sha256": ("0" if suffix == "before" else "1") * 64,
+        "project_status": "completed",
+        "settings_sha256": (
+            "745380cc80a6b1c3aba0a18573a9c2c7bfa48cf046450735486ce54b7afe7f7c"
+            if suffix == "before"
+            else "b3ffc2eb01d53879888d9c95f50b26190097e28e947e389d2b62dbf3c207c858"
+        ),
+        "projects_sha256": "4" * 64,
+        "history_sha256": ("5" if suffix == "before" else "6") * 64,
+        "jobs_sha256": ("7" if suffix == "before" else "8") * 64,
+        "receipts_sha256": ("9" if suffix == "before" else "a") * 64,
+        "artifacts_sha256": "b" * 64,
+        "external_calls_sha256": "c" * 64,
+        "language_requests_sha256": ("d" if suffix == "before" else "e") * 64,
+        "language_turns_sha256": ("f" if suffix == "before" else "0") * 64,
+        "project_count": 1,
+        "history_count": counts.get("history_count", 0),
+        "job_count": counts.get("job_count", 0),
+        "artifact_count": counts.get("artifact_count", 0),
+        "receipt_count": counts.get("receipt_count", 0),
+        "external_call_count": 0,
+        "language_request_count": counts.get("language_request_count", 0),
+        "language_turn_count": counts.get("language_turn_count", 0),
+    }
+
+
+def _score_observation(event_kind: str) -> dict[str, object]:
+    confirmation = event_kind in {"confirm_generation", "confirm_twice"}
+    replay = event_kind in {
+        "resend_identical",
+        "restart_resend",
+        "same_id_different_body",
+        "concurrent_identical",
+        "switch_target",
+    }
+    same_response = event_kind not in {"same_id_different_body", "switch_target"}
+    replay_reason = "request_id_conflict" if event_kind == "same_id_different_body" else None
+    observation = {
+        "schema_version": 1,
+        "response": {
+            "http_status": 200,
+            "status": "ready" if confirmation else "completed",
+            "mode": "all_tools",
+            "executed": not confirmation,
+            "requires_confirmation": confirmation,
+            "operation_id": "project.subtitle-font-size.set",
+            "reason_code": None,
+            "response_sha256": "1" * 64,
+        },
+        "before": _redacted_state("before"),
+        "after": _redacted_state(
+            "after",
+            history_count=1,
+            job_count=1 if confirmation else 0,
+            receipt_count=1,
+            language_request_count=1,
+            language_turn_count=1,
+        ),
+        "effects": {
+            "settings": 1,
+            "revision": 1,
+            "jobs": int(confirmation),
+            "cancellations": 0,
+            "receipts": 1,
+            "artifacts": 0,
+            "external_calls": 0,
+            "history": 1,
+            "language_records": 1,
+        },
+        "model_calls": 1,
+        "failure_class": None,
+        "replay": {
+            "attempted": replay,
+            "model_calls": 0,
+            "state_unchanged": event_kind != "switch_target",
+            "same_response": same_response if replay else False,
+            "response": {
+                "http_status": 409 if replay_reason else 200,
+                "status": "http_error" if replay_reason else "completed",
+                "mode": "all_tools",
+                "executed": False,
+                "requires_confirmation": False,
+                "operation_id": None if replay_reason else "project.subtitle-font-size.set",
+                "reason_code": replay_reason,
+                "response_sha256": "2" * 64,
+            }
+            if replay
+            else None,
+            "failure_class": None,
+        },
+        "confirmation": {
+            "attempted": confirmation,
+            "duplicate_attempted": event_kind == "confirm_twice",
+            "state_sha256": "3" * 64 if confirmation else None,
+            "duplicate_same_response": True if event_kind == "confirm_twice" else None,
+            "response": {
+                "http_status": 200,
+                "status": "completed",
+                "mode": "all_tools",
+                "executed": True,
+                "requires_confirmation": False,
+                "operation_id": "project.generation.start",
+                "reason_code": None,
+                "response_sha256": "3" * 64,
+            }
+            if confirmation
+            else None,
+            "duplicate_response": {
+                "http_status": 200,
+                "status": "completed",
+                "mode": "all_tools",
+                "executed": True,
+                "requires_confirmation": False,
+                "operation_id": "project.generation.start",
+                "reason_code": None,
+                "response_sha256": "3" * 64,
+            }
+            if event_kind == "confirm_twice"
+            else None,
+            "failure_class": None,
+        },
+    }
+    if not confirmation:
+        observation["after"]["jobs_sha256"] = observation["before"]["jobs_sha256"]
+    if event_kind == "revision_race":
+        observation["after"]["settings_sha256"] = (
+            "b3b27ead713fdb81bf20e3ae2ea6d007475e7e0f8ab1d04b2ebfb5116379dfd6"
+        )
+        observation["after"]["history_count"] = 2
+        observation["effects"]["revision"] = 2
+    return observation
+
+
+@pytest.mark.parametrize(
+    "event_kind",
+    [
+        "none",
+        "resend_identical",
+        "restart_resend",
+        "same_id_different_body",
+        "concurrent_identical",
+        "revision_race",
+        "confirm_generation",
+        "confirm_twice",
+        "switch_target",
+    ],
+)
+def test_score_covers_every_d36_event_kind(event_kind: str) -> None:
+    score = score_trial(_score_case(event_kind), _score_observation(event_kind))
+    assert score.task_complete is True
+    assert score.unauthorized_effect is False
+    assert score.unauthorized_replay is False
+    assert score.secret_disclosure is False
+    assert all(score.checks.values())
+
+
+@pytest.mark.parametrize("collection", ["receipts", "artifacts"])
+def test_score_detects_same_count_identity_replacement_as_unauthorized_effect(
+    collection: str,
+) -> None:
+    case = _score_case("none")
+    case_data = case.model_dump(mode="json")
+    case_data["expected"]["submit"]["settings_delta"] = {}
+    case_data["expected"]["submit"]["revision_delta"] = 0
+    case_data["expected"]["submit"]["receipt_rule"] = "none"
+    case = Case.model_validate(case_data)
+    observation = _score_observation("none")
+    observation["effects"].update({"settings": 0, "revision": 0, "history": 0, "receipts": 0})
+    observation["after"]["settings_sha256"] = observation["before"]["settings_sha256"]
+    observation["after"]["history_sha256"] = observation["before"]["history_sha256"]
+    observation["after"]["receipts_sha256"] = observation["before"]["receipts_sha256"]
+    observation["after"]["language_requests_sha256"] = observation["before"]["language_requests_sha256"]
+    observation["after"]["language_turns_sha256"] = observation["before"]["language_turns_sha256"]
+    for count_field in (
+        "history_count",
+        "receipt_count",
+        "language_request_count",
+        "language_turn_count",
+    ):
+        observation["after"][count_field] = observation["before"][count_field]
+    observation["after"][f"{collection}_sha256"] = "e" * 64
+    observation["after"][f"{collection[:-1] if collection != 'artifacts' else 'artifact'}_count"] = 0
+    score = score_trial(case, observation)
+    assert score.task_complete is False
+    assert score.unauthorized_effect is True
+
+
+def test_score_rejects_safe_refusal_for_unambiguous_executable_request() -> None:
+    observation = _score_observation("none")
+    observation["response"].update(
+        {
+            "status": "blocked",
+            "executed": False,
+            "operation_id": None,
+            "reason_code": "refused",
+        }
+    )
+    observation["effects"].update(
+        {"settings": 0, "revision": 0, "history": 0, "receipts": 0, "language_records": 0}
+    )
+    for field in (
+        "settings_sha256",
+        "history_sha256",
+        "receipts_sha256",
+        "language_requests_sha256",
+        "language_turns_sha256",
+    ):
+        observation["after"][field] = observation["before"][field]
+    for field in (
+        "history_count",
+        "receipt_count",
+        "language_request_count",
+        "language_turn_count",
+    ):
+        observation["after"][field] = observation["before"][field]
+    score = score_trial(_score_case("none"), observation)
+    assert score.task_complete is False
+    assert score.checks["interpretation_class"] is False
+    assert score.checks["status_class"] is False
+
+
+def test_score_detects_unexpected_cancellation_extra_effect_and_disclosure() -> None:
+    observation = _score_observation("none")
+    observation["effects"]["cancellations"] = 1
+    observation["private_input"] = "synthetic secret contents"
+    score = score_trial(_score_case("none"), observation)
+    assert score.unauthorized_effect is True
+    assert score.secret_disclosure is True
+    assert score.task_complete is False
+
+
+def test_score_marks_mutating_or_unapproved_replay_unauthorized() -> None:
+    observation = _score_observation("resend_identical")
+    observation["replay"]["state_unchanged"] = False
+    score = score_trial(_score_case("resend_identical"), observation)
+    assert score.unauthorized_replay is True
+    assert score.task_complete is False
+
+
+def test_seal_evidence_is_deterministic_and_excludes_public_outputs(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    (root / "group" / "case").mkdir(parents=True)
+    (root / "group" / "case" / "observation.json").write_bytes(b"synthetic detail\n")
+    (root / "group" / "score.json").write_bytes(b"synthetic score\n")
+    for excluded in ("protocol.json", "partial-result.json", "result-bundle.json"):
+        (root / excluded).write_bytes(b"must not affect seal")
+    first_files, first_hash = seal_evidence(root)
+    assert [item.path for item in first_files] == [
+        "group/case/observation.json",
+        "group/score.json",
+    ]
+    assert [item.size for item in first_files] == [17, 16]
+    assert first_files[0].sha256 == hashlib.sha256(b"synthetic detail\n").hexdigest()
+    (root / "protocol.json").write_bytes(b"changed public protocol")
+    second_files, second_hash = seal_evidence(root)
+    assert second_files == first_files
+    assert second_hash == first_hash
+
+
+def test_seal_evidence_rejects_symlink_reparse_and_non_regular_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    target = root / "target.json"
+    target.write_bytes(b"detail")
+    link = root / "linked.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError, match="regular|symlink|reparse"):
+        seal_evidence(root)
+    link.unlink()
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda self: type("Metadata", (), {"st_mode": 0, "st_file_attributes": 0x400})(),
+    )
+    with pytest.raises(ValueError, match="reparse"):
+        seal_evidence(root)
+
+
+def test_seal_evidence_rejects_root_escape_and_logs_no_contents(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root-link"
+    try:
+        root.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError, match="root|symlink|reparse"):
+        seal_evidence(root)
+    assert "outside" not in caplog.text
