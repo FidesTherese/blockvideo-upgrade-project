@@ -92,6 +92,29 @@ always Not ready and never a vacuous pass. All Tools
 remains default unless stateful also passes and has an equal or higher exact overall
 quality ratio.
 
+### D38 implementation checkpoint (synthetic only; review pending)
+
+The external aggregate importer is implemented without changing shared D37 schemas,
+app/frontend, candidate, dependencies or locks. It checks a detached bundle digest
+before strict canonical parsing; verifies the complete D36 publication, exact same-run
+public filenames, historical source blobs and all opaque topology/accounting bindings;
+then records exactly twenty raw bool-true checks. Its own exact 25-path source closure
+is attested from clean committed tooling, separately from the candidate and upstream
+tools. Model/index values are bound through the exact protocol hash.
+
+Publication retains native identities, writes/fsyncs/readbacks exactly three files and
+renames the complete directory no-replace. Existing finals are refused; failures may
+retain an unaccepted stage or a complete final, never justify deleting a replacement.
+The fixed redacted CLI permits checked relative paths and exits 2 on refusal. No
+sealed/private evidence is opened, enumerated or reconstructed. Detached/source proof
+does not establish private approval/evaluator truth or provider weights.
+
+Final synthetic gates: 2018 backend passes with 13 explicit skips, Ruff, 157 frontend
+passes, build/typecheck and lint. Independent review and real aggregate transfer remain
+pending; no readiness or release approval follows. Exact verification history and the
+prior-unit timestamp-sensitive focused failure are in `docs/plan-c/work-report-38.md`.
+D39/D40 remain deferred.
+
 ### Stack and tooling-contract audit (2026-09-30; design only)
 
 Canonical implementation details remain in `docs/DTD.md`; plans 37–40 and unit

@@ -4,7 +4,7 @@
 
 ### Document control
 
-- **Status:** Contracts reconciled; D37–D40 integration acceptance partially blocked
+- **Status:** Contracts reconciled; D38 synthetically verified, independent review pending; D39–D40 deferred
 - **Delivery mode:** High-Risk for D31 security, D32 concurrency, D34 migration,
   and D37–D40 tooling integrity, privacy, and resource ownership
 - **Specification:** `specification.md`, `docs/plan-c/work-unit-31.md` through
@@ -12,8 +12,8 @@
 - **DTD:** `docs/DTD.md`
 - **Updated:** 2026-10-01 (host time; audit began 2026-09-30)
 - **Scope:** sequential hardening, blinded evaluation, and release-readiness decision.
-  This amendment is design-only; it implements no D38–D40 tooling and generates no
-  candidate or evaluation evidence.
+  D38 aggregate import is implemented and synthetically verified only; D39–D40
+  remain design-only. No real aggregate acceptance or readiness approval is inferred.
 - **Blocked facts:** a clean extras installation, native Windows launcher/descendant
   roundtrip, and pinned-D35 real-worker/stateful-index roundtrip are not yet verified.
   Independent model-weight provenance, real aggregate, and human/independent acceptance
@@ -1851,6 +1851,12 @@ closed before any trial record or evidence seal.
 
 ### D38 validation and import bindings
 
+**Implementation status:** Tasks 1–3 are implemented; synthetic gates and their exact
+limitations are recorded in `plan-c/work-report-38.md`. Shared D37 schemas are unchanged.
+Independent controller review and real aggregate transfer remain pending. The existing
+D36–D40 reviewer sequence describes the same dependency direction; D39/D40 nodes remain
+planned, not implemented by D38.
+
 The importer first validates the raw result bytes against the separately supplied
 `--expected-sha256`, then parses only D37's shared `EvaluationResultBundle`. It reads
 the supplied D37 `protocol.json` as bounded raw canonical bytes and requires its hash
@@ -2000,6 +2006,11 @@ has the exact complete triplet and no stage remainder.
 `result_import.py` defines `ResultImportError` with a fixed redacted refusal. CLI
 argument and runtime errors exit 2 without traceback, input content or path echo;
 success exits 0 and emits only fixed accepted status and verified opaque identities.
+Documented relative CLI paths (including `--repo-root ..`) are accepted only after
+checking each existing component for links/reparses before collapsing `..`; a missing
+prefix or hidden link cannot be normalized into acceptance. Output must be new,
+ignored/untracked with an ignored parent, and disjoint from source, run-input and
+complete-publication roots. Generation occurs only after all input/historical checks.
 Detached integrity and verified source blobs do not establish evaluator/provider
 truth; model identity still does not pin weights. No real acceptance is implied by
 synthetic fixtures.

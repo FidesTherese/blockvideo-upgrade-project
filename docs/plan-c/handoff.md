@@ -1,6 +1,37 @@
-# Plan C Handoff — D37 evaluator tooling delivered; real run deferred
+# Plan C Handoff — D38 synthetic importer implemented; review/real transfer pending
 
-## D37 current result
+## D38 current result
+
+Read `work-unit-38.md`, `work-report-38.md`, `docs/implementation-plan-38.md` and the
+canonical D38 sections of `docs/DTD.md`. Tasks 1–3 implement the detached-hash importer,
+fixed redacted CLI, historical Git source verification and native no-replace accepted
+triplet. Shared D37 models, app/frontend, dependencies, locks and the immutable D35
+candidate are unchanged. No private input, real aggregate, push or approval occurred.
+
+Source tasks: `8e56000` and `577b9de`. Final full backend: **2018 passed, 13 skipped**
+with the existing Starlette/httpx warning; full Ruff and frontend **157 tests**,
+build/typecheck and lint passed sequentially. D38 contributes **223 passes and two
+platform skips**. Four scoped native Linux probes and the committed-tooling synthetic
+CLI passed. The final combined focused run had an intermittent unchanged D37 streamed
+mutation failure; the subsequent full run included it and passed without skip/waiver.
+Keep that Windows timestamp-sensitive regression visible to independent review.
+
+The clean 25-path D38 source aggregate is
+`c7153f45e5c6deed40f1edb66bcded52a852aeda5fe0ccfc95d7e57cd36f7f5b`.
+Only a new ignored/untracked, source/input/publication-disjoint output is accepted.
+D38 reads public `result-bundle.json`, same-run `protocol.json` and source attestations,
+plus the complete D36 publication. It never reads/enumerates sealed evidence and does
+not reconstruct private approval decisions. A failed stage may remain unaccepted;
+never delete replacement paths or resume/overwrite a final.
+
+Independent controller review and real aggregate transfer remain pending. Do not mark
+D38 approved, push, decide readiness or begin later units. New real runs require final
+clean tooling and fresh evidence roots; preserve previous publications. Historical
+attestations are verified against recorded Git blobs, not current working-source
+identity. The current ignored D36 publication was not read or overwritten by this task.
+Readiness remains **NOT READY**.
+
+## D37 historical result
 
 Read `work-unit-37.md`, `work-report-37.md`, the D37 section of `docs/DTD.md`, and
 `docs/implementation-plan-37.md` first. The immutable candidate remains exact clean
@@ -24,7 +55,7 @@ commit covers **167 files**, aggregate
 `f0377a0b3757f4ad9b84566fac0998b066c8c3cec418e3761f0d4da72dc1ad04`.
 Later evaluation-source additions change the closure. Attest the final clean committed
 tooling before real execution, and use a new run directory after any source mismatch.
-No real evaluation or D38 source work has started at this gate.
+No real evaluation or D38 source work had started at that historical D37 gate.
 Verification uses repository-owned synthetic material only. No real held-out corpus,
 review ledger, token key, private evidence, or D37 output is available to the
 implementation process. The real evaluator command uses placeholders documented in
