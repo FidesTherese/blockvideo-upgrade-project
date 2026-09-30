@@ -313,6 +313,11 @@ def _worker_observation() -> dict[str, Any]:
             "executed": True,
             "requires_confirmation": False,
             "operation_id": "project.subtitle-font-size.set",
+            "operation_version": 1,
+            "arguments_sha256": trial_host._hash({"value": 64}),
+            "generate_after_save": False,
+            "generation_requested": False,
+            "clarification_missing_fields": None,
             "reason_code": None,
             "response_sha256": "b" * 64,
         },
@@ -336,6 +341,15 @@ def _worker_observation() -> dict[str, Any]:
             "external_call_count": 0,
             "language_request_count": 0,
             "language_turn_count": 0,
+            "project_entries": [
+                {"id": 1, "revision": 1, "status": "completed",
+                 "settings_sha256": "d" * 64, "title_sha256": "1" * 64,
+                 "source_script_sha256": "2" * 64,
+                 "global_visual_style_sha256": "3" * 64, "progress": 0.0,
+                 "current_stage": None, "current_artifact_id": None,
+                 "output_video": None, "output_subtitle": None,
+                 "error_sha256": "4" * 64},
+            ],
             "history_entries": [],
             "job_entries": [],
             "artifact_entries": [
@@ -367,6 +381,15 @@ def _worker_observation() -> dict[str, Any]:
             "external_call_count": 0,
             "language_request_count": 1,
             "language_turn_count": 1,
+            "project_entries": [
+                {"id": 1, "revision": 2, "status": "completed",
+                 "settings_sha256": "f" * 64, "title_sha256": "1" * 64,
+                 "source_script_sha256": "2" * 64,
+                 "global_visual_style_sha256": "3" * 64, "progress": 0.0,
+                 "current_stage": None, "current_artifact_id": None,
+                 "output_video": None, "output_subtitle": None,
+                 "error_sha256": "4" * 64},
+            ],
             "history_entries": [
                 {"project_id": 1, "revision": 2, "settings_sha256": "9" * 64,
                  "changed_fields": ["subtitle_font_size"],
@@ -407,6 +430,11 @@ def _worker_observation() -> dict[str, Any]:
                 "executed": True,
                 "requires_confirmation": False,
                 "operation_id": "project.subtitle-font-size.set",
+                "operation_version": 1,
+                "arguments_sha256": trial_host._hash({"value": 64}),
+                "generate_after_save": False,
+                "generation_requested": False,
+                "clarification_missing_fields": None,
                 "reason_code": None,
                 "response_sha256": "b" * 64,
             },
@@ -1020,7 +1048,7 @@ def test_maximum_valid_seed_produces_valid_real_worker_observation(tmp_path: Pat
         thread.join(timeout=5)
         server.server_close()
 
-    assert observation.before.project_count == 17
+    assert observation.before.project_count == len(observation.before.project_entries) == 17
     assert observation.before.history_count == observation.before.job_count == 32
     assert observation.before.artifact_count == 64
     assert len(observation.before.history_entries) == 32
@@ -1578,10 +1606,45 @@ def test_real_worker_seeds_complete_allowed_initial_state(tmp_path: Path) -> Non
     assert observation.before.language_request_count == observation.before.language_turn_count == 1
 
 
+def test_redacted_response_requires_exact_operation_and_clarification_shapes() -> None:
+    value = _worker_observation()["response"]
+    response = trial_host.RedactedResponse.model_validate(value)
+    assert response.operation_version == 1
+    assert response.arguments_sha256 == trial_host._hash({"value": 64})
+    assert response.generate_after_save is False
+    assert response.generation_requested is False
+
+    for missing_field in (
+        "operation_version", "arguments_sha256", "generate_after_save", "generation_requested"
+    ):
+        invalid = dict(value)
+        invalid[missing_field] = None
+        with pytest.raises(ValidationError, match="operation"):
+            trial_host.RedactedResponse.model_validate(invalid)
+
+    clarification = {
+        **value,
+        "status": "needs_input",
+        "executed": False,
+        "operation_id": None,
+        "operation_version": None,
+        "arguments_sha256": None,
+        "generate_after_save": None,
+        "generation_requested": None,
+        "clarification_missing_fields": ("arguments", "target"),
+    }
+    trial_host.RedactedResponse.model_validate(clarification)
+    for missing_fields in (None, ("target", "arguments"), ("target", "target"), ("revision",)):
+        invalid = {**clarification, "clarification_missing_fields": missing_fields}
+        with pytest.raises(ValidationError, match="clarification|missing fields"):
+            trial_host.RedactedResponse.model_validate(invalid)
+
+
 def test_redacted_state_requires_exact_sorted_label_free_persisted_projections() -> None:
     value = _worker_observation()["after"]
     state = trial_host.RedactedState.model_validate(value)
     assert state.history_entries[0].changed_fields == ("subtitle_font_size",)
+    assert [item.id for item in state.project_entries] == [1]
     assert [item.id for item in state.artifact_entries] == [1, 2]
     assert "path" not in state.model_dump_json()
     assert "text" not in state.model_dump_json()
@@ -1600,6 +1663,13 @@ def test_redacted_state_requires_exact_sorted_label_free_persisted_projections()
     missing.pop("history_entries")
     with pytest.raises(ValidationError):
         trial_host.RedactedState.model_validate(missing)
+
+    wrong_projects = json.loads(json.dumps(value))
+    wrong_projects["project_entries"].append({
+        **wrong_projects["project_entries"][0], "id": 2,
+    })
+    with pytest.raises(ValidationError, match="project count"):
+        trial_host.RedactedState.model_validate(wrong_projects)
 
 
 def test_observation_contract_rejects_worker_exfiltration_strings() -> None:

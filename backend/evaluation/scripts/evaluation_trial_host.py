@@ -93,8 +93,71 @@ class RedactedResponse(_StrictRecord):
     executed: bool
     requires_confirmation: bool
     operation_id: OperationId | None = None
+    operation_version: int | None = Field(default=None, ge=1, le=2)
+    arguments_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    generate_after_save: bool | None = None
+    generation_requested: bool | None = None
+    clarification_missing_fields: tuple[Literal["target", "arguments", "intent"], ...] | None = Field(
+        default=None, min_length=1, max_length=3, strict=False
+    )
     reason_code: ReasonCode | None = None
     response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def details_match_status(self) -> RedactedResponse:
+        operation_values = (
+            self.operation_id,
+            self.operation_version,
+            self.arguments_sha256,
+            self.generate_after_save,
+            self.generation_requested,
+        )
+        has_operation = self.operation_id is not None
+        if has_operation != all(value is not None for value in operation_values):
+            raise ValueError("operation projection fields must be all present or all null")
+        if self.status == "needs_input":
+            if has_operation or self.clarification_missing_fields is None:
+                raise ValueError("clarification status requires only missing fields")
+        elif self.clarification_missing_fields is not None:
+            raise ValueError("clarification missing fields require needs_input status")
+        if self.status in {"ready", "completed"} and not has_operation:
+            raise ValueError("operation response status requires operation fields")
+        if self.status in {
+            "interpreting", "unsupported", "error", "dismissed", "http_error"
+        } and has_operation:
+            raise ValueError("non-operation response status requires null operation fields")
+        if self.clarification_missing_fields is not None:
+            if tuple(sorted(set(self.clarification_missing_fields))) != self.clarification_missing_fields:
+                raise ValueError("clarification missing fields must be unique and sorted")
+        return self
+
+
+class RedactedFileIdentity(_StrictRecord):
+    exists: bool
+    size: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def content_matches_existence(self) -> RedactedFileIdentity:
+        if self.exists != (self.size is not None and self.sha256 is not None):
+            raise ValueError("file content identity must match existence")
+        return self
+
+
+class RedactedProjectEntry(_StrictRecord):
+    id: int = Field(ge=1, le=2**63 - 1)
+    revision: int = Field(ge=1, le=10**12)
+    status: ProjectStatusValue
+    settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    title_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_script_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    global_visual_style_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    progress: float = Field(ge=0, le=1)
+    current_stage: str | None = Field(default=None, max_length=64)
+    current_artifact_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    output_video: RedactedFileIdentity | None = None
+    output_subtitle: RedactedFileIdentity | None = None
+    error_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class RedactedHistoryEntry(_StrictRecord):
@@ -158,6 +221,9 @@ class RedactedState(_StrictRecord):
     external_call_count: int = Field(ge=0, le=MAX_OBSERVED_EXTERNAL_CALLS)
     language_request_count: int = Field(ge=0, le=MAX_OBSERVED_LANGUAGE_REQUESTS)
     language_turn_count: int = Field(ge=0, le=MAX_OBSERVED_LANGUAGE_TURNS)
+    project_entries: tuple[RedactedProjectEntry, ...] = Field(
+        max_length=MAX_OBSERVED_PROJECTS, strict=False
+    )
     history_entries: tuple[RedactedHistoryEntry, ...] = Field(
         max_length=MAX_OBSERVED_HISTORY, strict=False
     )
@@ -170,15 +236,20 @@ class RedactedState(_StrictRecord):
 
     @model_validator(mode="after")
     def projections_match_counts_and_order(self) -> RedactedState:
+        if len(self.project_entries) != self.project_count:
+            raise ValueError("project entries must match project count")
         if len(self.history_entries) != self.history_count:
             raise ValueError("history entries must match history count")
         if len(self.job_entries) != self.job_count:
             raise ValueError("job entries must match job count")
         if len(self.artifact_entries) != self.artifact_count:
             raise ValueError("artifact entries must match artifact count")
+        project_ids = [item.id for item in self.project_entries]
         history_keys = [(item.project_id, item.revision) for item in self.history_entries]
         job_ids = [item.id for item in self.job_entries]
         artifact_ids = [item.id for item in self.artifact_entries]
+        if project_ids != sorted(set(project_ids)):
+            raise ValueError("project entries must be unique and sorted")
         if history_keys != sorted(set(history_keys)):
             raise ValueError("history entries must be unique and sorted")
         if job_ids != sorted(set(job_ids)):
@@ -916,6 +987,16 @@ def _candidate_worker(model_call_budget: int) -> int:
             primary = value["primary"]
             result = {"state_sha256": _hash(value), "project_status": primary["status"],
                       "settings_sha256": _hash(primary["settings"]),
+                      "project_entries": [{"id": item["id"], "revision": item["revision"],
+                          "status": item["status"], "settings_sha256": _hash(item["settings"]),
+                          "title_sha256": item["title_sha256"],
+                          "source_script_sha256": item["source_script_sha256"],
+                          "global_visual_style_sha256": item["global_visual_style_sha256"],
+                          "progress": item["progress"], "current_stage": item["current_stage"],
+                          "current_artifact_id": item["current_artifact_id"],
+                          "output_video": item["output_video"],
+                          "output_subtitle": item["output_subtitle"],
+                          "error_sha256": item["error_sha256"]} for item in value["projects"]],
                       "history_entries": [{"project_id": item["project_id"],
                           "revision": item["revision"], "settings_sha256": _hash(item["settings"]),
                           "changed_fields": item["changed_fields"],
@@ -942,20 +1023,44 @@ def _candidate_worker(model_call_budget: int) -> int:
 
         def response_projection(response: dict[str, Any], status_code: int) -> dict[str, Any]:
             failure = response.get("failure") or response.get("detail") or {}
-            operation = response.get("prepared_request") or response.get("result") or {}
+            interpretation = response.get("interpretation") or {}
+            proposal = interpretation.get("proposal") or {}
+            clarification = response.get("clarification") or (
+                proposal if proposal.get("kind") == "clarification" else {}
+            )
+            operation = proposal if proposal.get("kind") == "operation" and not clarification else {}
+            prepared = response.get("prepared_request") or {}
             mode = response.get("mode", "all_tools")
             if mode == "semantic":
                 mode = "stateful" if os.environ["D36_MODE"] == "stateful" else "semantic"
             status = response.get("status", "http_error" if status_code >= 400 else "error")
             reason = failure.get("reason_code") if isinstance(failure, dict) else None
+            missing_fields = clarification.get("missing_fields")
+            canonical_missing_fields = (
+                sorted(set(missing_fields)) if isinstance(missing_fields, list) else None
+            )
             public = {"http_status": status_code, "status": status, "mode": mode,
                       "executed": bool(response.get("executed")),
                       "requires_confirmation": bool(response.get("requires_confirmation")),
-                      "operation_id": operation.get("operation_id"), "reason_code": reason,
+                      "operation_id": operation.get("operation_id"),
+                      "operation_version": operation.get("operation_version"),
+                      "arguments_sha256": (
+                          _hash(operation.get("arguments")) if operation else None
+                      ),
+                      "generate_after_save": operation.get("generate_after_save") if operation else None,
+                      "generation_requested": (
+                          prepared.get("generation_requested") if operation else None
+                      ),
+                      "clarification_missing_fields": canonical_missing_fields,
+                      "reason_code": reason,
                       "project_id": response.get("project_id"), "base_revision": response.get("base_revision"),
                       "result_revision": (response.get("result") or {}).get("revision"),
                       "job_id": (response.get("generation_result") or response.get("result") or {}).get("job_id")}
-            return {**{key: public[key] for key in ("http_status", "status", "mode", "executed", "requires_confirmation", "operation_id", "reason_code")},
+            return {**{key: public[key] for key in (
+                        "http_status", "status", "mode", "executed", "requires_confirmation",
+                        "operation_id", "operation_version", "arguments_sha256",
+                        "generate_after_save", "generation_requested",
+                        "clarification_missing_fields", "reason_code")},
                     "response_sha256": _hash(public)}
 
         def request_payload(request: dict[str, Any], *, text: str | None = None,

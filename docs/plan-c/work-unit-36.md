@@ -81,15 +81,22 @@ count. The adapter MUST return fixed `budget_exhausted` before an over-budget mo
 invocation, and reported aggregate calls and actual adapter calls MUST never exceed 4.
 The host MUST disable bytecode writes, prove a pre/post-equal candidate snapshot, and publish evidence with
 an atomic no-replace hard link so a competing destination is never overwritten.
+`RedactedResponse` MUST bind an accepted proposal with strict operation ID/version,
+canonical arguments SHA-256, `generate_after_save`, and prepared-request
+`generation_requested`, or bind a `needs_input` result to a sorted unique tuple drawn
+only from `target`, `arguments`, and `intent`. Its validator MUST enforce the applicable
+all-present/all-null shape by response status.
 `RedactedState` count maxima MUST accept the strict seed maxima plus up to four
 event/model effects: 17 projects, 36 history rows, 36 jobs, 68 artifacts, 36 receipts,
 36 external calls, 12 language requests, and 12 language turns. It MUST additionally
-publish canonical sorted bounded label-free projections for every history row
+publish canonical sorted bounded label-free projections for every project row, history row
 (project/revision/settings hash/changed fields/restore source), job row
 (identity/owner/status/stage/input revision/cancel flag/kind/block/parent), and artifact
 row (identity/owner/job/revision/input fingerprint/content and manifest hashes). These
-projections MUST contain no path, case text, model text, or label, and tuple lengths
-MUST equal their corresponding counts. The 68-artifact bound
+Project projections MUST include identity, revision/status/settings hash, every
+consequential mutable canonical-row field, hashes for sensitive text/content, and
+path-free artifact/output identities. All projections MUST contain no path, case text,
+model text, or label, and tuple lengths MUST equal their corresponding counts. The 68-artifact bound
 MUST include both independently valid 32-item artifact inputs. Any relationship that would make worker seeding impossible MUST be rejected before
 candidate invocation. This includes out-of-range or future artifact revisions, unknown
 project/job/artifact/history/receipt/call/prior-turn/parent/successor references,

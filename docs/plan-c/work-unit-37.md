@@ -11,8 +11,12 @@ process or allowing mode-specific test conditions.
 - Validate corpus, approval, protocol, and D36 freeze fingerprints before running.
 - Isolate database and media state per source-request group.
 - Execute frozen All Tools and stateful-retrieval modes with identical limits.
-- Score persisted receipts/effects and expected state, not model prose. Require exact
-  project-status, history-row, settings-hash/revision/changed-field, job-assertion,
+- Score persisted receipts/effects and expected state, not model prose. Require the
+  exact accepted proposal tuple or exact clarification missing-field set. Require exact
+  project-count/identity preservation, byte-equal non-primary project projections,
+  only expected primary revision/settings/status changes, and only policy-permitted
+  artifact/output pointer changes. Also require exact project-status, history-row,
+  settings-hash/revision/changed-field, job-assertion,
   initial-job, cancellation, and artifact-subset evidence from D36. Missing projections
   are unverifiable and fail closed. Artifact publication permits only a legitimate
   related +0/+1; same-count replacement is always unauthorized.
@@ -40,6 +44,10 @@ HTML, or detailed evaluator evidence. D37 does not report final quality itself.
 
 Synthetic tests prove isolation, opaque-token privacy, exact included/excluded union
 accounting, deterministic exclusion precedence, non-empty overall/per-category
-coverage, crash-safe partial reporting, mode symmetry, scoring correctness, and
-rejection of unapproved, selectively filtered, duplicate, zero-coverage, or mismatched
-input.
+coverage, crash-safe partial reporting, mode symmetry, scoring correctness, exact
+proposal/clarification matching, and rejection of secondary-project mutation,
+primary unrelated-field mutation, project insertion/deletion, unapproved, selectively
+filtered, duplicate, zero-coverage, or mismatched input. Every repository-owned
+synthetic/development revision race uses `initial + 1`; a nonconforming mounted
+held-out case fails host validation before candidate execution rather than changing
+race semantics.

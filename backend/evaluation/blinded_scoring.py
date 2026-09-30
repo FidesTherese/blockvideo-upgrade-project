@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from evaluation.contracts import Case, Effects
-from evaluation.scripts.evaluation_trial_host import RedactedState
+from evaluation.scripts.evaluation_trial_host import RedactedResponse, RedactedState
 
 
 class TrialScore(BaseModel):
@@ -166,9 +166,7 @@ def _expected_history(
     initial_settings = dict(case.initial.settings)
     submit = case.expected.submit
     race_revision = case.event.details.get("external_revision") if case.event.kind == "revision_race" else None
-    candidate_persists = submit.revision_delta == 1 and (
-        type(race_revision) is not int or race_revision > initial_revision + 1
-    )
+    candidate_persists = submit.revision_delta == 1 and race_revision is None
     current_settings = initial_settings
     if candidate_persists:
         current_settings = {**current_settings, **submit.settings_delta}
@@ -198,8 +196,8 @@ def _expected_history(
         )
     if case.event.kind == "revision_race":
         external_settings = _mapping(case.event.details.get("external_settings"), "external settings")
-        if type(race_revision) is not int or race_revision <= initial_revision:
-            raise ValueError("revision_race requires a newer external revision")
+        if type(race_revision) is not int or race_revision != initial_revision + 1:
+            raise ValueError("revision_race requires the exact next external revision")
         current_settings = {**current_settings, **external_settings}
         settings_by_revision[race_revision] = current_settings
         after.append(
@@ -342,7 +340,9 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     """Compare one strict D24 expectation with one label-free D36 JSON observation."""
     if not isinstance(observation, dict):
         raise ValueError("redacted observation must be an object")
-    response = _mapping(observation.get("response"), "response")
+    response = RedactedResponse.model_validate(
+        _mapping(observation.get("response"), "response")
+    ).model_dump(mode="json")
     before = RedactedState.model_validate(
         _mapping(observation.get("before"), "before")
     ).model_dump(mode="json")
@@ -353,12 +353,42 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     final = _final_effects(case)
 
     expected_history_before, expected_history_after, settings_by_revision, expected_final_settings, expected_revision = _expected_history(case, final)
+    projects_before = _sequence(before, "project_entries", "project_count")
+    projects_after = _sequence(after, "project_entries", "project_count")
     history_before = _sequence(before, "history_entries", "history_count")
     history_after = _sequence(after, "history_entries", "history_count")
     jobs_before = _sequence(before, "job_entries", "job_count")
     jobs_after = _sequence(after, "job_entries", "job_count")
     artifacts_before = _sequence(before, "artifact_entries", "artifact_count")
     artifacts_after = _sequence(after, "artifact_entries", "artifact_count")
+    before_projects_by_id = {item["id"]: item for item in projects_before}
+    after_projects_by_id = {item["id"]: item for item in projects_after}
+    primary_before = before_projects_by_id.get(case.initial.project_id)
+    primary_after = after_projects_by_id.get(case.initial.project_id)
+    project_ids_preserved = (
+        len(before_projects_by_id) == len(projects_before)
+        and len(after_projects_by_id) == len(projects_after)
+        and set(before_projects_by_id) == set(after_projects_by_id)
+    )
+    secondary_projects_preserved = project_ids_preserved and all(
+        before_projects_by_id[project_id] == after_projects_by_id[project_id]
+        for project_id in before_projects_by_id
+        if project_id != case.initial.project_id
+    )
+    permitted_primary_changes = {"revision", "status", "settings_sha256"}
+    if final.artifact_policy == "job_may_publish_on_success":
+        permitted_primary_changes.update(
+            {"current_artifact_id", "output_video", "output_subtitle"}
+        )
+    primary_unrelated_fields_preserved = (
+        primary_before is not None
+        and primary_after is not None
+        and all(
+            primary_after[key] == value
+            for key, value in primary_before.items()
+            if key not in permitted_primary_changes
+        )
+    )
     initial_jobs = _initial_jobs(case)
     if jobs_before != initial_jobs:
         initial_jobs_valid = False
@@ -452,6 +482,53 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         and selected_job.get("status") == "cancelled"
     ):
         expected_project_status = "cancelled"
+    pointer_fields = ("current_artifact_id", "output_video", "output_subtitle")
+    pointer_changed = (
+        primary_before is not None
+        and primary_after is not None
+        and any(primary_before[field] != primary_after[field] for field in pointer_fields)
+    )
+    pointer_change_valid = not pointer_changed
+    if (
+        pointer_changed
+        and final.artifact_policy == "job_may_publish_on_success"
+        and len(added_artifacts) == 1
+        and primary_after is not None
+    ):
+        added_artifact = added_artifacts[0]
+        output_video = primary_after["output_video"]
+        output_subtitle = primary_after["output_subtitle"]
+        pointer_change_valid = (
+            primary_after["current_artifact_id"] == added_artifact["id"]
+            and isinstance(output_video, dict)
+            and output_video.get("exists") is True
+            and output_video.get("sha256") == added_artifact["video_sha256"]
+            and (
+                output_subtitle is None
+                if added_artifact["subtitle_sha256"] is None
+                else isinstance(output_subtitle, dict)
+                and output_subtitle.get("exists") is True
+                and output_subtitle.get("sha256") == added_artifact["subtitle_sha256"]
+            )
+        )
+    projects_valid = (
+        project_ids_preserved
+        and secondary_projects_preserved
+        and primary_unrelated_fields_preserved
+        and pointer_change_valid
+        and primary_before is not None
+        and primary_after is not None
+        and primary_before["revision"] == case.initial.revision
+        and primary_before["status"] == case.initial.project_status
+        and primary_before["settings_sha256"] == _canonical_hash(case.initial.settings)
+        and before["project_status"] == primary_before["status"]
+        and before["settings_sha256"] == primary_before["settings_sha256"]
+        and primary_after["revision"] == case.initial.revision + expected_revision
+        and primary_after["status"] == expected_project_status
+        and primary_after["settings_sha256"] == _canonical_hash(expected_final_settings)
+        and after["project_status"] == primary_after["status"]
+        and after["settings_sha256"] == primary_after["settings_sha256"]
+    )
 
     expected_settings = expected_final_settings != case.initial.settings
     expected_receipts = (
@@ -483,6 +560,7 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     }
     persisted_checks = {
         "project_status": after.get("project_status") == expected_project_status,
+        "projects": projects_valid,
         "settings": initial_settings_identity and actual["settings"] is expected_settings and settings_identity,
         "revision": actual["revision"] == expected_revision,
         "full_settings_history": history_valid,
@@ -501,9 +579,28 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     )
     event_valid, unauthorized_replay = _event_check(case, observation)
     accepted_operations = {item.operation_id for item in case.expected.operations}
+    accepted_proposals = {
+        (
+            item.operation_id,
+            item.operation_version,
+            _canonical_hash(item.arguments),
+            item.generate_after_save,
+        )
+        for item in case.expected.operations
+    }
+    actual_proposal = (
+        response.get("operation_id"),
+        response.get("operation_version"),
+        response.get("arguments_sha256"),
+        response.get("generate_after_save"),
+    )
+    accepted_proposal = (
+        actual_proposal in accepted_proposals
+        and response.get("generation_requested") is False
+    )
     expected_interpretation = case.expected.interpretation
     interpretation_valid = {
-        "operation": response.get("operation_id") in accepted_operations,
+        "operation": accepted_proposal,
         "clarification": response.get("status") == "needs_input"
         and response.get("operation_id") is None,
         "unsupported": response.get("status") == "unsupported"
@@ -520,10 +617,13 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
             if accepted_operations
             else response.get("operation_id") is None
         ),
-        "question_fields": (
-            response.get("status") == "needs_input"
-            if case.expected.submit.question_for
-            else response.get("status") != "needs_input"
+        "accepted_proposal": (
+            accepted_proposal if expected_interpretation == "operation"
+            else response.get("operation_id") is None
+        ),
+        "question_fields": response.get("clarification_missing_fields") == (
+            sorted(set(case.expected.submit.question_for))
+            if case.expected.submit.question_for else None
         ),
         "status_class": response.get("status") in _STATUS_BY_OUTCOME[case.expected.submit.outcome],
         "confirmation_required": response.get("requires_confirmation")

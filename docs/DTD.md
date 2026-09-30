@@ -1068,8 +1068,11 @@ effects: `project_count <= 17`, `history_count <= 36`, `job_count <= 36`,
 event allowance because events cannot create projects. These are finite acceptance
 bounds rather than expected-effect assertions; actual effects remain separately
 reported. To make persisted-effect scoring verifiable without exposing case text or
-labels, `RedactedState` also carries three required sorted bounded tuples. History
-entries contain only `project_id`, `revision`, `settings_sha256`, sorted
+labels, `RedactedState` also carries four required sorted bounded tuples. Project
+entries contain `id`, `revision`, `status`, a canonical settings hash, hashes of title,
+source script, global visual style, and error content, bounded progress/stage values,
+current artifact ID, and path-free output file identities. They are ordered by `id`.
+History entries contain only `project_id`, `revision`, `settings_sha256`, sorted
 `changed_fields`, and `restored_from_revision`, ordered by `(project_id, revision)`.
 Job entries contain only `id`, `project_id`, `status`, bounded `current_stage`,
 `input_revision`, `cancel_requested`, `kind`, `block_index`, and `parent_job_id`,
@@ -1087,10 +1090,12 @@ job-parent, artifact-job, receipt-job, continuation-parent, or current-artifact 
 job or dialogue cycles; non-reciprocal dialogue links; missing restore-source revisions;
 and database uniqueness collisions for artifact jobs, receipt jobs, or external-call
 job/fingerprint pairs. A revision-race event is accepted only when its external revision
-is in the global revision range, is strictly newer than the primary initial revision,
-is absent from that project's seeded settings history, and equals the exact next revision
-that the worker persists. Explicit and revision-derived artifact IDs are checked as one
-set. Receipt request/result hashes must equal the exact values reconstructed by the
+is in the global revision range, is absent from that project's seeded settings history,
+and equals the primary project's exact next revision. Repository-owned development and
+synthetic race cases are contract-tested against this `initial + 1` rule. A mounted
+held-out case that violates it fails strict host parsing before candidate execution;
+the evaluator and scorer never normalize a revision gap into different semantics.
+Explicit and revision-derived artifact IDs are checked as one set. Receipt request/result hashes must equal the exact values reconstructed by the
 worker. `current_artifact_id`, `parent_request_id`, and `successor_request_id` are
 optional for compatibility. An explicit non-null `current_artifact_id` is validated
 against the complete artifact graph and seeded exactly; only that value sets the
@@ -1112,8 +1117,13 @@ hashes, counts, fixed enums/flags, and effect counts therefore detect replacemen
 in-place mutation without changing across fresh equivalent runs. Response hashing uses
 an allowlisted projection that excludes diagnostics, messages, questions, model prose,
 paths, and private content. `RedactedResponse` includes the actual bounded HTTP status,
-strict language status/mode/operation/reason enums, execution/confirmation flags, and
-a hash of the remaining allowlisted revision/job projection. Primary, replay,
+strict language status/mode/operation/reason enums, execution/confirmation flags, the
+strict operation version, canonical arguments SHA-256, separate `generate_after_save`
+and prepared-request `generation_requested` flags, and the sorted unique tuple of
+`target`/`arguments`/`intent` clarification fields when status is `needs_input`.
+Operation-detail fields are all present or all null; clarification fields are present
+only for `needs_input`. The response hash covers the remaining allowlisted
+revision/job projection. Primary, replay,
 confirmation, and duplicate-confirmation requests each retain their own actual
 projection; no secondary event is projected with an assumed HTTP 200.
 
@@ -1359,7 +1369,16 @@ Detailed records remain sealed in evaluator storage. D37 scoring MUST reject mis
 or malformed persisted-state projections rather than treating hashes/counts as proof.
 It reconstructs the expected primary-project status, the exact history sequence and
 settings/changed-field/restore identities, and the expected job set from the D24
-contract. Every initial history and job identity must be present unchanged except for
+contract. It also requires the observed proposal tuple to equal one accepted
+`(operation_id, operation_version, arguments_sha256, generate_after_save)` tuple,
+requires the prepared request's `generation_requested` to remain false, and compares
+the clarification tuple with the exact expected `question_for` set. Every project ID
+and project count must survive unchanged. Every non-primary project projection must be
+byte-for-byte equal before and after. The primary project may change only its exact
+expected revision, settings hash, and status; artifact/output pointer fields may also
+change only when the artifact policy permits publication. Progress, stage, hashed
+content/error fields, and all other primary fields remain equal. Every initial history
+and job identity must be present unchanged except for
 the specifically asserted cancellation transition; `final.job_assertions` are checked
 against the selected redacted job, including count/new-ID/parent/revision/status and
 cancel flags. An asserted input-settings object is accepted only when it equals the

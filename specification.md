@@ -212,10 +212,12 @@ in-place mutation. Logical-state hashes exclude timestamps, leases, owner tokens
 runtime durations, and normalize generated core-request and confirmation identifiers
 while preserving their equality relationships. Public observations contain only strict
 enums, actual per-event HTTP/status/reason projections, fixed failure classes,
-counts/flags, deterministic redacted hashes, canonical sorted bounded history/job/artifact
+counts/flags, deterministic redacted hashes, canonical sorted bounded project/history/job/artifact
 identity projections needed for persisted-effect scoring, and the pre/post-equal candidate
 snapshot hash; paths, settings values, timing, case text/labels, and private/model prose
-are excluded. Observation counts remain finite
+are excluded. Response projections bind exact operation ID/version/canonical-arguments
+hash/generation intent or exact sorted clarification missing fields, with status-specific
+nullability. Observation counts remain finite
 while accepting every valid seed and up to four event/model effects: projects 17,
 history 36, jobs 36, artifacts 68 (32 explicit plus 32 revision-derived plus four),
 receipts 36, external calls 36, language requests 12, and language turns 12. Derived artifact IDs must remain within the database integer range. The host validates
@@ -227,7 +229,9 @@ current/output pointers only for an explicit non-null, validated same-project ar
 graphs must be acyclic, dialogue links reciprocal, database-unique identities distinct,
 and receipt hashes reproducible. A revision-race event must use exactly the primary
 project's next revision, which must remain in bounds and must not collide with a seeded
-primary settings-history revision. `artifact_revisions` are strict integers from 1 through
+primary settings-history revision. Repository-owned development/synthetic races are
+contract-tested for this invariant; any held-out violation fails strict case parsing
+before candidate execution and is never semantically normalized. `artifact_revisions` are strict integers from 1 through
 the finite revision maximum and cannot exceed the primary project's current revision.
 Every D36 settings patch requires at least one supplied consumed field; omitted
 fields retain patch semantics, but any explicitly supplied `null` field invalidates
