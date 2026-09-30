@@ -1938,6 +1938,72 @@ aggregate hash. D38 source generation uses fixed `tool_name="d38_result_importer
 name and the exact source tuple as well as its aggregate. It never opens, enumerates,
 or reconstructs sealed detailed evidence.
 
+#### D38 fixed readers and historical source verification
+
+Read no-follow regular files with descriptor identity checks before strict canonical
+model validation. Fixed caps are: D36 completion marker 1 KiB, freeze manifest
+16 MiB, D36 attestation 1 MiB, D37 attestation 16 MiB, protocol 64 MiB and bundle
+128 MiB. Require the complete D36 three-file publication, exact marker fingerprint
+bindings, and agreement with `read_frozen_candidate`; do not accept a flattened copy.
+The supplied D36 attestation belongs to that publication. Require source
+`result-bundle.json`, `protocol.json` and `tool-attestation.json` in the declared
+regular evaluator run root. Placement is an operator-trusted provenance assertion,
+not proof of original physical location.
+
+Add `verify_historical_attestation(*, repo_root: Path, attestation: ToolAttestation,
+expected_tool_name: str, source_paths: tuple[str, ...]) -> None` in
+`tool_attestation.py`. Require the exact supplied inventory and expected tool name, validate
+its recorded full commit exists, recompute regular-blob sizes/hashes and aggregate
+from that commit, and fail closed on unavailable objects. Do not require historical
+working bytes or HEAD equality: D38 necessarily runs after D37. D36's inventory is
+its exact eleven-path source tuple; D37's is the recorded commit's evaluation/app
+Python tree plus operation definitions, backend manifests/lock and runner CLI. Derive
+that inventory through `historical_blinded_source_paths(*, repo_root: Path,
+git_commit: str) -> tuple[str, ...]` in the same attestation module, without importing
+the D37 runner; reject missing required paths, nonregular selected blobs and duplicate
+metadata. Bound selected Git tree metadata to 16 MiB, each blob to 8 MiB and the total inventory to 512 MiB;
+check native blob size before bounded/streamed content hashing. Current D38 generation
+still uses clean current-HEAD `attest_tool` and its exact 25-path closure. Historical
+verification is not attestation generation and never checks out or changes a commit.
+
+#### D38 accepted-triplet publication and errors
+
+Add this filesystem-only API in `blinded_io.py`, reusing D36 native directory anchor
+and no-replace rename primitives, not its candidate-specific marker claim:
+
+```python
+def publish_accepted_triplet(
+    *, output_dir: Path, accepted_result_bytes: bytes,
+    validation_bytes: bytes, tool_attestation_bytes: bytes,
+) -> None: ...
+```
+
+Retain and revalidate parent, randomized sibling stage and all three file identities.
+Create children exclusively; retain descriptors through writes, fsync and byte
+readback. The stage contains exactly `accepted-result.json`, `validation.json` and
+`d38-tool-attestation.json`: no marker or fourth file. On Linux use retained parent
+and stage descriptors for child access, verified descriptor aliases for native
+`renameat2(RENAME_NOREPLACE)`, and fsync stage/parent. On Windows retain the no-delete
+parent anchor, fsync files, close child descriptors under the live stage anchor,
+recheck identities, then release the stage anchor immediately before
+`MoveFileExW(..., 0)`. Do not claim Windows directory-fsync/power-loss guarantees.
+Other platforms fail closed without a native no-replace implementation.
+
+Any existing destination, including identical evidence, is refused. Never resume,
+overwrite, recursively clean, or remove a final. Before-rename failure may leave an
+unaccepted random stage; after-rename failure preserves the complete final. Lost
+ownership is failure, not permission for pathname cleanup. Parent directories are
+trusted/cooperatively controlled; unavoidable acquisition and Windows release gaps
+retain the already documented hostile-same-user exclusion. Successful publication
+has the exact complete triplet and no stage remainder.
+
+`result_import.py` defines `ResultImportError` with a fixed redacted refusal. CLI
+argument and runtime errors exit 2 without traceback, input content or path echo;
+success exits 0 and emits only fixed accepted status and verified opaque identities.
+Detached integrity and verified source blobs do not establish evaluator/provider
+truth; model identity still does not pin weights. No real acceptance is implied by
+synthetic fixtures.
+
 ### D39 external exact-candidate verification
 
 Materialization is a separate pre-smoke operation, not an internal side effect of the

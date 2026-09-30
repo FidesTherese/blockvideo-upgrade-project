@@ -27,6 +27,24 @@ not evidence that D38 has been implemented or integration approved.
 - Tests use synthetic bundles only.
 - Final delivery commit is `[DONE] Mission 38 Validate independent aggregate import`.
 
+The DTD's D38 fixed-reader/historical-source/publication sections are implementation
+contracts, not open choices. Read marker/freeze/D36/D37 artifacts with 1 KiB/16 MiB/
+1 MiB/16 MiB caps. Require complete D36 publication and exact run-root filenames;
+verify upstream source inventories/hashes against their own recorded Git commits,
+not current D38 working bytes. Add the keyword-only historical verifier in
+`tool_attestation.py`; unavailable commits fail closed. Bound selected Git metadata
+16 MiB, blobs 8 MiB and source total 512 MiB. Generate D38's own attestation against
+clean current HEAD with the unchanged 25-path tuple.
+
+Add `publish_accepted_triplet` in `blinded_io.py`: retained parent/stage/file
+identities, exactly three files, fsync/readback, D36 native no-replace directory
+rename, Linux descriptor aliases, and Windows parent anchor retained across the
+stage-release gap. Do not use D36's marker-specific publisher, add a fourth file,
+clean by pathname, overwrite, or resume. Existing finals are refused; failure may
+retain a non-evidentiary stage. Fixed redacted `ResultImportError`/CLI exit2 covers
+argument/runtime errors without traceback/content/path echo. Detached/source proof
+is not evaluator/provider truth. No new dependency, app/candidate/lock change.
+
 ---
 
 ### Task 1: Import the D37 aggregate contract and enforce accounting invariants
@@ -96,6 +114,8 @@ git commit -m "test: validate the shared D37 result bundle"
 **Files:**
 - Create: `backend/evaluation/result_import.py`
 - Create: `backend/scripts/import_evaluation_result.py`
+- Modify: `backend/evaluation/blinded_io.py` (exact triplet publisher)
+- Modify: `backend/evaluation/tool_attestation.py` (historical verification)
 - Modify: `backend/tests/test_d38_result_import.py`
 
 **Interfaces:**
@@ -129,7 +149,7 @@ def import_evaluation_result(
 CLI:
 
 ```text
-python -m scripts.import_evaluation_result --bundle D:/blockvideo-evaluator/results/result-bundle.json --expected-sha256 8f4d2c6c7b75b9f4f57432db19f92f657340f25da6ebf5f564531f7865b0b46e --freeze-manifest D:/blockvideo-evaluator/freeze-manifest.json --protocol D:/blockvideo-evaluator/results/protocol.json --d36-trial-tool-attestation D:/blockvideo-evaluator/d36-tool-attestation.json --d37-tool-attestation D:/blockvideo-evaluator/results/tool-attestation.json --repo-root .. --output ../release-evidence/d38
+python -m scripts.import_evaluation_result --bundle D:/blockvideo-evaluator/results/result-bundle.json --expected-sha256 8f4d2c6c7b75b9f4f57432db19f92f657340f25da6ebf5f564531f7865b0b46e --freeze-manifest D:/blockvideo-evaluator/d36/26933fe07103c402-522775516c07/freeze-manifest.json --protocol D:/blockvideo-evaluator/results/protocol.json --d36-trial-tool-attestation D:/blockvideo-evaluator/d36/26933fe07103c402-522775516c07/d36-tool-attestation.json --d37-tool-attestation D:/blockvideo-evaluator/results/tool-attestation.json --repo-root .. --output ../release-evidence/d38
 ```
 
 `ImportValidation` is frozen/strict/extra-forbid. `checks` must contain exactly these
@@ -179,8 +199,9 @@ exclusion reason, omitted trial, and injected raw ID/text/label field. Every cas
 - [ ] **Step 3: Implement atomic accepted evidence**
 
 Build `accepted-result.json`, `validation.json`, and `d38-tool-attestation.json` in a
-new owned staging directory, validate/fsync the complete triplet, and publish the whole
-directory no-replace using the established D36 publication primitive. Reject an
+new owned staging directory through `blinded_io.publish_accepted_triplet`, validate/
+fsync/readback the complete triplet, and publish the whole directory with D36's native
+anchor/rename primitives—not its marker-specific `_publish_staging` claim. Reject an
 existing final; never leave a partial accepted triplet or overwrite prior evidence. `accepted-result.json` is the canonical shared-schema bundle; `validation.json.accepted_bundle_sha256` hashes its exact bytes and records every upstream identity and the exact DTD-defined check-key set covering token
 syntax/uniqueness/sorting/disjointness/exact-union/count/non-empty-coverage/typed-
 reason/category and hash checks; `validation.json.d38_import_tool_sha256` equals the canonical `d38-tool-attestation.json.aggregate_sha256`. Attest project-root-relative importer/CLI plus the entire DTD-defined shared model,
