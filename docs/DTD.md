@@ -320,8 +320,11 @@ complete fingerprint inventory lexically. Manifest and blob caps are applied bef
 reading; index bytes and protocol/result field inventories remain unchanged. On
 Windows Python 3.12, path and descriptor `st_ctime_ns` can have different meanings;
 compare ctime within each path/descriptor pair, not across APIs. Device/inode/size
-and mtime must agree across all four observations. Tool-source files cap at 8 MiB each / 512 MiB total; index
-inventory cap is 4,096 files / 512 MiB total. Parse large artifacts sequentially and
+and mtime must agree across all four observations. Tool-source fingerprints reject files above 8 MiB before opening, reject growth
+while streaming, and compare pre/open/post regular-file identity/size. Source
+attestation tallies those bounded fingerprints and rejects inventories above
+512 MiB before producing an attestation. Index inventory caps are 4,096 files /
+512 MiB total. Parse large artifacts sequentially and
 release raw/decoded duplicates once hashes and validated models are retained.
 Maximum-topology byte arithmetic is proven; maximum-size parse time/memory is not.
 The runner and result validator now tally included category denominators once with

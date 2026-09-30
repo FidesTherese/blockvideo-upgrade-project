@@ -36,7 +36,7 @@ D24 `switch_target` changes only UI selection, then rereads the exact original r
 
 Protocol and result bundle caps are 64 MiB and 128 MiB respectively, each larger than an independently calculated maximum valid topology and used consistently for publication and readback. Stored media paths must be canonical relative POSIX paths; component and descriptor identities fail closed on links, reparses, special files, containment violations, or races. Missing media emits only the path hash. The design protects against cooperative path replacement, not a hostile same-user principal able to tamper with process memory or exploit unavoidable platform syscall gaps.
 
-Index files stream in 1 MiB chunks with pre/open/post identity checks, at most 4,096 files and 512 MiB total; manifest/blob caps are decimal 64,000/64,000,000 bytes. Result and runner category denominator tallies are single-pass; all existing equations, fields and accepted positive bytes are preserved.
+Index files stream in 1 MiB chunks with pre/open/post identity checks, at most 4,096 files and 512 MiB total; manifest/blob caps are decimal 64,000/64,000,000 bytes. Tool-source fingerprints separately cap each file at 8 MiB before reading and each attestation inventory at 512 MiB, with streamed pre/open/post identity checks. Result and runner category denominator tallies are single-pass; all existing equations, fields and accepted positive bytes are preserved.
 
 Candidate failures retain fixed classifications. Trusted-host logs remain bounded, but candidate stdout/stderr, prompts, bodies, and secrets are never persisted. A tooling-only fix changes D36/D37 attestations and requires regenerated downstream evidence without changing the D35 candidate.
 

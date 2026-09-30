@@ -372,6 +372,36 @@ def test_d36_attestation_binds_shared_host_parser_and_filesystem_dependencies(tm
         before = after
 
 
+def test_tool_source_blob_cap_rejects_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from evaluation import tool_attestation as tools
+
+    path = tmp_path / "synthetic.py"
+    with path.open("wb") as stream:
+        stream.truncate(8 * 1024 * 1024 + 1)
+
+    def forbidden_read(*args: Any, **kwargs: Any) -> bytes:
+        raise AssertionError("oversized tool source reached blob read")
+
+    monkeypatch.setattr(tools.os, "read", forbidden_read)
+    with pytest.raises(ValueError, match="size limit"):
+        tools.fingerprint_file(tmp_path, "synthetic.py")
+
+
+def test_tool_source_inventory_total_cap_prevents_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from evaluation import tool_attestation as tools
+
+    monkeypatch.setattr(tools, "validate_git_repository", lambda *args, **kwargs: "1" * 40)
+    monkeypatch.setattr(tools, "fingerprint_committed_file", lambda root, commit, relative:
+                        FileFingerprint(path=relative, sha256="1" * 64, size=8 * 1024 * 1024))
+    with pytest.raises(ValueError, match="source.*size limit"):
+        tools.attest_tool(repo_root=tmp_path, tool_name="synthetic", git_commit="1" * 40,
+                          source_paths=tuple(f"{i:04d}.py" for i in range(65)))
+
+
 def test_tool_fingerprint_path_has_explicit_boundary_limit() -> None:
     with pytest.raises(ValidationError):
         FileFingerprint(path="x" * 513, sha256="1" * 64, size=0)

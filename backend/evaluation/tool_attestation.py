@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _REPARSE_POINT = 0x400
+_MAX_SOURCE_BYTES = 8 * 1024 * 1024
+_MAX_SOURCE_TOTAL_BYTES = 512 * 1024 * 1024
 
 
 class FileFingerprint(BaseModel):
@@ -74,6 +76,8 @@ def fingerprint_file(repo_root: Path, relative_path: str) -> FileFingerprint:
     metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"tool source is not a regular file: {relative_path}")
+    if metadata.st_size > _MAX_SOURCE_BYTES:
+        raise ValueError("tool source exceeds its size limit")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -82,18 +86,27 @@ def fingerprint_file(repo_root: Path, relative_path: str) -> FileFingerprint:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _is_reparse(opened):
             raise ValueError(f"tool source is not a regular file: {relative_path}")
+        if ((metadata.st_dev, metadata.st_ino, metadata.st_size)
+                != (opened.st_dev, opened.st_ino, opened.st_size)):
+            raise ValueError("tool source changed while opening")
         digest = hashlib.sha256()
         size = 0
         while chunk := os.read(descriptor, 1024 * 1024):
-            digest.update(chunk)
             size += len(chunk)
+            if size > _MAX_SOURCE_BYTES:
+                raise ValueError("tool source exceeds its size limit")
+            digest.update(chunk)
         final = os.fstat(descriptor)
     finally:
         os.close(descriptor)
     identity = (metadata.st_dev, metadata.st_ino, metadata.st_size)
     opened_identity = (opened.st_dev, opened.st_ino, opened.st_size)
     final_identity = (final.st_dev, final.st_ino, final.st_size)
-    if identity != opened_identity or opened_identity != final_identity or size != opened.st_size:
+    after = path.lstat()
+    after_identity = (after.st_dev, after.st_ino, after.st_size)
+    if (identity != opened_identity or opened_identity != final_identity
+            or final_identity != after_identity or size != opened.st_size
+            or stat.S_ISLNK(after.st_mode) or _is_reparse(after) or not stat.S_ISREG(after.st_mode)):
         raise ValueError(f"tool source changed while hashing: {relative_path}")
     return FileFingerprint(path=relative_path, sha256=digest.hexdigest(), size=size)
 
@@ -182,7 +195,14 @@ def attest_tool(
         raise ValueError("tool source allowlist must be unique and sorted")
     root = repo_root.resolve(strict=True)
     head = validate_git_repository(root, expected_commit=git_commit)
-    files = [fingerprint_committed_file(root, head, path) for path in source_paths]
+    files: list[FileFingerprint] = []
+    total = 0
+    for path in source_paths:
+        fingerprint = fingerprint_committed_file(root, head, path)
+        total += fingerprint.size
+        if total > _MAX_SOURCE_TOTAL_BYTES:
+            raise ValueError("tool source inventory exceeds its size limit")
+        files.append(fingerprint)
     validate_git_repository(root, expected_commit=git_commit)
     if [fingerprint_committed_file(root, head, path) for path in source_paths] != files:
         raise ValueError("tool source changed while attesting")
