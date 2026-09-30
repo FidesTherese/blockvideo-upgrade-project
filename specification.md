@@ -214,8 +214,12 @@ while preserving their equality relationships. Public observations contain only 
 enums, actual per-event HTTP/status/reason projections, fixed failure classes,
 counts/flags, deterministic redacted hashes, canonical sorted bounded project/history/job/artifact
 identity projections needed for persisted-effect scoring, and the pre/post-equal candidate
-snapshot hash; paths, settings values, timing, case text/labels, and private/model prose
-are excluded. Response projections bind exact operation ID/version/canonical-arguments
+snapshot hash. File identities bind the SHA-256 of the canonical stored relative path
+string as well as content; a non-null stored path retains its path hash even when the
+file is missing, while raw and resolved paths are never emitted. D37 compares these
+path hashes for project output pointers and artifact video/subtitle identities, so
+same-content path replacement and missing-path substitution are unauthorized. Settings
+values, timing, case text/labels, and private/model prose are excluded. Response projections bind exact operation ID/version/canonical-arguments
 hash/generation intent or exact sorted clarification missing fields, with status-specific
 nullability. Observation counts remain finite
 while accepting every valid seed and up to four event/model effects: projects 17,

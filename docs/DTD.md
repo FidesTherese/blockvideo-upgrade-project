@@ -1071,15 +1071,24 @@ reported. To make persisted-effect scoring verifiable without exposing case text
 labels, `RedactedState` also carries four required sorted bounded tuples. Project
 entries contain `id`, `revision`, `status`, a canonical settings hash, hashes of title,
 source script, global visual style, and error content, bounded progress/stage values,
-current artifact ID, and path-free output file identities. They are ordered by `id`.
+current artifact ID, and path-free output file identities. A non-null stored output
+path projects `path_sha256 = SHA-256(UTF-8(canonical stored relative path))`; this is
+never derived from the storage root or a resolved absolute path. `path_sha256` remains
+required when the referenced file is missing. Existing files require non-null size and
+content hash; missing files require both values to be null; a null database pointer is
+represented by a null file identity. Project entries are ordered by `id`.
 History entries contain only `project_id`, `revision`, `settings_sha256`, sorted
 `changed_fields`, and `restored_from_revision`, ordered by `(project_id, revision)`.
 Job entries contain only `id`, `project_id`, `status`, bounded `current_stage`,
 `input_revision`, `cancel_requested`, `kind`, `block_index`, and `parent_job_id`,
 ordered by `id`. Artifact entries contain only `id`, `project_id`, `job_id`,
-`revision`, `input_fingerprint`, `video_sha256`, optional `subtitle_sha256`, and
-`manifest_sha256`, ordered by `id`. No entry contains paths, source/model text,
-messages, labels, or settings values. Tuple lengths MUST equal their corresponding
+`revision`, `input_fingerprint`, `video_path_sha256`, `video_sha256`, optional
+`subtitle_path_sha256`, optional `subtitle_sha256`, and `manifest_sha256`, ordered by
+`id`. The video path hash is required because an artifact always stores a video path.
+A subtitle content hash requires a subtitle path hash; a non-null subtitle path hash
+with null content hash represents a missing referenced subtitle. No entry contains raw
+or resolved paths, source/model text, messages, labels, or settings values. Tuple
+lengths MUST equal their corresponding
 counts, identities MUST be unique, and ordering MUST be canonical. The input validator accepts `artifact_revisions` only as strict integers from 1 through
 `10**12`, requires each to be no newer than the primary project, and requires the
 largest explicit artifact ID plus the revision-derived artifact count to fit
@@ -1388,8 +1397,11 @@ of the after tuple. `preserve_all_no_new_publication` permits no added artifact;
 `job_may_publish_on_success` permits zero or one new artifact, and one is legitimate
 only when it belongs to the target project and an observed new job, its revision
 equals that job's input revision, and its input fingerprint is a non-null lowercase
-SHA-256 identity. Same-count
-artifact replacement is always unauthorized. `after.project_status` must equal the
+SHA-256 identity. Artifact preservation compares video/subtitle path hashes together
+with content and metadata hashes. A permitted publication must bind each project
+output pointer's path hash and content hash to the added artifact's corresponding
+hashes. Same-content path replacement, missing-path substitution, and every other
+same-count artifact replacement are unauthorized. `after.project_status` must equal the
 status implied by the expected outcome and job assertions; a newly queued job implies
 `generating`, while other outcomes preserve the initial status unless the asserted
 job transition requires the candidate's defined terminal status. The shared model owns named

@@ -68,6 +68,27 @@ async def _quiescent_candidate_dispatcher() -> None:
     await asyncio.Event().wait()
 
 
+def _file_identity(storage_root: Path, relative: str | None) -> dict[str, Any] | None:
+    if relative is None:
+        return None
+    path_sha256 = hashlib.sha256(relative.encode("utf-8")).hexdigest()
+    path = storage_root / relative
+    if not path.is_file():
+        return {
+            "exists": False,
+            "path_sha256": path_sha256,
+            "size": None,
+            "sha256": None,
+        }
+    data = path.read_bytes()
+    return {
+        "exists": True,
+        "path_sha256": path_sha256,
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
 class _ModelCallBudget:
     def __init__(self, remaining: int) -> None:
         if type(remaining) is not int or not 0 <= remaining <= MODEL_CALL_LIMIT:
@@ -134,12 +155,15 @@ class RedactedResponse(_StrictRecord):
 
 class RedactedFileIdentity(_StrictRecord):
     exists: bool
+    path_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size: int | None = Field(default=None, ge=0, le=2**63 - 1)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def content_matches_existence(self) -> RedactedFileIdentity:
-        if self.exists != (self.size is not None and self.sha256 is not None):
+        has_size = self.size is not None
+        has_content_hash = self.sha256 is not None
+        if has_size != has_content_hash or self.exists != has_size:
             raise ValueError("file content identity must match existence")
         return self
 
@@ -196,9 +220,17 @@ class RedactedArtifactEntry(_StrictRecord):
     job_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
     revision: int | None = Field(default=None, ge=1, le=10**12)
     input_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    video_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    video_path_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    video_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    subtitle_path_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     subtitle_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def subtitle_content_requires_a_stored_path(self) -> RedactedArtifactEntry:
+        if self.subtitle_sha256 is not None and self.subtitle_path_sha256 is None:
+            raise ValueError("subtitle content hash requires subtitle path hash")
+        return self
 
 
 class RedactedState(_StrictRecord):
@@ -899,14 +931,10 @@ def _candidate_worker(model_call_budget: int) -> int:
                         successor_request_id=successor_request_id))
                 db.commit()
 
+        storage_root = Path(os.environ["D36_STORAGE_ROOT"])
+
         def file_identity(relative: str | None) -> dict[str, Any] | None:
-            if relative is None:
-                return None
-            path = Path(os.environ["D36_STORAGE_ROOT"]) / relative
-            if not path.is_file():
-                return {"exists": False}
-            data = path.read_bytes()
-            return {"exists": True, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            return _file_identity(storage_root, relative)
 
         def canonical_state() -> dict[str, Any]:
             with get_session_factory()() as db:
@@ -1008,7 +1036,11 @@ def _candidate_worker(model_call_budget: int) -> int:
                       "artifact_entries": [{"id": item["id"], "project_id": item["project_id"],
                           "job_id": item["job_id"], "revision": item["revision"],
                           "input_fingerprint": item["input_fingerprint"],
+                          "video_path_sha256": item["video"]["path_sha256"],
                           "video_sha256": item["video"]["sha256"],
+                          "subtitle_path_sha256": (
+                              item["subtitle"]["path_sha256"] if item["subtitle"] is not None else None
+                          ),
                           "subtitle_sha256": (
                               item["subtitle"]["sha256"] if item["subtitle"] is not None else None
                           ), "manifest_sha256": item["manifest_sha256"]}

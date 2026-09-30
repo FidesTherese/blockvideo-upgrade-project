@@ -502,12 +502,15 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
             primary_after["current_artifact_id"] == added_artifact["id"]
             and isinstance(output_video, dict)
             and output_video.get("exists") is True
+            and output_video.get("path_sha256") == added_artifact["video_path_sha256"]
             and output_video.get("sha256") == added_artifact["video_sha256"]
             and (
                 output_subtitle is None
-                if added_artifact["subtitle_sha256"] is None
+                if added_artifact["subtitle_path_sha256"] is None
                 else isinstance(output_subtitle, dict)
                 and output_subtitle.get("exists") is True
+                and output_subtitle.get("path_sha256")
+                == added_artifact["subtitle_path_sha256"]
                 and output_subtitle.get("sha256") == added_artifact["subtitle_sha256"]
             )
         )

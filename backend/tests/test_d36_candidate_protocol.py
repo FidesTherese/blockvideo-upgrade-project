@@ -354,10 +354,12 @@ def _worker_observation() -> dict[str, Any]:
             "job_entries": [],
             "artifact_entries": [
                 {"id": 1, "project_id": 1, "job_id": None, "revision": 1,
-                 "input_fingerprint": None, "video_sha256": "1" * 64,
+                 "input_fingerprint": None, "video_path_sha256": "0" * 64,
+                 "video_sha256": "1" * 64, "subtitle_path_sha256": None,
                  "subtitle_sha256": None, "manifest_sha256": "2" * 64},
                 {"id": 2, "project_id": 1, "job_id": None, "revision": 1,
-                 "input_fingerprint": None, "video_sha256": "3" * 64,
+                 "input_fingerprint": None, "video_path_sha256": "2" * 64,
+                 "video_sha256": "3" * 64, "subtitle_path_sha256": None,
                  "subtitle_sha256": None, "manifest_sha256": "4" * 64},
             ],
         },
@@ -398,10 +400,12 @@ def _worker_observation() -> dict[str, Any]:
             "job_entries": [],
             "artifact_entries": [
                 {"id": 1, "project_id": 1, "job_id": None, "revision": 1,
-                 "input_fingerprint": None, "video_sha256": "1" * 64,
+                 "input_fingerprint": None, "video_path_sha256": "0" * 64,
+                 "video_sha256": "1" * 64, "subtitle_path_sha256": None,
                  "subtitle_sha256": None, "manifest_sha256": "2" * 64},
                 {"id": 2, "project_id": 1, "job_id": None, "revision": 1,
-                 "input_fingerprint": None, "video_sha256": "3" * 64,
+                 "input_fingerprint": None, "video_path_sha256": "2" * 64,
+                 "video_sha256": "3" * 64, "subtitle_path_sha256": None,
                  "subtitle_sha256": None, "manifest_sha256": "4" * 64},
             ],
         },
@@ -1606,6 +1610,41 @@ def test_real_worker_seeds_complete_allowed_initial_state(tmp_path: Path) -> Non
     assert observation.before.language_request_count == observation.before.language_turn_count == 1
 
 
+def test_file_identity_hashes_stored_relative_path_even_when_file_is_missing(
+    tmp_path: Path,
+) -> None:
+    relative = "projects/101/history/job-00000001/video.mp4"
+    expected_path_sha256 = hashlib.sha256(relative.encode("utf-8")).hexdigest()
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_file = first_root / relative
+    second_file = second_root / relative
+    first_file.parent.mkdir(parents=True)
+    second_file.parent.mkdir(parents=True)
+    first_file.write_bytes(b"same-content")
+    second_file.write_bytes(b"same-content")
+
+    first = trial_host._file_identity(first_root, relative)
+    second = trial_host._file_identity(second_root, relative)
+    missing = trial_host._file_identity(tmp_path / "missing-root", relative)
+
+    assert first == second
+    assert first == {
+        "exists": True,
+        "path_sha256": expected_path_sha256,
+        "size": 12,
+        "sha256": hashlib.sha256(b"same-content").hexdigest(),
+    }
+    assert missing == {
+        "exists": False,
+        "path_sha256": expected_path_sha256,
+        "size": None,
+        "sha256": None,
+    }
+    assert relative not in json.dumps(first)
+    assert str(first_file.resolve()) not in json.dumps(first)
+
+
 def test_redacted_response_requires_exact_operation_and_clarification_shapes() -> None:
     value = _worker_observation()["response"]
     response = trial_host.RedactedResponse.model_validate(value)
@@ -1646,8 +1685,36 @@ def test_redacted_state_requires_exact_sorted_label_free_persisted_projections()
     assert state.history_entries[0].changed_fields == ("subtitle_font_size",)
     assert [item.id for item in state.project_entries] == [1]
     assert [item.id for item in state.artifact_entries] == [1, 2]
-    assert "path" not in state.model_dump_json()
+    serialized = state.model_dump(mode="json")
+    assert all("path" not in item for item in serialized["project_entries"])
+    assert all("video_path" not in item and "subtitle_path" not in item
+               for item in serialized["artifact_entries"])
     assert "text" not in state.model_dump_json()
+
+    valid_file_identities = (
+        {"exists": True, "path_sha256": "1" * 64, "size": 1, "sha256": "2" * 64},
+        {"exists": False, "path_sha256": "3" * 64, "size": None, "sha256": None},
+    )
+    for identity in valid_file_identities:
+        trial_host.RedactedFileIdentity.model_validate(identity)
+
+    for identity in (
+        {"exists": False, "path_sha256": None, "size": None, "sha256": None},
+        {"exists": False, "path_sha256": "3" * 64, "size": 1, "sha256": None},
+        {"exists": True, "path_sha256": "1" * 64, "size": None, "sha256": "2" * 64},
+    ):
+        with pytest.raises(ValidationError):
+            trial_host.RedactedFileIdentity.model_validate(identity)
+
+    for mutation in ("missing_video_path_hash", "subtitle_hash_without_path_hash"):
+        invalid_artifact = json.loads(json.dumps(value))
+        artifact = invalid_artifact["artifact_entries"][0]
+        if mutation == "missing_video_path_hash":
+            artifact.pop("video_path_sha256")
+        else:
+            artifact["subtitle_sha256"] = "5" * 64
+        with pytest.raises(ValidationError):
+            trial_host.RedactedState.model_validate(invalid_artifact)
 
     unsorted = json.loads(json.dumps(value))
     unsorted["artifact_entries"].reverse()

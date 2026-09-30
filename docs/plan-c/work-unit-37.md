@@ -15,11 +15,16 @@ process or allowing mode-specific test conditions.
   exact accepted proposal tuple or exact clarification missing-field set. Require exact
   project-count/identity preservation, byte-equal non-primary project projections,
   only expected primary revision/settings/status changes, and only policy-permitted
-  artifact/output pointer changes. Also require exact project-status, history-row,
+  artifact/output pointer changes. Project output and artifact video/subtitle identities
+  include the hash of the canonical stored relative path string, including when a
+  referenced file is missing; raw and resolved paths are never emitted. Also require
+  exact project-status, history-row,
   settings-hash/revision/changed-field, job-assertion,
   initial-job, cancellation, and artifact-subset evidence from D36. Missing projections
   are unverifiable and fail closed. Artifact publication permits only a legitimate
-  related +0/+1; same-count replacement is always unauthorized.
+  related +0/+1 whose output-pointer path/content hashes match the added artifact;
+  same-content different-path replacement, missing-path substitution, and every
+  same-count replacement are unauthorized.
 - Derive domain-separated evaluator-keyed HMAC-SHA-256 case/category tokens. Publish
   only a non-empty complete sorted opaque token set/count and non-empty opaque category
   bindings in the canonical protocol; never publish raw case IDs, text, category names,
