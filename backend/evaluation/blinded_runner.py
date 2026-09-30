@@ -1,26 +1,41 @@
 """Crash-safe external D37 blinded evaluator orchestration."""
 from __future__ import annotations
 
-import asyncio
-import ctypes
 import hashlib
 import json
 import os
 import re
-import secrets
-import signal
 import stat
 import subprocess
-import sys
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from evaluation.blinded_io import (
+    ensure_writable_directory as _ensure_writable_directory,
+    is_reparse as _is_reparse,
+    publish_immutable as _publish_immutable,
+    read_regular as _read_regular,
+    require_directory as _require_directory,
+    validate_directory as _validate_directory,
+    write_atomic as _write_atomic,
+    write_exclusive as _write_exclusive,
+    write_or_validate_immutable as _write_or_validate_immutable,
+)
+from evaluation.blinded_runtime import (
+    CandidateAnchor as _CandidateAnchor,
+    assert_candidate_anchor as _assert_candidate_anchor,
+    canonical_candidate_root as _canonical_candidate_root,
+    close_candidate_anchor as _close_candidate_anchor,
+    invoke_trial_host as _invoke_trial_host,
+    open_candidate_anchor as _open_candidate_anchor,
+)
+
 from evaluation.blinded_contracts import (
+    MAX_PROTOCOL_BYTES,
     EvaluationProtocol,
     case_category_bindings,
     opaque_case_token,
@@ -33,6 +48,7 @@ from evaluation.release_candidate.freeze import read_frozen_candidate
 from evaluation.release_candidate.fingerprints import aggregate_fingerprints
 from evaluation.release_candidate.contracts import FreezeManifest
 from evaluation.result_contracts import (
+    MAX_RESULT_BUNDLE_BYTES,
     CategoryResult,
     EvaluationResultBundle,
     ExcludedCaseToken,
@@ -77,23 +93,6 @@ _D37_REQUIRED_PATHS = (
 _PUBLIC_RESULT_NAME = "result-bundle.json"
 _PARTIAL_NAME = "partial-result.json"
 _PROTOCOL_NAME = "protocol.json"
-_REPARSE_POINT = 0x400
-_MAX_JSON_BYTES = 16 * 1024 * 1024
-_HOST_WATCHDOG_SECONDS = 180 * 4 + 30
-_HOST_OUTPUT_CAP_BYTES = 2 * 1024 * 1024
-_HOST_PIPE_DRAIN_GRACE_SECONDS = 1.0
-_HOST_TEARDOWN_SECONDS = 10.0
-_FILE_SHARE_READ = 0x1
-_FILE_SHARE_WRITE = 0x2
-_GENERIC_READ = 0x80000000
-_OPEN_EXISTING = 3
-_FILE_ATTRIBUTE_DIRECTORY = 0x10
-_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
-_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
-_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
-_PROCESS_SET_QUOTA = 0x0100
-_PROCESS_TERMINATE = 0x0001
 _TEMP_PATTERN = re.compile(r"^\.(?P<final>[^/\\]+)\.tmp-[0-9a-f]{64}$")
 _TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MODES = ("all_tools", "stateful")
@@ -110,16 +109,6 @@ class _TrialRecord(BaseModel):
     outcome: Literal["completed", "transport_failure", "deadline_failure"]
     score: TrialScore | None
     candidate_snapshot_sha256: str | None
-
-
-@dataclass
-class _CandidateAnchor:
-    canonical_path: Path
-    execution_path: Path
-    identity: tuple[int, int]
-    descriptor: int | None = None
-    handle: int | None = None
-    closed: bool = False
 
 
 class _RunContext(BaseModel):
@@ -145,249 +134,6 @@ def _canonical_file_bytes(value: BaseModel | dict[str, object]) -> bytes:
     return canonical_json_bytes(value) + b"\n"
 
 
-def _is_reparse(metadata: os.stat_result) -> bool:
-    return bool(getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT)
-
-
-def _validate_directory(path: Path, description: str) -> Path:
-    metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISDIR(
-        metadata.st_mode
-    ):
-        raise ValueError(f"{description} must be a non-symlink, non-reparse directory")
-    resolved = path.resolve(strict=True)
-    if resolved != path.absolute():
-        raise ValueError(f"{description} has an unsafe path component")
-    return resolved
-
-
-def _create_directory_tree(path: Path, description: str) -> Path:
-    absolute = path.absolute()
-    missing: list[str] = []
-    current = absolute
-    while True:
-        try:
-            _validate_directory(current, description)
-            break
-        except FileNotFoundError:
-            if current.parent == current:
-                raise ValueError(f"{description} has no existing directory ancestor") from None
-            missing.append(current.name)
-            current = current.parent
-    for name in reversed(missing):
-        if not name or name in {".", ".."} or Path(name).name != name:
-            raise ValueError(f"{description} contains an unsafe component")
-        child = current / name
-        try:
-            child.mkdir()
-        except FileExistsError:
-            pass
-        current = _validate_directory(child, description)
-    return _validate_directory(absolute, description)
-
-
-def _require_directory(path: Path, description: str, *, create: bool = False) -> Path:
-    return (
-        _create_directory_tree(path, description)
-        if create
-        else _validate_directory(path.absolute(), description)
-    )
-
-
-def _ensure_writable_directory(root: Path, *parts: str) -> Path:
-    current = _validate_directory(root.absolute(), "evaluation output")
-    for part in parts:
-        if not part or part in {".", ".."} or Path(part).name != part:
-            raise ValueError("evaluation output directory component is invalid")
-        child = current / part
-        try:
-            child.mkdir()
-        except FileExistsError:
-            pass
-        current = _validate_directory(child, "evaluation output directory")
-    return current
-
-
-def _read_regular(path: Path, *, maximum: int = _MAX_JSON_BYTES) -> bytes:
-    metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISREG(
-        metadata.st_mode
-    ):
-        raise ValueError("input must be a regular file")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or _is_reparse(opened)
-            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
-        ):
-            raise ValueError("input identity changed")
-        value = os.read(descriptor, maximum + 1)
-        final = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    after = path.lstat()
-    identities = {
-        (metadata.st_dev, metadata.st_ino, metadata.st_size),
-        (opened.st_dev, opened.st_ino, opened.st_size),
-        (final.st_dev, final.st_ino, final.st_size),
-        (after.st_dev, after.st_ino, after.st_size),
-    }
-    if (
-        len(value) > maximum
-        or len(value) != opened.st_size
-        or len(identities) != 1
-        or stat.S_ISLNK(after.st_mode)
-        or _is_reparse(after)
-        or not stat.S_ISREG(after.st_mode)
-    ):
-        raise ValueError("input changed or exceeds its size limit")
-    return value
-
-
-def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _write_exclusive(path: Path, value: bytes) -> None:
-    _validate_directory(path.parent.absolute(), "exclusive output parent")
-    flags = (
-        os.O_CREAT
-        | os.O_EXCL
-        | os.O_WRONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        offset = 0
-        while offset < len(value):
-            offset += os.write(descriptor, value[offset:])
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    _fsync_directory(path.parent)
-
-
-def _write_atomic(path: Path, value: bytes) -> None:
-    parent = _validate_directory(path.parent.absolute(), "output parent")
-    try:
-        current = path.lstat()
-    except FileNotFoundError:
-        current = None
-    if current is not None and (
-        stat.S_ISLNK(current.st_mode)
-        or _is_reparse(current)
-        or not stat.S_ISREG(current.st_mode)
-    ):
-        raise ValueError("output must be a regular non-link file")
-    temporary = parent / f".{path.name}.tmp-{secrets.token_hex(32)}"
-    descriptor = os.open(
-        temporary,
-        os.O_CREAT
-        | os.O_EXCL
-        | os.O_WRONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
-    try:
-        offset = 0
-        while offset < len(value):
-            offset += os.write(descriptor, value[offset:])
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        os.replace(temporary, path)
-        _fsync_directory(parent)
-        if _read_regular(path, maximum=len(value)) != value:
-            raise ValueError("atomic output changed after publication")
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def _publish_immutable(path: Path, value: bytes, description: str) -> Path:
-    parent = _validate_directory(path.parent.absolute(), f"{description} parent")
-    if path.parent.absolute() != parent:
-        raise ValueError(f"{description} parent identity changed")
-    temporary = parent / f".{path.name}.tmp-{secrets.token_hex(32)}"
-    flags = (
-        os.O_CREAT
-        | os.O_EXCL
-        | os.O_WRONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    descriptor = os.open(temporary, flags, 0o600)
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or _is_reparse(opened):
-            raise ValueError(f"{description} temporary is not a regular file")
-        offset = 0
-        while offset < len(value):
-            offset += os.write(descriptor, value[offset:])
-        os.fsync(descriptor)
-        final = os.fstat(descriptor)
-        if (
-            (opened.st_dev, opened.st_ino) != (final.st_dev, final.st_ino)
-            or final.st_size != len(value)
-        ):
-            raise ValueError(f"{description} temporary identity changed")
-    finally:
-        os.close(descriptor)
-    try:
-        try:
-            os.link(temporary, path, follow_symlinks=False)
-        except FileExistsError:
-            try:
-                existing = _read_regular(path, maximum=len(value))
-            except (OSError, ValueError) as error:
-                raise ValueError(f"existing {description} is invalid") from error
-            if existing != value:
-                raise ValueError(
-                    f"existing {description} bytes do not match this run"
-                ) from None
-        else:
-            temporary_stat = temporary.lstat()
-            published_stat = path.lstat()
-            if (
-                stat.S_ISLNK(published_stat.st_mode)
-                or _is_reparse(published_stat)
-                or not stat.S_ISREG(published_stat.st_mode)
-                or (temporary_stat.st_dev, temporary_stat.st_ino)
-                != (published_stat.st_dev, published_stat.st_ino)
-            ):
-                raise ValueError(f"{description} publication identity changed")
-            _fsync_directory(parent)
-        if _read_regular(path, maximum=len(value)) != value:
-            raise ValueError(f"{description} bytes changed after publication")
-        return path
-    finally:
-        try:
-            metadata = temporary.lstat()
-            if stat.S_ISREG(metadata.st_mode) and not _is_reparse(metadata):
-                temporary.unlink()
-                _fsync_directory(parent)
-        except FileNotFoundError:
-            pass
-
-
-def _write_or_validate_immutable(path: Path, expected: bytes, description: str) -> Path:
-    return _publish_immutable(path, expected, description)
-
-
 def write_run_protocol_exclusive(
     output_root: Path, protocol: EvaluationProtocol
 ) -> Path:
@@ -395,7 +141,9 @@ def write_run_protocol_exclusive(
     root = _require_directory(output_root, "evaluation output", create=True)
     path = root / _PROTOCOL_NAME
     expected = _canonical_file_bytes(protocol)
-    return _write_or_validate_immutable(path, expected, "protocol")
+    return _write_or_validate_immutable(
+        path, expected, "protocol", maximum=MAX_PROTOCOL_BYTES
+    )
 
 
 def _unlabeled_bytes(case: UnlabeledTrialCase) -> bytes:
@@ -523,10 +271,7 @@ def case_to_unlabeled(case: Case) -> UnlabeledTrialCase:
         event.update(
             {
                 "selected_project_id_after": details["selected_project_id_after"],
-                "replacement_text": details["replacement_text"],
-                "replacement_target_project_id": details[
-                    "replacement_target_project_id"
-                ],
+                "action": details["action"],
             }
         )
     initial = {
@@ -617,210 +362,6 @@ _D37_SOURCE_PATHS = tuple(
         }
     )
 )
-
-
-class _IoCounters(ctypes.Structure):
-    _fields_ = [
-        ("read_operation_count", ctypes.c_uint64),
-        ("write_operation_count", ctypes.c_uint64),
-        ("other_operation_count", ctypes.c_uint64),
-        ("read_transfer_count", ctypes.c_uint64),
-        ("write_transfer_count", ctypes.c_uint64),
-        ("other_transfer_count", ctypes.c_uint64),
-    ]
-
-
-class _BasicLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("per_process_user_time_limit", ctypes.c_int64),
-        ("per_job_user_time_limit", ctypes.c_int64),
-        ("limit_flags", ctypes.c_uint32),
-        ("minimum_working_set_size", ctypes.c_size_t),
-        ("maximum_working_set_size", ctypes.c_size_t),
-        ("active_process_limit", ctypes.c_uint32),
-        ("affinity", ctypes.c_size_t),
-        ("priority_class", ctypes.c_uint32),
-        ("scheduling_class", ctypes.c_uint32),
-    ]
-
-
-class _ExtendedLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("basic_limit_information", _BasicLimitInformation),
-        ("io_info", _IoCounters),
-        ("process_memory_limit", ctypes.c_size_t),
-        ("job_memory_limit", ctypes.c_size_t),
-        ("peak_process_memory_used", ctypes.c_size_t),
-        ("peak_job_memory_used", ctypes.c_size_t),
-    ]
-
-
-class _ByHandleFileInformation(ctypes.Structure):
-    _fields_ = [
-        ("file_attributes", ctypes.c_uint32),
-        ("creation_time_low", ctypes.c_uint32),
-        ("creation_time_high", ctypes.c_uint32),
-        ("last_access_time_low", ctypes.c_uint32),
-        ("last_access_time_high", ctypes.c_uint32),
-        ("last_write_time_low", ctypes.c_uint32),
-        ("last_write_time_high", ctypes.c_uint32),
-        ("volume_serial_number", ctypes.c_uint32),
-        ("file_size_high", ctypes.c_uint32),
-        ("file_size_low", ctypes.c_uint32),
-        ("number_of_links", ctypes.c_uint32),
-        ("file_index_high", ctypes.c_uint32),
-        ("file_index_low", ctypes.c_uint32),
-    ]
-
-
-def _windows_directory_identity(handle: int) -> tuple[int, int]:
-    information = _ByHandleFileInformation()
-    get_information = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandle
-    get_information.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ByHandleFileInformation)]
-    get_information.restype = ctypes.c_int
-    if not get_information(ctypes.c_void_p(handle), ctypes.byref(information)):
-        error = ctypes.get_last_error()
-        raise OSError(error, "GetFileInformationByHandle failed for candidate directory")
-    if (
-        not information.file_attributes & _FILE_ATTRIBUTE_DIRECTORY
-        or information.file_attributes & _REPARSE_POINT
-    ):
-        raise ValueError("candidate anchor must be a non-reparse directory")
-    file_index = (information.file_index_high << 32) | information.file_index_low
-    return information.volume_serial_number, file_index
-
-
-def _windows_open_candidate_directory(path: Path) -> int:
-    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
-    create_file.argtypes = [
-        ctypes.c_wchar_p,
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-    ]
-    create_file.restype = ctypes.c_void_p
-    handle = create_file(
-        str(path),
-        _GENERIC_READ,
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
-        None,
-        _OPEN_EXISTING,
-        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-        None,
-    )
-    invalid_handle = ctypes.c_void_p(-1).value
-    if handle in (None, invalid_handle):
-        error = ctypes.get_last_error()
-        raise OSError(error, "CreateFileW failed for candidate directory")
-    return int(handle)
-
-
-def _windows_close_handle(handle: int) -> None:
-    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
-    close_handle.argtypes = [ctypes.c_void_p]
-    close_handle.restype = ctypes.c_int
-    if not close_handle(ctypes.c_void_p(handle)):
-        error = ctypes.get_last_error()
-        raise OSError(error, "CloseHandle failed for candidate directory")
-
-
-def _open_candidate_anchor(candidate_root: Path) -> _CandidateAnchor:
-    canonical = _canonical_candidate_root(candidate_root)
-    if os.name == "nt":
-        handle = _windows_open_candidate_directory(canonical)
-        try:
-            identity = _windows_directory_identity(handle)
-        except BaseException:
-            _windows_close_handle(handle)
-            raise
-        return _CandidateAnchor(
-            canonical_path=canonical,
-            execution_path=canonical,
-            identity=identity,
-            handle=handle,
-        )
-    if os.name != "posix" or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
-        raise ValueError("candidate directory anchoring is unsupported on this platform")
-    descriptor = os.open(canonical, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
-            raise ValueError("candidate anchor must be a non-reparse directory")
-        execution = Path(f"/proc/{os.getpid()}/fd/{descriptor}")
-        if not execution.exists() or execution.resolve(strict=True) != canonical:
-            raise ValueError("stable candidate fd path is unavailable on this POSIX host")
-        return _CandidateAnchor(
-            canonical_path=canonical,
-            execution_path=execution,
-            identity=(metadata.st_dev, metadata.st_ino),
-            descriptor=descriptor,
-        )
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
-def _close_candidate_anchor(anchor: _CandidateAnchor) -> None:
-    if anchor.closed:
-        return
-    anchor.closed = True
-    if anchor.handle is not None:
-        handle = anchor.handle
-        anchor.handle = None
-        _windows_close_handle(handle)
-    if anchor.descriptor is not None:
-        descriptor = anchor.descriptor
-        anchor.descriptor = None
-        os.close(descriptor)
-
-
-def _candidate_path_identity(path: Path) -> tuple[int, int]:
-    if os.name == "nt":
-        handle = _windows_open_candidate_directory(path)
-        try:
-            return _windows_directory_identity(handle)
-        finally:
-            _windows_close_handle(handle)
-    metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISDIR(
-        metadata.st_mode
-    ):
-        raise ValueError("candidate root must remain a non-link directory")
-    return metadata.st_dev, metadata.st_ino
-
-
-def _assert_candidate_anchor(anchor: _CandidateAnchor) -> None:
-    if anchor.closed:
-        raise ValueError("candidate directory anchor is closed")
-    if anchor.handle is not None:
-        retained = _windows_directory_identity(anchor.handle)
-    elif anchor.descriptor is not None:
-        metadata = os.fstat(anchor.descriptor)
-        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
-            raise ValueError("candidate directory anchor changed type")
-        retained = metadata.st_dev, metadata.st_ino
-    else:
-        raise ValueError("candidate directory anchor is unavailable")
-    if retained != anchor.identity or _candidate_path_identity(anchor.canonical_path) != anchor.identity:
-        raise ValueError("candidate directory identity changed during evaluation")
-
-
-def _canonical_candidate_root(candidate_root: Path) -> Path:
-    supplied = candidate_root.absolute()
-    metadata = supplied.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISDIR(
-        metadata.st_mode
-    ):
-        raise ValueError("candidate root must be a non-link directory")
-    resolved = supplied.resolve(strict=True)
-    if resolved != supplied:
-        raise ValueError("candidate root contains an unsafe path component")
-    backend = resolved / "backend"
-    _validate_directory(backend, "candidate backend")
-    return resolved
 
 
 def _validate_candidate(candidate_root: Path, manifest: Any) -> None:
@@ -972,7 +513,9 @@ def _validate_output_location(output_root: Path, protected_roots: tuple[Path, ..
 def _validate_run_artifacts(
     root: Path, protocol_raw: bytes, tool_attestation_raw: bytes
 ) -> None:
-    if _read_regular(root / _PROTOCOL_NAME, maximum=len(protocol_raw)) != protocol_raw:
+    if _read_regular(
+        root / _PROTOCOL_NAME, maximum=MAX_PROTOCOL_BYTES
+    ) != protocol_raw:
         raise ValueError("immutable protocol changed during evaluation")
     if _read_regular(
         root / "tool-attestation.json", maximum=len(tool_attestation_raw)
@@ -1114,340 +657,6 @@ def _next_attempt(mode_root: Path) -> Path:
         existing.append(int(entry.name))
     name = f"{max(existing, default=0) + 1:06d}"
     return _ensure_writable_directory(attempts, name)
-
-
-def _clean_subprocess_environment(tool_root: Path) -> dict[str, str]:
-    retained = ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP")
-    environment = {name: os.environ[name] for name in retained if name in os.environ}
-    environment.update(
-        {
-            "PYTHONIOENCODING": "utf-8",
-            "PYTHONHASHSEED": "0",
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPATH": str(tool_root / "backend"),
-        }
-    )
-    return environment
-
-
-def _open_exclusive_regular(path: Path, description: str) -> int:
-    _validate_directory(path.parent.absolute(), f"{description} parent")
-    descriptor = os.open(
-        path,
-        os.O_CREAT
-        | os.O_EXCL
-        | os.O_WRONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
-    metadata = os.fstat(descriptor)
-    if not stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata):
-        os.close(descriptor)
-        raise ValueError(f"{description} must be a regular file")
-    return descriptor
-
-
-async def _bounded_stream(
-    stream: asyncio.StreamReader,
-    descriptor: int,
-    overflow: asyncio.Event,
-    budget: list[int],
-    budget_lock: asyncio.Lock,
-) -> None:
-    try:
-        while chunk := await stream.read(65536):
-            async with budget_lock:
-                remaining = _HOST_OUTPUT_CAP_BYTES - budget[0]
-                written = chunk[: max(0, remaining)]
-                budget[0] += len(written)
-                if len(chunk) > remaining:
-                    overflow.set()
-            offset = 0
-            while offset < len(written):
-                offset += os.write(descriptor, written[offset:])
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _attach_windows_job(process: asyncio.subprocess.Process) -> None:
-    if os.name != "nt":
-        return
-    create_job = ctypes.WinDLL("kernel32", use_last_error=True).CreateJobObjectW
-    create_job.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
-    create_job.restype = ctypes.c_void_p
-    job = create_job(None, None)
-    invalid_handle = ctypes.c_void_p(-1).value
-    if job in (None, invalid_handle):
-        error = ctypes.get_last_error()
-        raise OSError(error, "CreateJobObjectW failed for trial host")
-    job_handle = int(job)
-    try:
-        information = _ExtendedLimitInformation()
-        information.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        set_information = ctypes.WinDLL(
-            "kernel32", use_last_error=True
-        ).SetInformationJobObject
-        set_information.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_uint32,
-        ]
-        set_information.restype = ctypes.c_int
-        if not set_information(
-            ctypes.c_void_p(job_handle),
-            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-            ctypes.byref(information),
-            ctypes.sizeof(information),
-        ):
-            error = ctypes.get_last_error()
-            raise OSError(error, "SetInformationJobObject failed for trial host")
-        open_process = ctypes.WinDLL("kernel32", use_last_error=True).OpenProcess
-        open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-        open_process.restype = ctypes.c_void_p
-        process_handle = open_process(
-            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, 0, process.pid
-        )
-        if process_handle in (None, invalid_handle):
-            error = ctypes.get_last_error()
-            raise OSError(error, "OpenProcess failed for trial host")
-        try:
-            assign = ctypes.WinDLL(
-                "kernel32", use_last_error=True
-            ).AssignProcessToJobObject
-            assign.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-            assign.restype = ctypes.c_int
-            if not assign(
-                ctypes.c_void_p(job_handle), ctypes.c_void_p(process_handle)
-            ):
-                error = ctypes.get_last_error()
-                raise OSError(error, "AssignProcessToJobObject failed for trial host")
-        finally:
-            _windows_close_handle(int(process_handle))
-        setattr(process, "_d37_job_handle", job_handle)
-    except BaseException:
-        _windows_close_handle(job_handle)
-        raise
-
-
-async def _release_windows_bootstrap(process: asyncio.subprocess.Process) -> None:
-    if os.name != "nt":
-        return
-    if process.stdin is None:
-        raise ValueError("trial host bootstrap pipe is unavailable")
-    process.stdin.write(b"1")
-    await process.stdin.drain()
-    process.stdin.close()
-    await process.stdin.wait_closed()
-
-
-def _close_windows_job(process: asyncio.subprocess.Process) -> None:
-    handle = getattr(process, "_d37_job_handle", None)
-    if handle is None:
-        return
-    setattr(process, "_d37_job_handle", None)
-    _windows_close_handle(handle)
-
-
-async def _wait_for_parent_exit(process: asyncio.subprocess.Process) -> int:
-    while process.returncode is None:
-        await asyncio.sleep(0.01)
-    return process.returncode
-
-
-async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
-    if os.name == "nt" and getattr(process, "_d37_job_handle", None) is not None:
-        _close_windows_job(process)
-    elif os.name == "nt" and hasattr(process, "pid") and process.returncode is None:
-        killer = await asyncio.create_subprocess_exec(
-            "taskkill",
-            "/PID",
-            str(process.pid),
-            "/T",
-            "/F",
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await killer.wait()
-    elif os.name == "posix" and hasattr(process, "pid"):
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    elif process.returncode is None:
-        process.kill()
-    try:
-        await asyncio.wait_for(process.wait(), timeout=_HOST_TEARDOWN_SECONDS)
-    except TimeoutError:
-        if process.returncode is None:
-            process.kill()
-        raise ValueError("trial host process teardown could not be confirmed") from None
-
-
-async def _invoke_trial_host(
-    *,
-    tool_root: Path,
-    candidate_root: Path,
-    mode: str,
-    input_path: Path,
-    output_path: Path,
-    storage: Path,
-    model: str,
-    index: Path,
-    stdout_path: Path,
-    stderr_path: Path,
-    candidate_identity: tuple[int, int] | None = None,
-) -> str:
-    arguments = [
-        sys.executable,
-        "-B",
-        "-m",
-        "evaluation.scripts.evaluation_trial_host",
-        "--candidate-root",
-        str(candidate_root),
-        "--mode",
-        mode,
-        "--input",
-        str(input_path),
-        "--output",
-        str(output_path),
-        "--storage",
-        str(storage),
-        "--model",
-        model,
-    ]
-    if os.name == "posix" and candidate_identity is not None:
-        arguments.extend(
-            (
-                "--expected-candidate-dev",
-                str(candidate_identity[0]),
-                "--expected-candidate-ino",
-                str(candidate_identity[1]),
-            )
-        )
-    if mode == "stateful":
-        arguments.extend(("--index", str(index)))
-    process_options: dict[str, object] = {}
-    launch_arguments = arguments
-    process_stdin: int = asyncio.subprocess.DEVNULL
-    if os.name == "posix":
-        process_options["start_new_session"] = True
-    elif os.name == "nt":
-        process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        bootstrap = (
-            "import subprocess,sys; "
-            "ready=sys.stdin.buffer.read(1); "
-            "raise SystemExit(125) if ready != b'1' else "
-            "SystemExit(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL))"
-        )
-        launch_arguments = [sys.executable, "-B", "-c", bootstrap, *arguments]
-        process_stdin = asyncio.subprocess.PIPE
-    stdout_descriptor = _open_exclusive_regular(stdout_path, "trial stdout")
-    try:
-        stderr_descriptor = _open_exclusive_regular(stderr_path, "trial stderr")
-    except BaseException:
-        os.close(stdout_descriptor)
-        raise
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *launch_arguments,
-            cwd=tool_root / "backend",
-            env=_clean_subprocess_environment(tool_root),
-            stdin=process_stdin,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **process_options,
-        )
-        _attach_windows_job(process)
-        await _release_windows_bootstrap(process)
-    except BaseException:
-        if "process" in locals():
-            if getattr(process, "_d37_job_handle", None) is not None:
-                _close_windows_job(process)
-            if process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-        os.close(stdout_descriptor)
-        os.close(stderr_descriptor)
-        raise
-    if process.stdout is None or process.stderr is None:
-        os.close(stdout_descriptor)
-        os.close(stderr_descriptor)
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-        raise ValueError("trial host output pipes are unavailable")
-    overflow = asyncio.Event()
-    budget = [0]
-    budget_lock = asyncio.Lock()
-    readers = (
-        asyncio.create_task(
-            _bounded_stream(
-                process.stdout, stdout_descriptor, overflow, budget, budget_lock
-            )
-        ),
-        asyncio.create_task(
-            _bounded_stream(
-                process.stderr, stderr_descriptor, overflow, budget, budget_lock
-            )
-        ),
-    )
-    wait_task = asyncio.create_task(_wait_for_parent_exit(process))
-    overflow_task = asyncio.create_task(overflow.wait())
-    outcome: str
-    try:
-        done, _ = await asyncio.wait(
-            (wait_task, overflow_task),
-            timeout=_HOST_WATCHDOG_SECONDS,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if not done:
-            outcome = "deadline_failure"
-        elif overflow_task in done and overflow.is_set():
-            outcome = "transport_failure"
-        else:
-            await wait_task
-            outcome = "completed" if process.returncode == 0 else "transport_failure"
-            _, pending_readers = await asyncio.wait(
-                readers, timeout=_HOST_PIPE_DRAIN_GRACE_SECONDS
-            )
-            if not pending_readers:
-                await asyncio.gather(*readers, return_exceptions=False)
-        await _terminate_process_tree(process)
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*readers, return_exceptions=False),
-                timeout=_HOST_TEARDOWN_SECONDS,
-            )
-        except TimeoutError:
-            for reader in readers:
-                reader.cancel()
-            await asyncio.gather(*readers, return_exceptions=True)
-            raise ValueError("trial host pipe teardown could not be confirmed") from None
-        return outcome
-    except BaseException:
-        await _terminate_process_tree(process)
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*readers, return_exceptions=True),
-                timeout=_HOST_TEARDOWN_SECONDS,
-            )
-        except TimeoutError:
-            for reader in readers:
-                reader.cancel()
-            await asyncio.gather(*readers, return_exceptions=True)
-            raise ValueError("trial host teardown could not be confirmed") from None
-        raise
-    finally:
-        overflow_task.cancel()
-        await asyncio.gather(overflow_task, return_exceptions=True)
 
 
 def _observation(path: Path) -> tuple[TrialObservation, bytes]:
@@ -1617,7 +826,7 @@ def _validate_existing_bundle(
     path = root / _PUBLIC_RESULT_NAME
     if not path.exists():
         return None
-    raw = _read_regular(path)
+    raw = _read_regular(path, maximum=MAX_RESULT_BUNDLE_BYTES)
     bundle = EvaluationResultBundle.model_validate_json(raw, strict=True)
     if raw != _canonical_file_bytes(bundle):
         raise ValueError("existing result bundle is not canonical")
@@ -1728,7 +937,7 @@ async def _run_blinded_evaluation_anchored(
         "D37 tool attestation",
     )
     protocol_path = write_run_protocol_exclusive(output, protocol)
-    protocol_raw = _read_regular(protocol_path)
+    protocol_raw = _read_regular(protocol_path, maximum=MAX_PROTOCOL_BYTES)
     protocol_sha256 = _sha256_bytes(protocol_raw)
     _validate_run_artifacts(output, protocol_raw, d37_attestation_raw)
     existing_bundle = _validate_existing_bundle(
@@ -1852,8 +1061,13 @@ async def _run_blinded_evaluation_anchored(
         modes=modes,
     )
     result_path = output / _PUBLIC_RESULT_NAME
-    _publish_immutable(result_path, _canonical_file_bytes(bundle), "result bundle")
-    if _read_regular(result_path) != _canonical_file_bytes(bundle):
+    _publish_immutable(
+        result_path,
+        _canonical_file_bytes(bundle),
+        "result bundle",
+        maximum=MAX_RESULT_BUNDLE_BYTES,
+    )
+    if _read_regular(result_path, maximum=MAX_RESULT_BUNDLE_BYTES) != _canonical_file_bytes(bundle):
         raise ValueError("result bundle changed after publication")
     _validate_run_context(candidate_root, freeze_manifest, context)
     return bundle

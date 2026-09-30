@@ -31,14 +31,25 @@ alias to the mutable checkout pathname. Identity is checked before and after eve
 worker. Unsupported POSIX hosts fail closed, ordinary candidate roots retain strict
 non-link canonical resolution, and Windows behavior is unchanged.
 Output roots must be disjoint in both containment directions from the candidate,
-tooling repository, token-key parent, and mounted input roots. Each host runs in a
+tooling repository, token-key parent, and mounted input roots. Filesystem/publication
+logic lives in `evaluation.blinded_io`; candidate anchors and process supervision live
+in `evaluation.blinded_runtime`; orchestration remains in `evaluation.blinded_runner`
+with acyclic imports and unchanged public entry points. Each host runs in a
 Windows kill-on-close Job Object or POSIX process group; parent exit does not end
 supervision, and bounded pipe drain/teardown kills inherited-pipe descendants on
-normal exit, timeout, cancellation, or overflow. The token-key loader allocates its
+normal exit, timeout, cancellation, or overflow. Candidate-worker stdout/stderr go to
+the null device and are never persisted. Stored media identity accepts only canonical
+relative POSIX paths and streams regular no-follow files after component and descriptor
+identity checks; missing files retain only the stored-path hash. The token-key loader allocates its
 mutable buffer before I/O and zeroes it after every open/read/stat/close failure and
 normal context exit. The runner creates one immutable canonical run protocol and one
-shared full result schema;
-protocol, trial, and bundle publication uses fsynced same-directory random temporaries
+shared full result schema. Protocol bytes use a 64 MiB cap proven above the maximum
+65,535-case topology; result bundles use a 128 MiB cap proven above their maximum
+schema topology, with identical reader/writer caps. The D24 `switch_target` event changes
+selection outside the immutable request and rereads the exact original request and
+response, adding no replacement request and using the normal one-request/turn/receipt
+delta. Every projected response mode must equal the trial mode.
+Protocol, trial, and bundle publication uses fsynced same-directory random temporaries
 and atomic no-replace hard links, so interruption cannot truncate or replace a canonical
 final. Resume ignores only validated publication temporaries and parses complete
 canonical finals. Public evaluation evidence uses only
@@ -295,9 +306,10 @@ receives four and a `restart_resend` replay receives four minus the validated fi
 process count. The adapter checks that budget before every model invocation and
 fails with fixed `budget_exhausted` without invoking the model, so the aggregate
 count and actual adapter calls never exceed four. Candidate/backend/storage/output boundaries
-reject symlink and reparse paths, use exclusive fsynced temporary files, publish the
-final output with an atomic no-replace hard link, and monitor file-redirected
-subprocess output with a 2 MiB kill limit. Mode rules remain exact (`stateful`
+reject symlink and reparse paths, use exclusive fsynced temporary files, and publish the
+final output with an atomic no-replace hard link. Candidate-worker output is discarded
+to the null device; the outer trusted-host supervisor alone retains bounded diagnostic
+pipes. Mode rules remain exact (`stateful`
 requires an index and `all_tools` rejects one). No future D36 tooling hash is known
 or recorded by Task 1.
 

@@ -512,8 +512,7 @@ class UnlabeledRevisionRaceEvent(_RequestEvent):
 class UnlabeledSwitchTargetEvent(_RequestEvent):
     kind: Literal["switch_target"]
     selected_project_id_after: int = Field(ge=1, le=MAX_DATABASE_ID)
-    replacement_text: str = Field(min_length=1, max_length=2000, pattern=r"\S")
-    replacement_target_project_id: int = Field(ge=1, le=MAX_DATABASE_ID)
+    action: Literal["read_original_request"]
 
 
 UnlabeledEvent = Annotated[
@@ -607,11 +606,6 @@ class UnlabeledTrialCase(StrictUnlabeledRecord):
         if isinstance(self.event, UnlabeledDifferentBodyEvent):
             replacement_target = self.event.replacement_target_project_id
             if replacement_target is not None and replacement_target not in projects:
-                raise ValueError("replacement target references unknown project")
-        if isinstance(self.event, UnlabeledSwitchTargetEvent):
-            if self.event.selected_project_id_after not in projects:
-                raise ValueError("selected project references unknown project")
-            if self.event.replacement_target_project_id not in projects:
                 raise ValueError("replacement target references unknown project")
         return self
 

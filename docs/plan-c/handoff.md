@@ -8,11 +8,20 @@ D35 commit `522775516c0797abdb313e3432339a3a444b7ae2`, candidate ID
 `26933fe07103c402-522775516c07`. D37 is external tooling and does not alter candidate
 behavior.
 
-The official complete 164-file D37 source closure aggregate is
+The final-review correction restores D24 D029 replay semantics, hardens stored-media
+identity and candidate-output suppression, enforces response-mode equality, aligns
+maximum protocol/result serialization caps, and extracts `blinded_io.py` plus
+`blinded_runtime.py` from orchestration. The exact D35 candidate is unchanged. Read the
+final correction report at
+`.superpowers/sdd/implementation-plan-37/final-fix-report.md`; no real evaluation or
+D38 work has started.
+
+The historical pre-correction 164-file D37 source closure aggregate is
 `54e3f5f21836ca1959855c0e2f8fa016831c576f766d24a8b6cce4ec2679ea51`, computed from
-clean committed source at `77ce86d7d16e2a31cd14f98fc88a469d64c99ec4`. The final
-delivery changes only documentation, which is outside that closure; the evaluator must
-still recompute it from the exact clean pushed tooling `HEAD` before a real run.
+clean committed source at `77ce86d7d16e2a31cd14f98fc88a469d64c99ec4`. It is not the
+post-correction tool hash and MUST NOT be used for a new run. The original
+delivery changed only documentation outside that historical closure; the evaluator must
+recompute the new closure from the exact clean committed tooling `HEAD` before a real run.
 Verification uses repository-owned synthetic material only. No real held-out corpus,
 review ledger, token key, private evidence, or D37 output is available to the
 implementation process. The real evaluator command uses placeholders documented in

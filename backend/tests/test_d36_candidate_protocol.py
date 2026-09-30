@@ -15,6 +15,9 @@ from typing import Any, get_args, get_origin
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from evaluation.blinded_runner import case_to_unlabeled
+from evaluation.blinded_scoring import score_trial
+from evaluation.corpus import load_cases
 from evaluation.unlabeled_contracts import MAX_REVISION, UnlabeledTrialCase, canonical_case_sha256
 from evaluation.scripts import evaluation_trial_host as trial_host
 from evaluation.scripts.evaluation_trial_host import run_trial_host
@@ -1454,12 +1457,7 @@ def test_real_worker_executes_every_allowed_event(tmp_path: Path, kind: str) -> 
         event["external_revision"] = 6
         event["external_settings"] = {"subtitle_font_size": 52}
     elif kind == "switch_target":
-        case["initial"]["additional_projects"] = [{
-            "project_id": 202, "revision": 5, "settings": case["initial"]["settings"],
-            "project_status": "completed",
-        }]
-        event.update(selected_project_id_after=202, replacement_text="字幕を64pxにして",
-                     replacement_target_project_id=202)
+        event.update(selected_project_id_after=202, action="read_original_request")
     case["event"] = event
     case["case_sha256"] = canonical_case_sha256(case)
     proposal = ({
@@ -1497,9 +1495,12 @@ def test_real_worker_executes_every_allowed_event(tmp_path: Path, kind: str) -> 
         assert observation.replay.response.http_status == 409
         assert observation.replay.response.status == "http_error"
         assert observation.replay.response.reason_code == "request_id_conflict"
-    expected_language_additions = 2 if kind == "switch_target" else 1
-    assert observation.effects.language_requests == expected_language_additions
-    assert observation.effects.language_turns == expected_language_additions
+    assert observation.effects.language_requests == 1
+    assert observation.effects.language_turns == 1
+    if kind == "switch_target":
+        assert observation.replay.state_unchanged is True
+        assert observation.replay.same_response is True
+        assert observation.replay.response == observation.response
     assert observation.effects.prior_receipts_preserved is True
     assert observation.effects.prior_external_calls_preserved is True
     assert observation.effects.prior_language_requests_preserved is True
@@ -1660,6 +1661,64 @@ def test_real_worker_seeds_complete_allowed_initial_state(tmp_path: Path) -> Non
     assert observation.before.language_request_count == observation.before.language_turn_count == 1
 
 
+def test_d24_d029_shaped_switch_replays_original_target_end_to_end(tmp_path: Path) -> None:
+    cases = load_cases(Path(__file__).parents[2] / "evaluation/d24/development.jsonl")
+    source = next(case for case in cases if case.case_id == "D24-D029")
+    case = source.model_copy(
+        update={"case_id": "D24-H029", "group_id": "D24-HG03", "split": "held_out"}
+    )
+    projected = case_to_unlabeled(case)
+    event = projected.event.model_dump(mode="json", exclude={"request"})
+    assert event == {
+        "kind": "switch_target",
+        "selected_project_id_after": 202,
+        "action": "read_original_request",
+    }
+
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
+    _ModelHandler.proposal = {
+        "kind": "operation",
+        "operation_id": "project.status.get",
+        "operation_version": 1,
+        "arguments": {},
+        "generate_after_save": False,
+    }
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        input_path = tmp_path / "synthetic-switch.json"
+        input_path.write_text(
+            json.dumps(projected.model_dump(mode="json", exclude_unset=True), ensure_ascii=True),
+            encoding="ascii",
+        )
+        observation = run_trial_host(
+            candidate_root=Path(__file__).parents[2],
+            mode="all_tools",
+            input_path=input_path,
+            output_path=tmp_path / "synthetic-switch-observation.json",
+            storage=tmp_path / "synthetic-switch-storage",
+            model="d36-test-model",
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    score = score_trial(case, observation.model_dump(mode="json"))
+    assert observation.replay.state_unchanged is True
+    assert observation.replay.same_response is True
+    assert observation.replay.response == observation.response
+    assert observation.effects.receipts == 1
+    assert observation.effects.language_requests == 1
+    assert observation.effects.language_turns == 1
+    assert score.task_complete is True
+    assert score.unauthorized_effect is False
+    assert score.unauthorized_replay is False
+
+
 def test_file_identity_hashes_stored_relative_path_even_when_file_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -1676,7 +1735,9 @@ def test_file_identity_hashes_stored_relative_path_even_when_file_is_missing(
 
     first = trial_host._file_identity(first_root, relative)
     second = trial_host._file_identity(second_root, relative)
-    missing = trial_host._file_identity(tmp_path / "missing-root", relative)
+    missing_root = tmp_path / "missing-root"
+    missing_root.mkdir()
+    missing = trial_host._file_identity(missing_root, relative)
 
     assert first == second
     assert first == {
@@ -1693,6 +1754,106 @@ def test_file_identity_hashes_stored_relative_path_even_when_file_is_missing(
     }
     assert relative not in json.dumps(first)
     assert str(first_file.resolve()) not in json.dumps(first)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "",
+        "/absolute/video.mp4",
+        "C:/external/video.mp4",
+        "projects/video.mp4:ads",
+        "projects\\101\\video.mp4",
+        "projects/./video.mp4",
+        "projects/../video.mp4",
+        "projects//video.mp4",
+        "projects/video.mp4/",
+        "projects/video.mp4\0suffix",
+    ],
+)
+def test_file_identity_rejects_noncanonical_or_external_stored_paths(
+    tmp_path: Path, relative: str,
+) -> None:
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    with pytest.raises(ValueError):
+        trial_host._file_identity(storage, relative)
+
+
+def test_file_identity_rejects_symlink_components_and_same_content_escape(
+    tmp_path: Path,
+) -> None:
+    storage = tmp_path / "storage"
+    outside = tmp_path / "outside"
+    storage.mkdir()
+    outside.mkdir()
+    external = outside / "video.mp4"
+    external.write_bytes(b"same-content")
+    safe = storage / "safe.mp4"
+    safe.write_bytes(b"same-content")
+
+    with pytest.raises(ValueError):
+        trial_host._file_identity(storage, "../outside/video.mp4")
+
+    link = storage / "linked.mp4"
+    try:
+        link.symlink_to(external)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError):
+        trial_host._file_identity(storage, "linked.mp4")
+
+    directory_link = storage / "linked-directory"
+    directory_link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError):
+        trial_host._file_identity(storage, "linked-directory/video.mp4")
+
+
+def test_file_identity_streams_without_path_read_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = tmp_path / "storage"
+    stored = storage / "projects/101/video.mp4"
+    stored.parent.mkdir(parents=True)
+    stored.write_bytes(b"streamed-content")
+
+    def forbidden_read_bytes(_: Path) -> bytes:
+        raise AssertionError("file identity must stream from a no-follow descriptor")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+    identity = trial_host._file_identity(storage, "projects/101/video.mp4")
+
+    assert identity == {
+        "exists": True,
+        "path_sha256": hashlib.sha256(b"projects/101/video.mp4").hexdigest(),
+        "size": 16,
+        "sha256": hashlib.sha256(b"streamed-content").hexdigest(),
+    }
+
+
+@pytest.mark.parametrize("behavior", ["failure", "timeout", "output_flood"])
+def test_candidate_worker_never_creates_stdout_or_stderr_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, behavior: str,
+) -> None:
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    if behavior == "failure":
+        source = "import sys; print('private-out'); print('private-err', file=sys.stderr); raise SystemExit(3)"
+    elif behavior == "timeout":
+        monkeypatch.setattr(trial_host, "SUBPROCESS_TIMEOUT_SECONDS", 0.05)
+        source = "import time; print('private-out', flush=True); time.sleep(5)"
+    else:
+        source = "import os; os.write(1, b'x' * (3 * 1024 * 1024)); os.write(2, b'y' * (3 * 1024 * 1024))"
+
+    command = [sys.executable, "-c", source]
+    if behavior in {"failure", "timeout"}:
+        with pytest.raises(ValueError):
+            trial_host._run_candidate(command, cwd=tmp_path, env=dict(os.environ), storage=storage)
+    else:
+        trial_host._run_candidate(command, cwd=tmp_path, env=dict(os.environ), storage=storage)
+
+    assert list(storage.glob("worker-*.stdout")) == []
+    assert list(storage.glob("worker-*.stderr")) == []
 
 
 def test_redacted_response_requires_exact_operation_and_clarification_shapes() -> None:
@@ -1922,15 +2083,6 @@ def test_event_projection_contract_rejects_inconsistent_attempt_evidence(
     change(value)
     with pytest.raises(ValidationError):
         trial_host._WorkerObservation.model_validate(value)
-
-
-def test_subprocess_output_flood_is_killed_without_reading_logs(tmp_path: Path) -> None:
-    storage = tmp_path / "logs"
-    storage.mkdir()
-    command = [sys.executable, "-c", "import sys,time;sys.stdout.write('x'*(3*1024*1024));sys.stdout.flush();time.sleep(30)"]
-    with pytest.raises(ValueError, match="output limit"):
-        trial_host._run_candidate(command, cwd=tmp_path, env=dict(os.environ), storage=storage)
-    assert not list(storage.iterdir())
 
 
 def test_redacted_projection_does_not_publish_model_prose(tmp_path: Path) -> None:

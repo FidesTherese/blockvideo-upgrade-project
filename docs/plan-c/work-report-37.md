@@ -7,7 +7,11 @@ evaluation. The immutable release candidate remains the clean D35 commit
 `522775516c0797abdb313e3432339a3a444b7ae2`, candidate ID
 `26933fe07103c402-522775516c07`. D37 does not change candidate behavior.
 
-The official complete D37 source closure contains every tracked
+The source hash and test totals below are historical evidence from the original D37
+delivery and are superseded for the final-review fix wave until its final sequential
+gates complete. The final fix keeps the exact D35 candidate unchanged.
+
+The historical complete D37 source closure contains every tracked
 `backend/evaluation/**/*.py` and `backend/app/**/*.py` file plus
 `backend/app/operations/definitions.json`, `backend/pyproject.toml`,
 `backend/uv.lock`, and `backend/scripts/run_blinded_evaluation.py`. Computed from
@@ -17,7 +21,24 @@ This report and handoff are outside that source closure, so the aggregate is unc
 by the documentation-only D37 delivery commit. The real evaluator MUST recompute and
 validate the attestation from the exact clean pushed tooling `HEAD`.
 
-## Synthetic verification
+## Final-review correction
+
+The correction restores the D24 D029 target-switch contract: selection changes outside
+the immutable request, and the exact original request/response replays with one request,
+one turn, and the normal submit receipt. It hardens media identity to canonical relative
+POSIX paths and streamed descriptor hashing; rejects links, reparses, special files,
+Windows ADS/colon, traversal, and identity races; sends candidate-worker stdout/stderr
+to the null device; binds every response mode to the trial mode; and aligns protocol
+and result reader/writer caps with independently calculated maximum topologies.
+Filesystem/publication and platform runtime responsibilities now live in
+`blinded_io.py` and `blinded_runtime.py`; `blinded_runner.py` retains orchestration and
+its public API. The D37 attestation closure discovers both helpers automatically.
+
+Final correction verification is recorded in the task's
+`.superpowers/sdd/implementation-plan-37/final-fix-report.md`. No candidate, production
+app, frontend, held-out input, real token key, or evaluator evidence changed.
+
+## Historical synthetic verification
 
 Only repository-owned synthetic tests were executed. No real held-out corpus, review
 ledger, token key, private detailed evidence, or real D37 evaluation output was read or

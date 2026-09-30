@@ -235,7 +235,9 @@ backend/evaluation/
 │   ├── verify_release_candidate.py    # D39 final external verifier CLI
 │   └── attest_release_decision.py     # D40 source-attestation generate/validate CLI
 ├── blinded_contracts.py
-├── blinded_runner.py
+├── blinded_io.py                    # bounded no-follow reads and crash-safe publication
+├── blinded_runtime.py               # candidate anchors and process-tree supervision
+├── blinded_runner.py                # D37 orchestration and unchanged public entry points
 ├── blinded_scoring.py
 ├── sealed_evidence.py
 ├── result_contracts.py                # one D37-owned D37–D40 bundle schema
@@ -1119,7 +1121,18 @@ null even when the project owns artifacts. Omitted prior-turn links retain the
 deterministic list-order chain. The worker derives complete
 generation snapshots and fingerprints with candidate
 `capture_inputs`/`fingerprint_inputs` and creates synthetic artifact bytes whose
-size/hash must match the wire identity. No label model or D24 contract is imported. Before and after each event, the worker canonicalizes sorted
+size/hash must match the wire identity. Stored media paths MUST be canonical relative
+POSIX paths: empty, absolute, drive/colon (including Windows ADS), backslash, NUL,
+dot, dot-dot, and empty components are rejected. The canonical storage root and every
+existing component are checked with `lstat` as non-link/non-reparse; parents are
+directories and an existing final is regular. The final is opened with no-follow where
+available, pre/open/post descriptor identity and size are compared, and SHA-256 is
+streamed in fixed 1 MiB chunks. Missing files preserve only the valid stored-path hash.
+External, symlink, reparse, and special paths fail closed without reading external
+bytes; raw/resolved paths are never projected. This protects against cooperative path
+replacement, not a hostile same-user principal that can alter process memory or race
+platform calls outside available handle guarantees. No label model or D24 contract is
+imported. Before and after each event, the worker canonicalizes sorted
 records for every project and settings revision; complete job snapshot/fingerprint
 state; receipt request/result values; artifact manifest and file identities; external
 call response hashes; and language request/turn values. `_logical_state()` recursively
@@ -1184,9 +1197,10 @@ identical job, artifact, and external-call hashes; a focused async test proves t
 quiescent task accepts cancellation. The worker imports only committed D35 application
 modules; candidate modules never import D36 tooling and the pre/post snapshot proves
 candidate bytes remain unchanged. `stateful`
-requires one regular index directory and `all_tools` rejects an index. Stdout and
-stderr are redirected to external exclusive files; the host actively monitors both,
-kills on timeout or either file exceeding 2 MiB, and never reads them. Restart resend
+requires one regular index directory and `all_tools` rejects an index. Candidate-worker
+stdout is `DEVNULL` and stderr is redirected to the same null stream; no worker log file
+is created or retained. Timeout and non-zero exit retain fixed classified failure only.
+Restart resend
 runs the first submit and replay in separate candidate processes/apps against the same
 external case database. The host alone appends the internal required worker CLI option
 `--model-call-budget`, validated as an integer in the closed range 0--4; case data,
@@ -1232,7 +1246,10 @@ bound to at least one case. It contains the sorted unique category-token set/cou
 but contains no raw case ID, request text, expected value, category name, review
 label, or approval decision. A zero-case, zero-category, or more-than-65,535-case
 corpus fails D37 protocol creation before any trial and can never produce a bundle.
-The category count cannot exceed the case count.
+The category count cannot exceed the case count. Canonical protocol serialization is
+bounded by independently calculated maximum-topology arithmetic; the proven maximum
+fits within `MAX_PROTOCOL_BYTES = 64 MiB`. Protocol publication and every resume/readback
+path use that same cap and reject oversize bytes before creating a canonical final.
 
 ```python
 MAX_PROTOCOL_CASES = 65_535
@@ -1399,7 +1416,13 @@ Validators reject an equation if an operand is invalid or an intermediate sum ex
 `MAX_PROTOCOL_CASES`; percentage cross-products are evaluated only after these checks
 and cannot exceed `100 * MAX_PROTOCOL_CASES`. No failed, timed-out, or omitted trial
 becomes an exclusion. The bundle contains no raw case IDs, request text, expected
-values, category names, or labels. Scoring covers declared events, full persisted
+values, category names, or labels. Independently calculated maximum-topology arithmetic
+bounds canonical bundle serialization; `MAX_RESULT_BUNDLE_BYTES = 128 MiB` exceeds the
+proven maximum. Existing-bundle reads, publication, and post-publication readback all
+use that same cap, so a schema-valid maximum bundle cannot be written and then rejected
+by its reader. Every other JSON/file bound remains finite.
+
+Scoring covers declared events, full persisted
 effects, receipts/artifacts, replay, confirmation, and disclosure. Unexpected
 mutation, replay, and disclosure are separately counted overall and by category.
 Detailed records remain sealed in evaluator storage. D37 scoring MUST reject missing
@@ -1410,9 +1433,15 @@ fields, and malformed nested event objects fail before scoring. For each opaque
 collection it requires identity length to equal count, count delta to equal canonical
 identity additions, hash change to equal identity change, the effect addition to equal
 that identity addition, and the preservation boolean to equal the before-identity
-subset result. Normal trials add exactly one language request and one turn;
-`switch_target` adds exactly two because its replacement is a new request. Expected
-receipt additions preserve every prior receipt. External calls permit no change.
+subset result. Normal trials add exactly one language request and one turn. The D24 `switch_target`
+event contains only `selected_project_id_after` and
+`action="read_original_request"`: selection changes outside the immutable request, then
+the host resubmits the exact original request ID, text, target, revision, and payload.
+The replay MUST leave persisted state unchanged and return the exact original response;
+it creates no replacement request and therefore also adds only one language request,
+one turn, and the normal submit receipt. The selected project need not be seeded because
+the event is UI selection-only. Expected receipt additions preserve every prior
+receipt. External calls permit no change.
 It reconstructs the expected primary-project status, the exact history sequence and
 settings/changed-field/restore identities, and the expected job set from the D24
 contract. It also validates the primary response through the same strict response
@@ -1424,12 +1453,14 @@ clarification must match the exact canonical `question_for` fields; and all othe
 interpretations must carry neither operation nor clarification details. `reason_code`
 is required only for `blocked` and absent for every other declared primary outcome.
 `_event_check()`
-rejects every nested failure class. Idempotent replay requires unchanged state and an
+rejects every nested failure class. `TrialObservation` validates that primary, replay,
+confirmation, and duplicate-confirmation response modes all equal its top-level mode;
+a mismatch is invalid before scoring. Idempotent replay requires unchanged state and an
 exact byte-for-byte projected 2xx `completed`/`ready` response. Same-ID conflict
 requires unchanged state and exactly 409/`http_error`/`request_id_conflict`, with
-`executed=false` and null operation detail. Target switching requires changed state, a
-new response matching `after_event`, and an exact accepted operation ID/version/
-arguments-hash/generation tuple. Confirmation requires its state hash to equal the
+`executed=false` and null operation detail. Target switching is the same idempotent
+replay after an out-of-band selection change: unchanged state and the exact original
+response are mandatory. Confirmation requires its state hash to equal the
 final state's hash and its 2xx response to match final effects and an accepted proposal;
 a duplicate confirmation must be the exact same no-failure response. Every project ID
 and project count must survive unchanged. Every non-primary project projection must be
@@ -1514,6 +1545,16 @@ retain their existing strict canonical resolution. Windows receives no new ident
 arguments and is unchanged. The retained descriptor/handle closes only in final
 cleanup.
 
+`evaluation.blinded_io` owns directory validation, bounded descriptor reads, atomic
+mutable writes, and immutable no-replace publication. `evaluation.blinded_runtime`
+imports that filesystem helper and owns candidate anchors, Windows Job Objects, POSIX
+process groups, bounded host-pipe draining, and confirmed tree teardown.
+`evaluation.blinded_runner` imports both helpers and retains projection, attestation,
+resume topology, scoring aggregation, and the unchanged public
+`run_blinded_evaluation()` / `write_run_protocol_exclusive()` API. Neither helper
+imports the runner, result contracts, or application modules, so dependency direction
+is acyclic. D37 source-attestation discovery includes both helper files automatically.
+
 Before creating output, D37 requires the prospective canonical output root to be
 disjoint in both containment directions from the candidate root, tooling repository,
 freeze publication/input roots, stateful index, corpus/review roots, and token-key
@@ -1529,13 +1570,17 @@ writable component fails before use.
 Each POSIX trial host starts in a separate session/process group. Each Windows host is
 started behind a bootstrap gate, attached before release to a Job Object configured
 with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and only then allowed to spawn the D36 host.
-Parent exit alone never ends supervision. Stdout and stderr are drained concurrently
-through bounded readers sharing one fixed 2 MiB cap and exclusive regular log files.
-After parent exit, readers receive one bounded grace interval; an inherited-pipe
-holder triggers process-group kill or Job close. Timeout, cancellation, cap overflow,
-and normal parent completion all terminate remaining descendants and await parent and
-reader teardown under a bounded timeout. Unconfirmed teardown fails closed before any
-trial record or evidence seal.
+Parent exit alone never ends supervision. The D36 host launches every candidate worker
+with stdout directed to `DEVNULL` and stderr redirected to that same null stream; it
+never creates worker stdout/stderr files. Candidate failures, timeouts, and output
+floods therefore retain only fixed classified failure state, not candidate text,
+prompts, bodies, or secrets. The outer trusted-host stdout/stderr pipes remain bounded
+at a shared 2 MiB and may retain only host/tool diagnostics; they cannot receive raw
+candidate streams. After parent exit, readers receive one bounded grace interval; an
+inherited-pipe holder triggers process-group kill or Job close. Timeout, cancellation,
+cap overflow, and normal parent completion all terminate remaining descendants and
+await parent and reader teardown under a bounded timeout. Unconfirmed teardown fails
+closed before any trial record or evidence seal.
 
 ### D38 validation and import bindings
 
@@ -2067,8 +2112,9 @@ without shell invocation, and atomically replaced. Offline restore acquires the 
 lease non-blocking and cannot run while a ready or degraded application is live.
 Freeze/tool paths are lexical repository-relative paths and cannot escape their
 roots. Strict bounded canonical JSON loading validates detached hashes before parsing:
-2 MiB for manifests/results and the existing case-loader limits for corpora. The D37
-host boundary accepts only the recursive strict unlabeled model and evaluation output
+small manifests retain their existing finite limits, D37 protocol/result artifacts use
+their proven 64/128 MiB structural caps, and corpora retain the existing case-loader
+limits. The D37 host boundary accepts only the recursive strict unlabeled model and evaluation output
 never includes source request text or labels. D39 executes from isolated verifier-owned
 temporary roots and proves the detached candidate snapshot unchanged. D31 additionally
 requires zero content-level changes in the reopened `external_calls` journal and an
@@ -2322,10 +2368,14 @@ exact sorted included and excluded token collections, and deterministic both-/si
 missing approval reasons, plus explicitly bounded non-negative overall/category
 completion and effect/replay/disclosure counts, bounded transport/deadline failures,
 checked equations, evaluator identity/time, and sealed
-evidence identity. Exclusively write immutable run `protocol.json` before trials,
-project approved cases to `UnlabeledTrialCase`, then implement subprocess execution,
-scoring, partial resume, source attestation, and sealed evidence using synthetic
-fixtures only. The implementation process never accesses real held-out material.
+evidence identity. Prove maximum protocol/result topology byte bounds and apply the
+same 64/128 MiB caps to writer, readback, and resume paths. Implement filesystem and
+publication in `blinded_io`, process/anchor behavior in `blinded_runtime`, and keep
+projection/attestation/aggregation in `blinded_runner`. Exclusively write immutable run
+`protocol.json` before trials, project approved cases to `UnlabeledTrialCase`, preserve
+the D24 selection-only original-request replay, suppress candidate-worker output, then
+implement scoring, partial resume, source attestation, and sealed evidence using
+synthetic fixtures only. The implementation process never accesses real held-out material.
 
 #### Step 8 — D38 bound aggregate import
 

@@ -1,6 +1,7 @@
 """Canonical D37-D40 blinded evaluation result contract."""
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Literal, Self
@@ -19,6 +20,8 @@ from evaluation.blinded_contracts import (
 from evaluation.contracts import Case, ReviewLedger
 from evaluation.corpus import eligibility
 
+MAX_RESULT_BUNDLE_BYTES = 128 * 1024 * 1024
+
 _COUNT_FIELDS = (
     "included",
     "completed",
@@ -27,6 +30,85 @@ _COUNT_FIELDS = (
     "unauthorized_replays",
     "secret_disclosures",
 )
+
+
+def _canonical_json_length(value: object) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    )
+
+
+def maximum_result_bundle_serialized_bytes() -> int:
+    """Return a conservative canonical-byte bound for every valid bundle topology."""
+    token = "0" * 64
+    count = MAX_PROTOCOL_CASES
+    category = {
+        "category_token": token,
+        "included": count,
+        "completed": count,
+        "task_complete": count,
+        "unauthorized_effects": count,
+        "unauthorized_replays": count,
+        "secret_disclosures": count,
+    }
+    mode = {
+        "mode": "all_tools",
+        "included": count,
+        "completed": count,
+        "task_complete": count,
+        "unauthorized_effects": count,
+        "unauthorized_replays": count,
+        "secret_disclosures": count,
+        "transport_failures": count,
+        "deadline_failures": count,
+        "categories": [],
+    }
+    scalar_shape = {
+        "schema_version": 1,
+        "candidate_id": "\U0010ffff" * 128,
+        "freeze_sha256": token,
+        "corpus_sha256": token,
+        "human_approval_sha256": token,
+        "independent_approval_sha256": token,
+        "protocol_sha256": token,
+        "d36_trial_tool_sha256": token,
+        "d37_evaluator_tool_sha256": token,
+        "protocol_case_count": count,
+        "protocol_case_tokens": [],
+        "protocol_category_count": count,
+        "protocol_category_tokens": [],
+        "case_categories": [],
+        "included_count": count,
+        "excluded_count": count,
+        "included_case_tokens": [],
+        "excluded_cases": [],
+        "evaluator_role": "independent_evaluator",
+        "evaluator_name": "\U0010ffff" * 128,
+        "executed_at": "9999-12-31T23:59:59Z",
+        "sealed_evidence_sha256": token,
+        "modes": [mode, {**mode, "mode": "stateful"}],
+    }
+    binding_length = _canonical_json_length(
+        {"case_token": token, "category_token": token}
+    )
+    exclusion_length = _canonical_json_length(
+        {"case_token": token, "reason": "independent_not_approved"}
+    )
+    topology_growth = count * (
+        3 * (_canonical_json_length(token) + 1)
+        + binding_length
+        + 1
+        + exclusion_length
+        + 1
+        + 2 * (_canonical_json_length(category) + 1)
+    )
+    return _canonical_json_length(scalar_shape) + topology_growth + 1
 
 
 class _StrictModel(BaseModel):

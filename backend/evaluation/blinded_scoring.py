@@ -54,7 +54,7 @@ _REPLAY_EVENTS = frozenset(
     }
 )
 _IDEMPOTENT_REPLAY_EVENTS = frozenset(
-    {"resend_identical", "restart_resend", "concurrent_identical"}
+    {"resend_identical", "restart_resend", "concurrent_identical", "switch_target"}
 )
 _CONFIRMATION_EVENTS = frozenset({"confirm_generation", "confirm_twice"})
 _SAFE_TOP_LEVEL = frozenset(
@@ -403,17 +403,6 @@ def _event_check(case: Case, observation: dict[str, Any]) -> tuple[bool, bool]:
             and not confirmation_attempted
             and not duplicate_attempted
         )
-    elif kind == "switch_target":
-        replay_response = _mapping(replay.get("response"), "replay response")
-        valid = (
-            replay_attempted
-            and replay.get("state_unchanged") is False
-            and replay.get("same_response") is False
-            and replay_response != primary
-            and _response_matches_effects(replay_response, final, accepted_proposals)
-            and not confirmation_attempted
-            and not duplicate_attempted
-        )
     elif kind in _CONFIRMATION_EVENTS:
         confirmation_response = _mapping(
             confirmation.get("response"), "confirmation response"
@@ -455,8 +444,20 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     }
     if set(observation) & trial_fields:
         parsed_observation = TrialObservation.model_validate(observation)
+        expected_mode = parsed_observation.mode
+        projected_responses = (
+            parsed_observation.response,
+            parsed_observation.replay.response,
+            parsed_observation.confirmation.response,
+            parsed_observation.confirmation.duplicate_response,
+        )
+        response_modes_valid = all(
+            projected is None or projected.mode == expected_mode
+            for projected in projected_responses
+        )
     else:
         parsed_observation = _WorkerObservation.model_validate(observation)
+        response_modes_valid = True
     observation = parsed_observation.model_dump(mode="json")
     response = RedactedResponse.model_validate(
         _mapping(observation.get("response"), "response")
@@ -711,11 +712,7 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     expected_receipt_additions = int(
         case.expected.submit.receipt_rule in {"new_request", "first_result"}
     )
-    if case.event.kind == "switch_target":
-        expected_receipt_additions += int(
-            final.receipt_rule in {"new_request", "first_result"}
-        )
-    expected_language_additions = 2 if case.event.kind == "switch_target" else 1
+    expected_language_additions = 1
     initial_settings_identity = before.get("settings_sha256") == _canonical_hash(case.initial.settings)
     settings_identity = after.get("settings_sha256") == _canonical_hash(expected_final_settings)
     count_deltas = {
@@ -824,6 +821,7 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     )
     checks = {
         "observation_completed": observation.get("failure_class") is None,
+        "response_modes": response_modes_valid,
         "primary_response": primary_response_valid,
         "interpretation_class": interpretation_valid,
         "accepted_operations": (

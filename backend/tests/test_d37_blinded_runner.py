@@ -14,27 +14,34 @@ import pytest
 from pydantic import ValidationError
 
 from evaluation.blinded_contracts import (
+    MAX_PROTOCOL_BYTES,
     MAX_PROTOCOL_CASES,
     EvaluationProtocol,
     case_category_bindings,
+    maximum_protocol_serialized_bytes,
     opaque_case_token,
     opaque_category_token,
     token_key,
+)
+from evaluation.blinded_io import (
+    ensure_writable_directory as _ensure_writable_directory,
+    publish_immutable as _publish_immutable,
 )
 from evaluation.blinded_runner import (
     _D36_SOURCE_PATHS,
     _D37_SOURCE_PATHS,
     _d37_source_paths,
-    _canonical_candidate_root,
-    _ensure_writable_directory,
-    _invoke_trial_host,
     _load_records,
-    _open_candidate_anchor,
-    _close_candidate_anchor,
-    _publish_immutable,
     case_to_unlabeled,
     run_blinded_evaluation,
     write_run_protocol_exclusive,
+)
+from evaluation.blinded_runtime import (
+    HOST_OUTPUT_CAP_BYTES,
+    canonical_candidate_root as _canonical_candidate_root,
+    close_candidate_anchor as _close_candidate_anchor,
+    invoke_trial_host as _invoke_trial_host,
+    open_candidate_anchor as _open_candidate_anchor,
 )
 from evaluation.blinded_scoring import score_trial
 from evaluation.contracts import Case
@@ -46,10 +53,12 @@ from evaluation.corpus import (
     load_review,
 )
 from evaluation.result_contracts import (
+    MAX_RESULT_BUNDLE_BYTES,
     CategoryResult,
     EvaluationResultBundle,
     ModeResult,
     approval_partition,
+    maximum_result_bundle_serialized_bytes,
 )
 from evaluation.release_candidate.contracts import FreezeManifest
 from evaluation.release_candidate.fingerprints import aggregate_fingerprints
@@ -754,6 +763,11 @@ def _score_case(event_kind: str) -> Case:
                         "external_settings": {"subtitle_font_size": 52},
                     }
                     if event_kind == "revision_race"
+                    else {
+                        "selected_project_id_after": 202,
+                        "action": "read_original_request",
+                    }
+                    if event_kind == "switch_target"
                     else {}
                 ),
             },
@@ -875,10 +889,10 @@ def _score_observation(event_kind: str) -> dict[str, object]:
         "concurrent_identical",
         "switch_target",
     }
-    same_response = event_kind not in {"same_id_different_body", "switch_target"}
+    same_response = event_kind != "same_id_different_body"
     replay_reason = "request_id_conflict" if event_kind == "same_id_different_body" else None
-    language_additions = 2 if event_kind == "switch_target" else 1
-    receipt_additions = 2 if event_kind == "switch_target" else 1
+    language_additions = 1
+    receipt_additions = 1
     observation = {
         "schema_version": 1,
         "response": {
@@ -927,13 +941,13 @@ def _score_observation(event_kind: str) -> dict[str, object]:
         "replay": {
             "attempted": replay,
             "model_calls": 0,
-            "state_unchanged": event_kind != "switch_target",
+            "state_unchanged": True,
             "same_response": same_response if replay else False,
             "response": {
                 "http_status": 409 if replay_reason else 200,
                 "status": "http_error" if replay_reason else "completed",
                 "mode": "all_tools",
-                "executed": event_kind == "switch_target" or not replay_reason,
+                "executed": not replay_reason,
                 "requires_confirmation": False,
                 "operation_id": None if replay_reason else "project.subtitle-font-size.set",
                 "operation_version": None if replay_reason else 1,
@@ -944,7 +958,9 @@ def _score_observation(event_kind: str) -> dict[str, object]:
                 "reason_code": replay_reason,
                 "response_sha256": (
                     "1" * 64
-                    if event_kind in {"resend_identical", "restart_resend", "concurrent_identical"}
+                    if event_kind in {
+                        "resend_identical", "restart_resend", "concurrent_identical", "switch_target"
+                    }
                     else "2" * 64
                 ),
             }
@@ -1789,6 +1805,16 @@ def test_score_rejects_wrong_same_id_conflict_contract(
     assert score.checks["declared_event"] is False
 
 
+def test_switch_target_projection_restores_exact_d24_event_shape() -> None:
+    projected = case_to_unlabeled(_score_case("switch_target"))
+
+    assert projected.event.model_dump(mode="json", exclude={"request"}) == {
+        "kind": "switch_target",
+        "selected_project_id_after": 202,
+        "action": "read_original_request",
+    }
+
+
 def test_score_rejects_switch_target_wrong_response() -> None:
     observation = _score_observation("switch_target")
     observation["replay"]["response"]["arguments_sha256"] = "f" * 64
@@ -1817,6 +1843,34 @@ def test_score_rejects_wrong_confirmation_response(
 
     assert score.task_complete is False
     assert score.checks["declared_event"] is False
+
+
+@pytest.mark.parametrize(
+    ("event_kind", "response_path"),
+    [
+        ("none", ("response",)),
+        ("resend_identical", ("replay", "response")),
+        ("confirm_generation", ("confirmation", "response")),
+        ("confirm_twice", ("confirmation", "duplicate_response")),
+    ],
+)
+def test_score_binds_every_response_mode_to_trial_mode(
+    event_kind: str, response_path: tuple[str, ...],
+) -> None:
+    observation = _score_observation(event_kind)
+    observation.update({
+        "case_sha256": "a" * 64,
+        "candidate_snapshot_sha256": "b" * 64,
+        "input_sha256": "c" * 64,
+        "mode": "all_tools",
+    })
+    selected: dict[str, object] = observation
+    for component in response_path:
+        selected = selected[component]  # type: ignore[assignment,index]
+    selected["mode"] = "stateful"
+
+    with pytest.raises(ValidationError, match="response mode"):
+        score_trial(_score_case(event_kind), observation)
 
 
 def test_score_rejects_confirmation_state_mismatch() -> None:
@@ -2042,6 +2096,14 @@ observation.update({{
     "input_sha256": "d" * 64,
     "mode": args.mode,
 }})
+for response in (
+    observation["response"],
+    observation["replay"].get("response"),
+    observation["confirmation"].get("response"),
+    observation["confirmation"].get("duplicate_response"),
+):
+    if response is not None:
+        response["mode"] = args.mode
 args.output.write_bytes((json.dumps(observation, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\\n").encode("ascii"))
 {mutation}
 '''.encode("utf-8")
@@ -2228,6 +2290,39 @@ def test_protocol_is_exclusive_canonical_and_resume_requires_exact_bytes(
     path.write_bytes(expected[:-1] + b" ")
     with pytest.raises(ValueError, match="protocol"):
         write_run_protocol_exclusive(root, protocol)
+
+
+def test_protocol_serialization_upper_bound_fits_explicit_protocol_cap() -> None:
+    maximum = maximum_protocol_serialized_bytes()
+
+    assert 16 * 1024 * 1024 < maximum <= MAX_PROTOCOL_BYTES
+    assert MAX_PROTOCOL_BYTES == 64 * 1024 * 1024
+    assert len(canonical_json_bytes(EvaluationProtocol.model_validate(_protocol_data()))) + 1 <= maximum
+
+
+def test_result_bundle_serialization_upper_bound_fits_explicit_bundle_cap() -> None:
+    maximum = maximum_result_bundle_serialized_bytes()
+
+    assert maximum_protocol_serialized_bytes() < maximum <= MAX_RESULT_BUNDLE_BYTES
+    assert MAX_RESULT_BUNDLE_BYTES == 128 * 1024 * 1024
+
+
+def test_protocol_writer_fails_before_publication_when_canonical_bytes_exceed_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import evaluation.blinded_runner as runner
+
+    root = tmp_path / "run"
+    root.mkdir()
+    protocol = EvaluationProtocol.model_validate(_protocol_data())
+    canonical_size = len(canonical_json_bytes(protocol)) + 1
+    monkeypatch.setattr(runner, "MAX_PROTOCOL_BYTES", canonical_size - 1)
+
+    with pytest.raises(ValueError, match="protocol.*maximum"):
+        runner.write_run_protocol_exclusive(root, protocol)
+
+    assert not (root / "protocol.json").exists()
+    assert list(root.iterdir()) == []
 
 
 def test_protocol_writer_rejects_preexisting_symlink(tmp_path: Path) -> None:
@@ -2480,13 +2575,15 @@ def test_interrupted_host_subprocess_is_killed_and_awaited(
         await selected.wait()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(runner, "_attach_windows_job", lambda _: None)
+    import evaluation.blinded_runtime as runtime
+
+    monkeypatch.setattr(runtime, "_attach_windows_job", lambda _: None)
 
     async def release_bootstrap(_: FakeProcess) -> None:
         return None
 
-    monkeypatch.setattr(runner, "_release_windows_bootstrap", release_bootstrap)
-    monkeypatch.setattr(runner, "_terminate_process_tree", terminate_tree)
+    monkeypatch.setattr(runtime, "_release_windows_bootstrap", release_bootstrap)
+    monkeypatch.setattr(runtime, "_terminate_process_tree", terminate_tree)
     (tmp_path / "backend").mkdir()
 
     async def exercise() -> None:
@@ -2984,8 +3081,6 @@ def test_early_parent_exit_with_pipe_holding_descendant_is_terminated_without_ha
 def test_trial_host_cancellation_kills_descendant_without_hang(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import evaluation.blinded_runner as runner
-
     backend = tmp_path / "backend"
     script = backend / "evaluation" / "scripts" / "evaluation_trial_host.py"
     script.parent.mkdir(parents=True)
@@ -3002,7 +3097,9 @@ def test_trial_host_cancellation_kills_descendant_without_hang(
         "time.sleep(10)\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(runner, "_HOST_TEARDOWN_SECONDS", 2.0)
+    import evaluation.blinded_runtime as runtime
+
+    monkeypatch.setattr(runtime, "HOST_TEARDOWN_SECONDS", 2.0)
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     input_path = tmp_path / "input.json"
@@ -3011,7 +3108,7 @@ def test_trial_host_cancellation_kills_descendant_without_hang(
     index.mkdir()
     storage = tmp_path / "storage"
 
-    async def exercise() -> None:
+    async def exercise() -> int:
         task = asyncio.create_task(
             _invoke_trial_host(
                 tool_root=tmp_path,
@@ -3028,16 +3125,23 @@ def test_trial_host_cancellation_kills_descendant_without_hang(
         )
         child_path = storage / "child.pid"
         deadline = asyncio.get_running_loop().time() + 3
-        while not child_path.exists():
+        child_pid: int | None = None
+        while child_pid is None:
+            try:
+                value = child_path.read_text().strip()
+                child_pid = int(value) if value else None
+            except FileNotFoundError:
+                pass
             if asyncio.get_running_loop().time() >= deadline:
                 raise AssertionError("trial descendant did not start")
-            await asyncio.sleep(0.02)
+            if child_pid is None:
+                await asyncio.sleep(0.02)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=3)
+        return child_pid
 
-    asyncio.run(exercise())
-    child_pid = int((storage / "child.pid").read_text())
+    child_pid = asyncio.run(exercise())
     deadline = time.monotonic() + 2
     while _process_exists(child_pid) and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -3047,8 +3151,6 @@ def test_trial_host_cancellation_kills_descendant_without_hang(
 def test_trial_host_output_flood_is_bounded_and_descendant_is_killed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import evaluation.blinded_runner as runner
-
     backend = tmp_path / "backend"
     script = backend / "evaluation" / "scripts" / "evaluation_trial_host.py"
     script.parent.mkdir(parents=True)
@@ -3067,7 +3169,9 @@ def test_trial_host_output_flood_is_bounded_and_descendant_is_killed(
         "time.sleep(60)\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(runner, "_HOST_WATCHDOG_SECONDS", 10)
+    import evaluation.blinded_runtime as runtime
+
+    monkeypatch.setattr(runtime, "HOST_WATCHDOG_SECONDS", 10)
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     input_path = tmp_path / "input.json"
@@ -3094,7 +3198,7 @@ def test_trial_host_output_flood_is_bounded_and_descendant_is_killed(
     )
 
     assert outcome == "transport_failure"
-    assert stdout.stat().st_size == runner._HOST_OUTPUT_CAP_BYTES
+    assert stdout.stat().st_size == HOST_OUTPUT_CAP_BYTES
     child_pid = int((storage / "child.pid").read_text())
     deadline = time.monotonic() + 3
     while _process_exists(child_pid) and time.monotonic() < deadline:

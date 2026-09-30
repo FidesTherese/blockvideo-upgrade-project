@@ -14,14 +14,14 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 MAX_INPUT_BYTES = 2 * 1024 * 1024
 MAX_WORKER_OUTPUT_BYTES = 512 * 1024
-MAX_SUBPROCESS_LOG_BYTES = 2 * 1024 * 1024
+FILE_HASH_CHUNK_BYTES = 1024 * 1024
 PROTOCOL_DEADLINE_SECONDS = 180
 MODEL_CALL_LIMIT = 4
 MAX_OBSERVED_PROJECTS = 1 + 16
@@ -71,24 +71,112 @@ async def _quiescent_candidate_dispatcher() -> None:
     await asyncio.Event().wait()
 
 
+def _stable_path_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size
+
+
+def _canonical_stored_relative_path(relative: str) -> tuple[str, ...]:
+    if not relative or "\0" in relative or "\\" in relative or ":" in relative:
+        raise ValueError("stored media path must be canonical relative POSIX")
+    if relative.startswith("/") or re.match(r"^[A-Za-z]:", relative):
+        raise ValueError("stored media path must be relative")
+    components = tuple(relative.split("/"))
+    if any(component in {"", ".", ".."} for component in components):
+        raise ValueError("stored media path contains an unsafe component")
+    if PurePosixPath(relative).as_posix() != relative:
+        raise ValueError("stored media path is not canonical POSIX")
+    return components
+
+
+def _checked_path_component(path: Path, *, directory: bool) -> os.stat_result:
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
+        raise ValueError("stored media path contains a link or reparse point")
+    if directory and not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("stored media path parent is not a directory")
+    return metadata
+
+
 def _file_identity(storage_root: Path, relative: str | None) -> dict[str, Any] | None:
     if relative is None:
         return None
+    components = _canonical_stored_relative_path(relative)
     path_sha256 = hashlib.sha256(relative.encode("utf-8")).hexdigest()
-    path = storage_root / relative
-    if not path.is_file():
+    root = storage_root.absolute()
+    root_metadata = _checked_path_component(root, directory=True)
+    if root.resolve(strict=True) != root:
+        raise ValueError("storage root is not canonical")
+
+    checked: list[tuple[Path, tuple[int, int, int, int], bool]] = [
+        (root, _stable_path_identity(root_metadata), True)
+    ]
+    path = root
+    missing = False
+    for index, component in enumerate(components):
+        path /= component
+        is_directory = index < len(components) - 1
+        try:
+            metadata = _checked_path_component(path, directory=is_directory)
+        except FileNotFoundError:
+            missing = True
+            break
+        checked.append((path, _stable_path_identity(metadata), is_directory))
+
+    if missing:
+        for checked_path, expected, is_directory in checked:
+            current = _checked_path_component(checked_path, directory=is_directory)
+            if _stable_path_identity(current) != expected:
+                raise ValueError("stored media path identity changed")
         return {
             "exists": False,
             "path_sha256": path_sha256,
             "size": None,
             "sha256": None,
         }
-    data = path.read_bytes()
+
+    before = path.lstat()
+    if stat.S_ISLNK(before.st_mode) or _is_reparse(before):
+        raise ValueError("stored media path final is a link or reparse point")
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("stored media path final is not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise ValueError("stored media file identity changed while opening")
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := os.read(descriptor, FILE_HASH_CHUNK_BYTES):
+            size += len(chunk)
+            if size > 2**63 - 1:
+                raise ValueError("stored media file is too large")
+            digest.update(chunk)
+        final = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after = _checked_path_component(path, directory=False)
+    identities = {
+        _stable_path_identity(before),
+        _stable_path_identity(opened),
+        _stable_path_identity(final),
+        _stable_path_identity(after),
+    }
+    if len(identities) != 1 or size != final.st_size:
+        raise ValueError("stored media file identity changed while hashing")
+    for checked_path, expected, is_directory in checked[:-1]:
+        current = _checked_path_component(checked_path, directory=is_directory)
+        if _stable_path_identity(current) != expected:
+            raise ValueError("stored media path component identity changed")
     return {
         "exists": True,
         "path_sha256": path_sha256,
-        "size": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": size,
+        "sha256": digest.hexdigest(),
     }
 
 
@@ -403,6 +491,18 @@ class TrialObservation(_WorkerObservation):
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     mode: Literal["all_tools", "stateful"]
 
+    @model_validator(mode="after")
+    def responses_match_mode(self) -> TrialObservation:
+        responses = (
+            self.response,
+            self.replay.response,
+            self.confirmation.response,
+            self.confirmation.duplicate_response,
+        )
+        if any(response is not None and response.mode != self.mode for response in responses):
+            raise ValueError("every response mode must equal the trial mode")
+        return self
+
 
 def _canonical_json_bytes(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
@@ -688,30 +788,20 @@ def _clean_environment(candidate_backend: Path, storage: Path, case_path: Path, 
     return env
 
 
-def _unlink_retry(path: Path) -> None:
-    for attempt in range(20):
-        try:
-            path.unlink(missing_ok=True)
-            return
-        except PermissionError:
-            if attempt == 19:
-                raise
-            time.sleep(0.025)
-
-
 def _run_candidate(command: list[str], *, cwd: Path, env: dict[str, str], storage: Path) -> None:
-    token = secrets.token_hex(16)
-    stdout_path, stderr_path = storage / f"worker-{token}.stdout", storage / f"worker-{token}.stderr"
-    stdout_fd, stderr_fd = _exclusive_file(stdout_path), _exclusive_file(stderr_path)
+    process: subprocess.Popen[bytes] | None = None
     try:
-        process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                   stdout=stdout_fd, stderr=stderr_fd, close_fds=True)
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+        )
     except OSError:
-        os.close(stdout_fd)
-        os.close(stderr_fd)
         raise ValueError("candidate subprocess failed") from None
-    os.close(stdout_fd)
-    os.close(stderr_fd)
     deadline = time.monotonic() + SUBPROCESS_TIMEOUT_SECONDS
     failure: str | None = None
     try:
@@ -720,22 +810,14 @@ def _run_candidate(command: list[str], *, cwd: Path, env: dict[str, str], storag
                 failure = "candidate subprocess timed out"
                 process.kill()
                 break
-            if stdout_path.stat().st_size > MAX_SUBPROCESS_LOG_BYTES or stderr_path.stat().st_size > MAX_SUBPROCESS_LOG_BYTES:
-                failure = "candidate subprocess output limit exceeded"
-                process.kill()
-                break
             time.sleep(0.02)
         process.wait(timeout=5)
         if failure is not None or process.returncode != 0:
             raise ValueError(failure or "candidate subprocess failed")
-        if stdout_path.stat().st_size > MAX_SUBPROCESS_LOG_BYTES or stderr_path.stat().st_size > MAX_SUBPROCESS_LOG_BYTES:
-            raise ValueError("candidate subprocess output limit exceeded")
     finally:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
-        _unlink_retry(stdout_path)
-        _unlink_retry(stderr_path)
 
 
 def _atomic_publish(output_path: Path, payload: bytes, *, candidate_root: Path) -> None:
@@ -1076,6 +1158,13 @@ def _candidate_worker(model_call_budget: int) -> int:
         def file_identity(relative: str | None) -> dict[str, Any] | None:
             return _file_identity(storage_root, relative)
 
+        settings_fields = tuple(initial["settings"])
+
+        def projected_settings(value: Any) -> dict[str, Any]:
+            if isinstance(value, dict):
+                return {name: value[name] for name in settings_fields}
+            return {name: getattr(value, name) for name in settings_fields}
+
         def canonical_state() -> dict[str, Any]:
             with get_session_factory()() as db:
                 projects = list(db.scalars(select(Project).order_by(Project.id)))
@@ -1089,9 +1178,9 @@ def _candidate_worker(model_call_budget: int) -> int:
                 primary = db.get(Project, initial["project_id"])
                 state = {
                     "primary": {"revision": primary.revision, "status": primary.status.value,
-                                "settings": configuration(primary)},
+                                "settings": projected_settings(primary)},
                     "projects": [{"id": row.id, "revision": row.revision, "status": row.status.value,
-                        "settings": configuration(row), "title_sha256": _hash(row.title),
+                        "settings": projected_settings(row), "title_sha256": _hash(row.title),
                         "source_script_sha256": _hash(row.source_script),
                         "global_visual_style_sha256": _hash(row.global_visual_style),
                         "progress": row.progress, "current_stage": row.current_stage,
@@ -1101,7 +1190,7 @@ def _candidate_worker(model_call_budget: int) -> int:
                         "error_sha256": _hash(row.error_message),
                         "created_at": row.created_at.isoformat(), "updated_at": row.updated_at.isoformat()} for row in projects],
                     "history": [{"project_id": row.project_id, "revision": row.revision,
-                        "settings": row.settings_json, "changed_fields": sorted(row.changed_fields or []),
+                        "settings": projected_settings(row.settings_json), "changed_fields": sorted(row.changed_fields or []),
                         "restored_from_revision": row.restored_from_revision,
                         "created_at": row.created_at.isoformat()} for row in history],
                     "jobs": [{"id": row.id, "project_id": row.project_id, "status": row.status.value,
@@ -1340,11 +1429,13 @@ def _candidate_worker(model_call_budget: int) -> int:
                 replay_response = concurrent_response
                 replay_after = after_submit
             elif kind == "switch_target":
-                switched = request_payload({**request, "request_id": request["request_id"] + ".switch"},
-                    text=event["replacement_text"], target=event["replacement_target_project_id"])
-                switched["target"]["selected_project_id"] = event["selected_project_id_after"]
+                if event["action"] != "read_original_request":
+                    raise ValueError("unsupported switch-target action")
+                selected_project_id = event["selected_project_id_after"]
+                if selected_project_id == request["target_project_id"]:
+                    raise ValueError("switch-target event did not change selection")
                 replay_before = canonical_state()
-                replay_http = client.post("/api/language/requests", json=switched)
+                replay_http = client.post("/api/language/requests", json=payload)
                 replay_response = replay_http.json()
                 replay_after = canonical_state()
 

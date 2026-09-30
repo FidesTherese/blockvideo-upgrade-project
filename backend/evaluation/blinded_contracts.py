@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import stat
@@ -16,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from evaluation.contracts import Case
 
 MAX_PROTOCOL_CASES = 65_535
+MAX_PROTOCOL_BYTES = 64 * 1024 * 1024
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _CASE_ID_PATTERN = re.compile(r"^D24-[DH]\d{3}$")
 _CASE_DOMAIN = b"blockvideo-case-v1\0"
@@ -26,6 +28,54 @@ OpaqueToken = Annotated[str, Field(pattern=_SHA256_PATTERN)]
 Sha256 = Annotated[str, Field(pattern=_SHA256_PATTERN)]
 ProtocolCount = Annotated[int, Field(strict=True, ge=1, le=MAX_PROTOCOL_CASES)]
 ResultCount = Annotated[int, Field(strict=True, ge=0, le=MAX_PROTOCOL_CASES)]
+
+
+def _canonical_json_length(value: object) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    )
+
+
+def maximum_protocol_serialized_bytes() -> int:
+    """Return a proven canonical-byte upper bound for the maximum protocol topology."""
+    token = "0" * 64
+    scalar_shape = {
+        "schema_version": 1,
+        "candidate_id": "\U0010ffff" * 128,
+        "modes": ["all_tools", "stateful"],
+        "per_call_deadline_seconds": 180,
+        "maximum_model_calls": 4,
+        "isolation": "fresh_case_state_under_source_group",
+        "corpus_sha256": token,
+        "human_approval_sha256": token,
+        "independent_approval_sha256": token,
+        "freeze_sha256": token,
+        "d36_trial_tool_sha256": token,
+        "d37_evaluator_tool_sha256": token,
+        "model_configuration_sha256": token,
+        "stateful_index_sha256": token,
+        "category_count": MAX_PROTOCOL_CASES,
+        "category_tokens": [],
+        "case_count": MAX_PROTOCOL_CASES,
+        "case_tokens": [],
+        "case_categories": [],
+    }
+    token_item_length = _canonical_json_length(token)
+    binding_item_length = _canonical_json_length(
+        {"case_token": token, "category_token": token}
+    )
+    topology_growth = (
+        2 * (MAX_PROTOCOL_CASES * (token_item_length + 1) - 1)
+        + MAX_PROTOCOL_CASES * (binding_item_length + 1)
+        - 1
+    )
+    return _canonical_json_length(scalar_shape) + topology_growth + 1
 
 
 class _StrictModel(BaseModel):
