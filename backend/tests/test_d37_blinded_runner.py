@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,17 +19,38 @@ from evaluation.blinded_contracts import (
     opaque_category_token,
     token_key,
 )
+from evaluation.blinded_runner import (
+    _D36_SOURCE_PATHS,
+    _D37_SOURCE_PATHS,
+    case_to_unlabeled,
+    run_blinded_evaluation,
+    write_run_protocol_exclusive,
+)
 from evaluation.blinded_scoring import score_trial
 from evaluation.contracts import Case
-from evaluation.corpus import eligibility, load_cases, load_review
+from evaluation.corpus import (
+    case_digest,
+    corpus_digest,
+    eligibility,
+    load_cases,
+    load_review,
+)
 from evaluation.result_contracts import (
     CategoryResult,
     EvaluationResultBundle,
     ModeResult,
     approval_partition,
 )
+from evaluation.release_candidate.contracts import FreezeManifest
+from evaluation.release_candidate.fingerprints import aggregate_fingerprints
 from evaluation.sealed_evidence import seal_evidence
-from evaluation.tool_attestation import attest_tool
+from evaluation.tool_attestation import (
+    FileFingerprint,
+    ToolAttestation,
+    attest_tool,
+    canonical_json_bytes,
+)
+from evaluation.unlabeled_contracts import UnlabeledTrialCase
 
 FIXTURES = Path(__file__).parent / "fixtures" / "blinded"
 SYNTHETIC_KEY = bytes(range(32))
@@ -1905,3 +1928,542 @@ def test_seal_evidence_rejects_root_escape_and_logs_no_contents(
     with pytest.raises(ValueError, match="root|symlink|reparse"):
         seal_evidence(root)
     assert "outside" not in caplog.text
+
+
+def _write_canonical(path: Path, value: object) -> bytes:
+    raw = canonical_json_bytes(value) + b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return raw
+
+
+def _make_task4_candidate(root: Path) -> tuple[Path, str, list[FileFingerprint]]:
+    candidate = root / "candidate"
+    (candidate / "backend").mkdir(parents=True)
+    (candidate / "backend" / "candidate.txt").write_bytes(b"synthetic D35 candidate\n")
+    _git(candidate, "init", "-q")
+    _git(candidate, "config", "user.email", "d37@example.invalid")
+    _git(candidate, "config", "user.name", "D37 Test")
+    _git(candidate, "add", ".")
+    _git(candidate, "commit", "-q", "-m", "synthetic detached D35")
+    commit = _git(candidate, "rev-parse", "HEAD")
+    _git(candidate, "checkout", "-q", "--detach", commit)
+    content = (candidate / "backend" / "candidate.txt").read_bytes()
+    files = [
+        FileFingerprint(
+            path="backend/candidate.txt",
+            sha256=hashlib.sha256(content).hexdigest(),
+            size=len(content),
+        )
+    ]
+    return candidate, commit, files
+
+
+def _task4_host_source(observation: dict[str, object], *, mutate_candidate: bool = False) -> bytes:
+    encoded = json.dumps(observation, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    mutation = "(candidate / 'backend' / 'candidate.txt').write_text('mutated')" if mutate_candidate else "pass"
+    return f'''import argparse
+import json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--candidate-root", type=Path, required=True)
+parser.add_argument("--mode", required=True)
+parser.add_argument("--input", type=Path, required=True)
+parser.add_argument("--output", type=Path, required=True)
+parser.add_argument("--storage", type=Path, required=True)
+parser.add_argument("--model", required=True)
+parser.add_argument("--index", type=Path)
+args = parser.parse_args()
+candidate = args.candidate_root
+payload = json.loads(args.input.read_text(encoding="ascii"))
+forbidden = {{"expected", "review", "decision", "score", "labels"}}
+def keys(value):
+    if isinstance(value, dict):
+        return set(value) | set().union(*(keys(item) for item in value.values()))
+    if isinstance(value, list):
+        return set().union(*(keys(item) for item in value)) if value else set()
+    return set()
+if keys(payload) & forbidden:
+    raise SystemExit(3)
+args.storage.mkdir(parents=True, exist_ok=False)
+(args.storage / "host-marker.txt").write_text(args.mode, encoding="ascii")
+observation = json.loads({encoded!r})
+observation.update({{
+    "case_sha256": payload["case_sha256"],
+    "candidate_snapshot_sha256": "c" * 64,
+    "input_sha256": "d" * 64,
+    "mode": args.mode,
+}})
+args.output.write_bytes((json.dumps(observation, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\\n").encode("ascii"))
+{mutation}
+'''.encode("utf-8")
+
+
+def _make_task4_tool_repo(
+    root: Path, observation: dict[str, object], *, mutate_candidate: bool = False
+) -> tuple[Path, str, ToolAttestation]:
+    repository = root / "tool-repository"
+    repository.mkdir()
+    host_path = "backend/evaluation/scripts/evaluation_trial_host.py"
+    all_paths = sorted(set(_D36_SOURCE_PATHS) | set(_D37_SOURCE_PATHS))
+    for relative in all_paths:
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(
+            _task4_host_source(observation, mutate_candidate=mutate_candidate)
+            if relative == host_path
+            else f"synthetic committed source: {relative}\n".encode("utf-8")
+        )
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.email", "d37@example.invalid")
+    _git(repository, "config", "user.name", "D37 Test")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-q", "-m", "synthetic D36 and D37 tools")
+    commit = _git(repository, "rev-parse", "HEAD")
+    attestation = attest_tool(
+        repo_root=repository,
+        tool_name="d36_candidate_freezer_and_trial_host",
+        git_commit=commit,
+        source_paths=_D36_SOURCE_PATHS,
+    )
+    return repository, commit, attestation
+
+
+def _make_task4_publication(
+    root: Path,
+    commit: str,
+    candidate_files: list[FileFingerprint],
+    d36_attestation: ToolAttestation,
+) -> Path:
+    aggregate = aggregate_fingerprints(candidate_files)
+    candidate_id = f"{aggregate[:16]}-{commit[:12]}"
+    publication = root / "freeze" / candidate_id
+    publication.mkdir(parents=True)
+    manifest = FreezeManifest(
+        schema_version=1,
+        candidate_id=candidate_id,
+        git_commit=commit,
+        git_tree_clean=True,
+        candidate_control_sha256="a" * 64,
+        created_at="2026-09-20T00:00:00Z",
+        runtime={"python": "3.12.12"},
+        schema_version_number=1,
+        mode_configuration={"modes": ["all_tools", "stateful"]},
+        files=candidate_files,
+        aggregate_sha256=aggregate,
+    )
+    manifest_raw = _write_canonical(publication / "freeze-manifest.json", manifest)
+    attestation_raw = _write_canonical(
+        publication / "d36-tool-attestation.json", d36_attestation
+    )
+    marker_files = [
+        FileFingerprint(
+            path=name,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            size=len(raw),
+        )
+        for name, raw in (
+            ("d36-tool-attestation.json", attestation_raw),
+            ("freeze-manifest.json", manifest_raw),
+        )
+    ]
+    _write_canonical(
+        publication / ".d36-publication-state",
+        {"schema_version": 1, "files": [item.model_dump(mode="json") for item in marker_files]},
+    )
+    return publication / "freeze-manifest.json"
+
+
+def _write_task4_inputs(root: Path, case: Case) -> tuple[Path, Path, Path, Path, Path]:
+    corpus = root / "held-out.jsonl"
+    corpus.write_text(case.model_dump_json() + "\n", encoding="utf-8")
+    corpus_hash = corpus_digest([case])
+    case_hash = case_digest(case)
+    review_paths = []
+    for role, name in (("human", "human-review.json"), ("independent_ai", "independent-review.json")):
+        path = root / name
+        _write_canonical(
+            path,
+            {
+                "schema_version": 1,
+                "corpus_sha256": corpus_hash,
+                "role": role,
+                "reviewer": "Synthetic reviewer",
+                "reviewed_at": "2026-09-20T00:00:00Z",
+                "entries": [
+                    {
+                        "case_id": case.case_id,
+                        "case_sha256": case_hash,
+                        "decision": "approved",
+                        "note": "synthetic",
+                    }
+                ],
+            },
+        )
+        review_paths.append(path)
+    index = root / "stateful-index"
+    index.mkdir()
+    (index / "index.json").write_bytes(b"{}\n")
+    key = root / "token.key"
+    key.write_bytes(SYNTHETIC_KEY)
+    return corpus, review_paths[0], review_paths[1], index, key
+
+
+def _task4_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *, mutate_candidate: bool = False,
+) -> dict[str, object]:
+    case = _score_case("none")
+    observation = _score_observation("none")
+    candidate, candidate_commit, candidate_files = _make_task4_candidate(tmp_path)
+    tool_repo, _, d36_attestation = _make_task4_tool_repo(
+        tmp_path, observation, mutate_candidate=mutate_candidate
+    )
+    freeze_manifest = _make_task4_publication(
+        tmp_path, candidate_commit, candidate_files, d36_attestation
+    )
+    corpus, human, independent, index, key = _write_task4_inputs(tmp_path, case)
+    monkeypatch.setattr("evaluation.blinded_runner._tool_repo_root", lambda: tool_repo)
+    return {
+        "candidate_root": candidate,
+        "freeze_manifest": freeze_manifest,
+        "corpus": corpus,
+        "human_review": human,
+        "independent_review": independent,
+        "output_root": tmp_path / "results",
+        "model": "synthetic-model",
+        "index": index,
+        "evaluator_name": "Synthetic independent evaluator",
+        "token_key_file": key,
+    }
+
+
+def test_case_projection_is_explicitly_unlabeled_and_strictly_serializable() -> None:
+    case = _score_case("none")
+    projected = case_to_unlabeled(case)
+    raw = canonical_json_bytes(projected.model_dump(mode="json", exclude_unset=True))
+
+    assert UnlabeledTrialCase.model_validate_json(raw, strict=True) == projected
+    assert projected.category == case.tags[0]
+    assert projected.event.request.text == case.request.text
+    for forbidden in (
+        b"expected",
+        b"rationale",
+        b"rule_ids",
+        b"known_limitation",
+        b"decision",
+    ):
+        assert forbidden not in raw
+    with pytest.raises(ValidationError):
+        UnlabeledTrialCase.model_validate({**projected.model_dump(mode="json"), "expected": {}})
+
+
+def test_protocol_is_exclusive_canonical_and_resume_requires_exact_bytes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
+    protocol = EvaluationProtocol.model_validate(_protocol_data())
+    path = write_run_protocol_exclusive(root, protocol)
+    expected = canonical_json_bytes(protocol) + b"\n"
+
+    assert path.read_bytes() == expected
+    assert write_run_protocol_exclusive(root, protocol) == path
+    path.write_bytes(expected[:-1] + b" ")
+    with pytest.raises(ValueError, match="protocol"):
+        write_run_protocol_exclusive(root, protocol)
+
+
+def test_protocol_writer_rejects_preexisting_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
+    target = tmp_path / "target.json"
+    target.write_bytes(b"{}")
+    try:
+        (root / "protocol.json").symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError, match="protocol"):
+        write_run_protocol_exclusive(root, EvaluationProtocol.model_validate(_protocol_data()))
+
+
+def test_external_runner_uses_attested_host_detached_candidate_and_redacted_aggregate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    bundle = asyncio.run(run_blinded_evaluation(**arguments))
+    output = arguments["output_root"]
+    protocol_raw = (output / "protocol.json").read_bytes()
+    bundle_raw = (output / "result-bundle.json").read_bytes()
+
+    assert bundle.protocol_sha256 == hashlib.sha256(protocol_raw).hexdigest()
+    d37_attestation = ToolAttestation.model_validate_json(
+        (output / "tool-attestation.json").read_bytes(), strict=True
+    )
+    assert d37_attestation.aggregate_sha256 == bundle.d37_evaluator_tool_sha256
+    assert bundle.d36_trial_tool_sha256 != bundle.d37_evaluator_tool_sha256
+    assert bundle.included_count == 1
+    assert [mode.mode for mode in bundle.modes] == ["all_tools", "stateful"]
+    assert all(mode.completed == mode.task_complete == 1 for mode in bundle.modes)
+    assert _git(arguments["candidate_root"], "status", "--porcelain=v1") == ""
+    assert _git(arguments["candidate_root"], "branch", "--show-current") == ""
+    for forbidden in (
+        b"D24-H900",
+        b"synthetic request",
+        b"confirmation",
+        b"expected",
+        str(arguments["candidate_root"]).encode(),
+        SYNTHETIC_KEY,
+    ):
+        assert forbidden not in protocol_raw
+        assert forbidden not in bundle_raw
+    trial_roots = sorted((output / "groups" / "000001" / "cases").glob("*/*"))
+    assert len(trial_roots) == 2
+    assert {path.name for path in trial_roots} == {"all_tools", "stateful"}
+    assert all(
+        next(path.glob("attempts/*/storage/host-marker.txt")).is_file()
+        for path in trial_roots
+    )
+
+
+def test_runner_detects_candidate_mutation_after_trial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch, mutate_candidate=True)
+    with pytest.raises(ValueError, match="candidate"):
+        asyncio.run(run_blinded_evaluation(**arguments))
+
+
+def test_runner_partial_resume_preserves_completed_records_and_exact_protocol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    import evaluation.blinded_runner as runner
+
+    real_invoke = runner._invoke_trial_host
+    calls = 0
+
+    async def interrupt_after_first(**kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyboardInterrupt
+        return await real_invoke(**kwargs)
+
+    monkeypatch.setattr(runner, "_invoke_trial_host", interrupt_after_first)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(run_blinded_evaluation(**arguments))
+    output = arguments["output_root"]
+    protocol_before = (output / "protocol.json").read_bytes()
+    records_before = list(output.glob("groups/*/cases/*/*/trial-result.json"))
+    assert len(records_before) == 1
+    record_bytes = records_before[0].read_bytes()
+    partial = json.loads((output / "partial-result.json").read_bytes())
+    assert partial["completed_case_tokens"] == []
+    assert len(partial["started_case_tokens"]) == 1
+    assert b"D24-H900" not in (output / "partial-result.json").read_bytes()
+
+    monkeypatch.setattr(runner, "_invoke_trial_host", real_invoke)
+    bundle = asyncio.run(run_blinded_evaluation(**arguments))
+    assert (output / "protocol.json").read_bytes() == protocol_before
+    assert records_before[0].read_bytes() == record_bytes
+    assert bundle.modes[0].completed == bundle.modes[1].completed == 1
+
+
+def test_runner_rejects_protocol_input_change_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    asyncio.run(run_blinded_evaluation(**arguments))
+    arguments["model"] = "different-model"
+    with pytest.raises(ValueError, match="protocol"):
+        asyncio.run(run_blinded_evaluation(**arguments))
+
+
+def test_completed_resume_rejects_changed_evaluator_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    asyncio.run(run_blinded_evaluation(**arguments))
+    arguments["evaluator_name"] = "Different synthetic evaluator"
+    with pytest.raises(ValueError, match="result bundle"):
+        asyncio.run(run_blinded_evaluation(**arguments))
+
+
+def test_runner_refuses_unattested_trial_host_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    tool_repo = Path(_git(tmp_path / "tool-repository", "rev-parse", "--show-toplevel"))
+    host = tool_repo / "backend/evaluation/scripts/evaluation_trial_host.py"
+    host.write_bytes(host.read_bytes() + b"\n# uncommitted mutation\n")
+    with pytest.raises(ValueError, match="tool|attest|source|clean"):
+        asyncio.run(run_blinded_evaluation(**arguments))
+
+
+def test_runner_uses_sorted_case_order_alternating_modes_and_exact_shared_topology(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    arguments.update(
+        {
+            "corpus": FIXTURES / "synthetic-held-out.jsonl",
+            "human_review": FIXTURES / "synthetic-human-review.json",
+            "independent_review": FIXTURES / "synthetic-independent-review.json",
+        }
+    )
+    import evaluation.blinded_runner as runner
+
+    calls: list[tuple[str, str]] = []
+
+    async def successful_trial(**kwargs: object) -> object:
+        output = Path(arguments["output_root"])
+        assert (output / "protocol.json").is_file()
+        case = kwargs["case"]
+        mode = kwargs["mode"]
+        calls.append((case.case_id, mode))
+        return runner._TrialRecord(
+            schema_version=1,
+            protocol_sha256=kwargs["protocol_sha256"],
+            case_token=kwargs["case_token"],
+            category_token=kwargs["category_token"],
+            mode=mode,
+            outcome="completed",
+            score={
+                "task_complete": True,
+                "unauthorized_effect": False,
+                "unauthorized_replay": False,
+                "secret_disclosure": False,
+                "checks": {"synthetic": True},
+            },
+            candidate_snapshot_sha256="c" * 64,
+        )
+
+    monkeypatch.setattr(runner, "_run_trial", successful_trial)
+    bundle = asyncio.run(run_blinded_evaluation(**arguments))
+
+    assert calls == [
+        ("D24-H001", "all_tools"),
+        ("D24-H001", "stateful"),
+        ("D24-H002", "stateful"),
+        ("D24-H002", "all_tools"),
+    ]
+    assert bundle.protocol_case_tokens == CASE_TOKENS
+    assert bundle.protocol_category_tokens == CATEGORY_TOKENS
+    assert tuple(item.model_dump(mode="json") for item in bundle.case_categories) == BINDINGS
+    assert bundle.included_case_tokens == INCLUDED
+    assert tuple(item.model_dump(mode="json") for item in bundle.excluded_cases) == EXCLUDED
+    assert all(
+        tuple(category.category_token for category in mode.categories) == CATEGORY_TOKENS
+        for mode in bundle.modes
+    )
+
+
+@pytest.mark.parametrize("changed_input", ["corpus", "human_review", "index", "freeze"])
+def test_partial_resume_rejects_changed_bound_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_input: str,
+) -> None:
+    arguments = _task4_environment(tmp_path, monkeypatch)
+    import evaluation.blinded_runner as runner
+
+    async def interrupt(**_: object) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "_invoke_trial_host", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(run_blinded_evaluation(**arguments))
+
+    if changed_input == "corpus":
+        Path(arguments["corpus"]).write_bytes(Path(arguments["corpus"]).read_bytes() + b"\n")
+    elif changed_input == "human_review":
+        Path(arguments["human_review"]).write_bytes(
+            Path(arguments["human_review"]).read_bytes() + b" \n"
+        )
+    elif changed_input == "index":
+        (Path(arguments["index"]) / "index.json").write_bytes(b'{"changed":true}\n')
+    else:
+        Path(arguments["freeze_manifest"]).write_bytes(
+            Path(arguments["freeze_manifest"]).read_bytes() + b" "
+        )
+
+    with pytest.raises(ValueError):
+        asyncio.run(run_blinded_evaluation(**arguments))
+
+
+def test_interrupted_host_subprocess_is_killed_and_awaited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import evaluation.blinded_runner as runner
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.killed = False
+            self.finished = asyncio.Event()
+
+        async def wait(self) -> int:
+            await self.finished.wait()
+            return self.returncode or 0
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+            self.finished.set()
+
+    process = FakeProcess()
+
+    async def create_process(*_: object, **__: object) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    (tmp_path / "backend").mkdir()
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            runner._invoke_trial_host(
+                tool_root=tmp_path,
+                candidate_root=tmp_path,
+                mode="all_tools",
+                input_path=tmp_path / "input.json",
+                output_path=tmp_path / "output.json",
+                storage=tmp_path / "storage",
+                model="synthetic-model",
+                index=tmp_path / "index",
+                stdout_path=tmp_path / "stdout.log",
+                stderr_path=tmp_path / "stderr.log",
+            )
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+    assert process.killed is True
+    assert process.returncode == -9
+
+
+def test_blinded_runner_cli_exposes_only_explicit_external_inputs() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "scripts.run_blinded_evaluation", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for option in (
+        "--candidate-root",
+        "--freeze-manifest",
+        "--corpus",
+        "--human-review",
+        "--independent-review",
+        "--output",
+        "--model",
+        "--index",
+        "--evaluator-name",
+        "--token-key-file",
+    ):
+        assert option in completed.stdout

@@ -16,6 +16,7 @@ _EXCLUDED_OUTPUT_NAMES = frozenset(
         "partial-result.json",
         "protocol.json",
         "result-bundle.json",
+        "tool-attestation.json",
     }
 )
 
