@@ -940,53 +940,61 @@ and canonical hashing unchanged.
 `_validate_output_root()` permits any resolved external root but, when the root is
 inside the identified tooling repository, permits only resolved
 `<tool-repo>/release-evidence/**`; `storage`, cache directories, and every other
-ignored or tracked in-repository location fail. Publication claims the final candidate
-directory with `mkdir(exist_ok=False)`. Immediately after that exclusive creation,
-`_claim_publication_directory()` records the directory's `lstat` device/inode identity
-(the inode is the Windows file index where Python exposes it), rejects symlink/reparse/
-non-directory metadata, records the strict resolved parent, and opens all three fixed
-regular files with `O_RDWR|O_CREAT|O_EXCL` and no-follow where available:
-`.d36-publication-state`, `freeze-manifest.json`, and
-`d36-tool-attestation.json`. `_PublicationClaim` retains every descriptor and its
-path/device/inode identity for the complete claimed-I/O lifetime. Only after all three
-opens succeed does the freezer write and fsync the random 32-byte token through the
-state descriptor. Partial open failure closes each opened descriptor once and leaves
-all created entries for operator cleanup.
+ignored or tracked in-repository location fail. The freezer never creates or opens the
+final candidate path while constructing evidence. It creates one hidden staging
+directory named from a cryptographically random token directly under the validated
+output root and immediately acquires a directory anchor.
 
-`_write_owned()` and `_read_owned()` validate ownership immediately before and after
-one operation, but the operation itself uses only the retained target descriptor.
-`_write_retained()` performs descriptor-based truncate, seek, complete write, fsync,
-and identity/size verification. `_read_retained()` performs descriptor-based seek,
-bounded read, and before/after identity/size verification. Neither helper reopens a
-fixed path, calls `os.link`, nor invokes a path-based write/read helper. Ownership
-validation checks the claimed directory, resolved parent, exact three-entry set, all
-three descriptor/path identities, and expected state bytes. Therefore a directory
-rename or replacement after the pre-operation check can receive no artifact bytes:
-the operation remains anchored to the original open file object, the post-operation
-check raises `PublicationOwnershipLost`, and the replacement remains untouched.
+On POSIX the anchor is an `os.open()` descriptor with
+`O_RDONLY|O_DIRECTORY|O_NOFOLLOW`; its directory type and `(st_dev, st_ino)` identity
+come from `os.fstat()`. Every fixed child is created with `os.open(name, ..., dir_fd=
+anchor_fd)`, and all truncate/write/fsync/readback operations use retained child
+descriptors. On Windows the anchor is a `CreateFileW` directory handle opened with
+`GENERIC_READ`, `FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT`, and sharing
+`FILE_SHARE_READ|FILE_SHARE_WRITE` but not `FILE_SHARE_DELETE`.
+`GetFileInformationByHandle` supplies the volume/file-index
+identity and directory/reparse attributes. The no-delete share prevents cooperative
+rename, deletion, or directory replacement while the handle is live; fixed child paths
+are opened only while that handle is retained. Any anchor type or identity mismatch
+fails closed.
 
-The freezer writes and reads back the canonical manifest and attestation through their
-retained descriptors. After both validate, `_finish_claim()` writes the canonical
-newline-terminated `CompletionMarker` last through the retained state descriptor and
-then reads it back through that descriptor, with separate ownership checks around the
-write and read. The strict version-1 record contains exactly two sorted
-`FileFingerprint` entries, for `d36-tool-attestation.json` and
-`freeze-manifest.json`, whose sizes and SHA-256 values cover the exact canonical
-newline-terminated artifact bytes. `freeze_candidate()` closes each of the three
-retained descriptors exactly once in `finally`. Only successful completion proceeds to
-an identity-guarded directory fsync and the independent path-based
-`read_frozen_candidate()` validation. The successful directory contains exactly the
-two artifacts plus `.d36-publication-state`; no random claim-token bytes remain.
+The freezer creates exactly `.d36-publication-state`, `freeze-manifest.json`, and
+`d36-tool-attestation.json` in the anchored staging directory. It writes and fsyncs a
+random 32-byte token through the retained state descriptor, writes and reads back the
+canonical artifact bytes through retained descriptors, validates their strict models
+and aggregates, then writes and reads back the canonical newline-terminated
+`CompletionMarker` last. The strict version-1 marker contains exactly two sorted
+`FileFingerprint` entries whose sizes and SHA-256 values bind the canonical artifacts.
+The staging directory is fsynced on POSIX before publication.
 
-There is no cleanup deletion path. `_write_fsynced`, `_publish_owned`,
-`_unlink_recorded_file`, staging cleanup, artifact cleanup, state-file retirement, root
-removal, and final-directory removal do not exist. On any failure or ownership loss,
-`freeze_candidate()` closes retained descriptors and performs no rename, unlink,
-recursive deletion, replacement, or other publication-path mutation. Every partial
-remains for explicit operator cleanup, including an empty output root created before a
-pre-claim failure and the incomplete original directory wherever an external actor
-moved it. A replacement at the final path stays empty and untouched. A retry therefore
-fails the exclusive destination claim when the original final path remains.
+Publication atomically renames the whole completed staging directory to
+`<root>/<candidate_id>` with true no-replace semantics. Linux uses `renameat2(...,
+RENAME_NOREPLACE)`; unsupported POSIX platforms fail closed. Windows revalidates the
+anchor, closes retained child descriptors while the no-delete directory anchor remains
+live, rechecks each fixed child identity, closes the directory anchor immediately before
+publication, then calls `MoveFileExW(staging, final, 0)` without
+`MOVEFILE_REPLACE_EXISTING`. POSIX retains the anchor and child descriptors across the
+rename. A concurrently created final destination wins unchanged; the random staging
+directory remains and is not evidence. After a successful rename, remaining retained
+descriptors are closed, the output root is
+fsynced where supported, and only the independent `read_frozen_candidate()` reader
+opens the final path. The publisher performs no final-path file write or readback.
+
+There is no recursive cleanup, final-path cleanup, or identity-blind move. On any
+failure, ownership loss, or post-publication reader rejection, the freezer closes its
+handles and never deletes or moves a path whose anchored identity is unavailable or no
+longer matches. Random staging directories may therefore remain. Their names cannot
+match the content-derived candidate ID, and `read_frozen_candidate()` rejects them as
+evidence.
+
+The threat model covers cooperative concurrent processes and path replacement after
+anchor acquisition: retained descriptors/handles keep construction bound to the
+anchored staging object, and no-replace publication preserves a concurrent final
+winner. A malicious same-user principal is outside the trust boundary. In particular,
+mutation in the unavoidable `mkdir` to anchor-acquisition syscall gap is not claimed to
+be prevented; such a principal can also tamper with process memory or handles. The
+Windows design does not claim an unavailable atomic `mkdir` plus `CreateFileW`
+operation.
 
 `read_frozen_candidate()` and every downstream reader MUST require exactly
 `freeze-manifest.json`, `d36-tool-attestation.json`, and the regular
@@ -1885,12 +1893,12 @@ independent review gates supply the recorded trust decisions.
   manifest generation on repeated identical inputs; changed allowlisted byte;
   excluded later tooling, secret/cache paths; separate source attestation; recursively
   strict `UnlabeledTrialCase`; nested label/extra rejection; candidate non-mutation;
-  one retained state descriptor across claim/completion; deterministic replacement races
-  at the former check/unlink boundaries; replacement exact paths untouched; no cleanup
-  path deletion; closed descriptors and retained partials on failure; token-valued state
+  anchored hidden staging with retained child descriptors; mocked and native Windows
+  no-delete handle behavior; POSIX `dir_fd` and Linux `renameat2(RENAME_NOREPLACE)`
+  coverage where available; concurrent final-winner preservation; no final-path writes;
+  no identity-blind cleanup; retained random staging on failure; token-valued state
   rejected as incomplete; canonical completion bytes/hashes required; no token bytes in
-  successful state; exact two-artifact/one-state successful layout; and retry failure on
-  an existing incomplete destination.
+  successful state; and exact two-artifact/one-state successful layout.
 - **D37:** synthetic cases only; domain-separated opaque case/category token generation
   with no raw IDs/text/labels in protocol or bundle; non-empty complete sorted protocol
   case/category sets, non-empty included set, at least one included token per declared
@@ -2015,12 +2023,13 @@ freezes with identical inputs produce byte-identical manifest bytes. In a later
 tooling commit add
 `evaluation/final_protocol.json`, recursive strict unlabeled contracts, the external
 single-case host, and `evaluation/release_candidate` freezer. Test label exclusion and
-candidate non-mutation. The freezer MUST exclusively open and retain descriptors for all three fixed
-publication files at claim creation, perform every claimed write/readback through those
-descriptors, transition the fsynced random claim token to canonical completion bytes
-last through the state descriptor, close each descriptor exactly once, perform no path
-unlink or failure cleanup deletion, and leave partials
-for operator cleanup. Freeze only an isolated detached D35 checkout; emit the ignored
+candidate non-mutation. The freezer MUST create a random hidden staging directory under
+the validated output root, acquire its POSIX or Windows directory anchor immediately,
+create and retain all fixed children through that anchor, and transition the fsynced
+random state token to canonical completion bytes last. It MUST atomically publish the
+whole directory with platform true no-replace, perform no final-path write/readback,
+and perform no identity-blind cleanup deletion or move. Freeze only an isolated detached
+D35 checkout; emit the ignored
 manifest and separate D36 tool attestation. Never name the D36 tooling commit as
 candidate behavior.
 

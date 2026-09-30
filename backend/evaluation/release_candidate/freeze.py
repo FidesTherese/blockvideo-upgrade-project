@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+import ctypes
+import errno
 import hashlib
 import os
 import platform
@@ -9,6 +11,7 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,7 +53,18 @@ _TOOL_SOURCE_PATHS = (
     "backend/evaluation/unlabeled_contracts.py",
 )
 _PUBLICATION_STATE_NAME = ".d36-publication-state"
+_STAGING_PREFIX = ".d36-staging-"
 _CLAIM_TOKEN_BYTES = 32
+_RENAME_NOREPLACE = 1
+_ERROR_ALREADY_EXISTS = 183
+_ERROR_FILE_EXISTS = 80
+_GENERIC_READ = 0x80000000
+_FILE_SHARE_READ = 0x1
+_FILE_SHARE_WRITE = 0x2
+_OPEN_EXISTING = 3
+_FILE_ATTRIBUTE_DIRECTORY = 0x10
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _MAX_PUBLICATION_STATE_BYTES = 1024
 _MAX_FREEZE_MANIFEST_BYTES = 16 * 1024 * 1024
 _MAX_TOOL_ATTESTATION_BYTES = 1024 * 1024
@@ -67,19 +81,27 @@ class _FileIdentity:
     inode: int
 
 
-@dataclass(frozen=True)
+@dataclass
 class _RetainedPublicationFile:
     name: str
     descriptor: int
     identity: _FileIdentity
+    closed: bool = False
+
+
+@dataclass
+class _DirectoryAnchor:
+    descriptor: int | None
+    handle: int | None
+    identity: tuple[int, int]
+    closed: bool = False
 
 
 @dataclass(frozen=True)
 class _PublicationClaim:
     path: Path
     resolved_parent: Path
-    device: int
-    inode: int
+    anchor: _DirectoryAnchor
     token: bytes
     files: tuple[_RetainedPublicationFile, ...]
 
@@ -386,22 +408,173 @@ def _file_identity_matches(identity: _FileIdentity) -> bool:
     return (current.device, current.inode) == (identity.device, identity.inode)
 
 
-def _open_retained(path: Path) -> _RetainedPublicationFile:
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("file_attributes", ctypes.c_uint32),
+        ("creation_time_low", ctypes.c_uint32),
+        ("creation_time_high", ctypes.c_uint32),
+        ("last_access_time_low", ctypes.c_uint32),
+        ("last_access_time_high", ctypes.c_uint32),
+        ("last_write_time_low", ctypes.c_uint32),
+        ("last_write_time_high", ctypes.c_uint32),
+        ("volume_serial_number", ctypes.c_uint32),
+        ("file_size_high", ctypes.c_uint32),
+        ("file_size_low", ctypes.c_uint32),
+        ("number_of_links", ctypes.c_uint32),
+        ("file_index_high", ctypes.c_uint32),
+        ("file_index_low", ctypes.c_uint32),
+    ]
+
+
+def _windows_directory_information(handle: int) -> _ByHandleFileInformation:
+    if os.name != "nt":
+        raise OSError("Windows directory handles are unavailable")
+    information = _ByHandleFileInformation()
+    get_information = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandle
+    get_information.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ByHandleFileInformation)]
+    get_information.restype = ctypes.c_int
+    if not get_information(ctypes.c_void_p(handle), ctypes.byref(information)):
+        error = ctypes.get_last_error()
+        raise OSError(error, "GetFileInformationByHandle failed")
+    if (
+        not information.file_attributes & _FILE_ATTRIBUTE_DIRECTORY
+        or information.file_attributes & _REPARSE_POINT
+    ):
+        raise ValueError("staging anchor must be a non-reparse directory")
+    return information
+
+
+def _windows_directory_identity(handle: int) -> tuple[int, int]:
+    information = _windows_directory_information(handle)
+    file_index = (information.file_index_high << 32) | information.file_index_low
+    return information.volume_serial_number, file_index
+
+
+def _windows_open_directory(path: Path) -> int:
+    if os.name != "nt":
+        raise OSError("Windows directory handles are unavailable")
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(
+        str(path),
+        _GENERIC_READ,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle in (None, invalid_handle):
+        error = ctypes.get_last_error()
+        raise OSError(error, "CreateFileW failed for staging directory")
+    return int(handle)
+
+
+def _windows_close_handle(handle: int) -> None:
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    if not close_handle(ctypes.c_void_p(handle)):
+        error = ctypes.get_last_error()
+        raise OSError(error, "CloseHandle failed for staging directory")
+
+
+def _open_directory_anchor(path: Path) -> _DirectoryAnchor:
+    if os.name == "nt":
+        handle = _windows_open_directory(path)
+        try:
+            identity = _windows_directory_identity(handle)
+        except BaseException:
+            _windows_close_handle(handle)
+            raise
+        return _DirectoryAnchor(descriptor=None, handle=handle, identity=identity)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
+            raise ValueError("staging anchor must be a non-reparse directory")
+        return _DirectoryAnchor(
+            descriptor=descriptor,
+            handle=None,
+            identity=(metadata.st_dev, metadata.st_ino),
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _close_directory_anchor(anchor: _DirectoryAnchor) -> None:
+    if anchor.closed:
+        return
+    anchor.closed = True
+    if anchor.handle is not None:
+        _windows_close_handle(anchor.handle)
+        anchor.handle = None
+    if anchor.descriptor is not None:
+        os.close(anchor.descriptor)
+        anchor.descriptor = None
+
+
+def _anchor_identity(anchor: _DirectoryAnchor) -> tuple[int, int]:
+    if anchor.closed:
+        raise _ownership_lost()
+    if anchor.handle is not None:
+        return _windows_directory_identity(anchor.handle)
+    if anchor.descriptor is None:
+        raise _ownership_lost()
+    metadata = os.fstat(anchor.descriptor)
+    if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
+        raise _ownership_lost()
+    return metadata.st_dev, metadata.st_ino
+
+
+def _path_directory_identity(path: Path) -> tuple[int, int]:
+    if os.name == "nt":
+        handle = _windows_open_directory(path)
+        try:
+            return _windows_directory_identity(handle)
+        finally:
+            _windows_close_handle(handle)
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISDIR(
+        metadata.st_mode
+    ):
+        raise _ownership_lost()
+    return metadata.st_dev, metadata.st_ino
+
+
+def _open_retained(claim: _PublicationClaim, name: str) -> _RetainedPublicationFile:
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
+    if claim.anchor.descriptor is not None:
+        descriptor = os.open(name, flags, 0o600, dir_fd=claim.anchor.descriptor)
+    else:
+        descriptor = os.open(claim.path / name, flags, 0o600)
+    path = claim.path / name
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata):
             raise ValueError("publication file must be regular")
-        identity = _FileIdentity(path=path, device=metadata.st_dev, inode=metadata.st_ino)
-        if not _file_identity_matches(identity):
-            raise ValueError("publication file identity changed")
         return _RetainedPublicationFile(
-            name=path.name,
+            name=name,
             descriptor=descriptor,
-            identity=identity,
+            identity=_FileIdentity(
+                path=path,
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+            ),
         )
     except BaseException:
         os.close(descriptor)
@@ -460,8 +633,25 @@ def _ownership_lost() -> PublicationOwnershipLost:
 
 
 def _directory_identity(path: Path) -> tuple[int, int]:
-    metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISDIR(
+    return _path_directory_identity(path)
+
+
+def _anchored_entries(claim: _PublicationClaim) -> set[str]:
+    if claim.anchor.descriptor is not None:
+        return set(os.listdir(claim.anchor.descriptor))
+    return {entry.name for entry in os.scandir(claim.path)}
+
+
+def _anchored_file_identity(claim: _PublicationClaim, name: str) -> tuple[int, int]:
+    if claim.anchor.descriptor is not None:
+        metadata = os.stat(
+            name,
+            dir_fd=claim.anchor.descriptor,
+            follow_symlinks=False,
+        )
+    else:
+        metadata = (claim.path / name).lstat()
+    if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata) or not stat.S_ISREG(
         metadata.st_mode
     ):
         raise _ownership_lost()
@@ -475,13 +665,18 @@ def _assert_claim_owned(
     try:
         if claim.path.parent.resolve(strict=True) != claim.resolved_parent:
             raise _ownership_lost()
-        if _directory_identity(claim.path) != (claim.device, claim.inode):
+        if _anchor_identity(claim.anchor) != claim.anchor.identity:
             raise _ownership_lost()
-        if {entry.name for entry in os.scandir(claim.path)} != expected_names:
+        if _path_directory_identity(claim.path) != claim.anchor.identity:
+            raise _ownership_lost()
+        if _anchored_entries(claim) != expected_names:
             raise _ownership_lost()
         for file in claim.files:
             _assert_retained_identity(file)
-            if not _file_identity_matches(file.identity):
+            if _anchored_file_identity(claim, file.name) != (
+                file.identity.device,
+                file.identity.inode,
+            ):
                 raise _ownership_lost()
         state = claim.file(_PUBLICATION_STATE_NAME)
         state_bytes = _read_retained(
@@ -491,11 +686,11 @@ def _assert_claim_owned(
         )
         if state_bytes != (claim.token if expected_state is None else expected_state):
             raise _ownership_lost()
-        if {entry.name for entry in os.scandir(claim.path)} != expected_names:
+        if _anchored_entries(claim) != expected_names:
             raise _ownership_lost()
-        if _directory_identity(claim.path) != (claim.device, claim.inode):
+        if _anchor_identity(claim.anchor) != claim.anchor.identity:
             raise _ownership_lost()
-        if claim.path.parent.resolve(strict=True) != claim.resolved_parent:
+        if _path_directory_identity(claim.path) != claim.anchor.identity:
             raise _ownership_lost()
     except PublicationOwnershipLost:
         raise
@@ -503,11 +698,28 @@ def _assert_claim_owned(
         raise _ownership_lost() from None
 
 
-def _claim_publication_directory(path: Path) -> _PublicationClaim:
-    path.mkdir(mode=0o700, exist_ok=False)
-    device, inode = _directory_identity(path)
-    resolved_parent = path.parent.resolve(strict=True)
+def _new_staging_path(root: Path) -> Path:
+    for _ in range(8):
+        path = root / f"{_STAGING_PREFIX}{secrets.token_hex(16)}"
+        try:
+            path.mkdir(mode=0o700, exist_ok=False)
+        except FileExistsError:
+            continue
+        return path
+    raise ValueError("could not allocate random staging directory")
+
+
+def _create_staging_claim(root: Path) -> _PublicationClaim:
+    path = _new_staging_path(root)
+    anchor = _open_directory_anchor(path)
     token = secrets.token_bytes(_CLAIM_TOKEN_BYTES)
+    claim = _PublicationClaim(
+        path=path,
+        resolved_parent=root.resolve(strict=True),
+        anchor=anchor,
+        token=token,
+        files=(),
+    )
     files: list[_RetainedPublicationFile] = []
     try:
         for name in (
@@ -515,12 +727,11 @@ def _claim_publication_directory(path: Path) -> _PublicationClaim:
             "freeze-manifest.json",
             "d36-tool-attestation.json",
         ):
-            files.append(_open_retained(path / name))
+            files.append(_open_retained(claim, name))
         claim = _PublicationClaim(
             path=path,
-            resolved_parent=resolved_parent,
-            device=device,
-            inode=inode,
+            resolved_parent=claim.resolved_parent,
+            anchor=anchor,
             token=token,
             files=tuple(files),
         )
@@ -533,6 +744,7 @@ def _claim_publication_directory(path: Path) -> _PublicationClaim:
                 os.close(file.descriptor)
             except OSError:
                 pass
+        _close_directory_anchor(anchor)
         raise
 
 
@@ -578,12 +790,93 @@ def _finish_claim(claim: _PublicationClaim, completion_marker_bytes: bytes) -> N
         _assert_claim_owned(claim, completion_marker_bytes)
 
 
-def _close_claim(claim: _PublicationClaim) -> None:
+def _close_retained_files(claim: _PublicationClaim) -> None:
     for file in claim.files:
+        if file.closed:
+            continue
+        file.closed = True
         try:
             os.close(file.descriptor)
         except OSError:
             pass
+
+
+def _close_claim(claim: _PublicationClaim) -> None:
+    _close_retained_files(claim)
+    try:
+        _close_directory_anchor(claim.anchor)
+    except OSError:
+        pass
+
+
+def _linux_rename_directory_no_replace(source: Path, destination: Path) -> None:
+    if not sys.platform.startswith("linux"):
+        raise OSError(errno.ENOTSUP, "renameat2 is required for POSIX publication")
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOTSUP, "renameat2 is unavailable")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(
+        -100,
+        os.fsencode(source),
+        -100,
+        os.fsencode(destination),
+        _RENAME_NOREPLACE,
+    ) != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(error, "destination already exists", destination)
+        raise OSError(error, "renameat2 failed", source, destination)
+
+
+def _move_file_ex_w(source: str, destination: str, flags: int) -> bool:
+    if os.name != "nt":
+        raise OSError("MoveFileExW is unavailable")
+    move_file = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+    move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    move_file.restype = ctypes.c_int
+    return bool(move_file(source, destination, flags))
+
+
+def _windows_move_directory_no_replace(source: Path, destination: Path) -> None:
+    if _move_file_ex_w(str(source), str(destination), 0):
+        return
+    error = ctypes.get_last_error() if os.name == "nt" else 0
+    if error in {_ERROR_ALREADY_EXISTS, _ERROR_FILE_EXISTS}:
+        raise FileExistsError(error, "destination already exists", destination)
+    raise OSError(error, "MoveFileExW failed", source, destination)
+
+
+def _publish_staging(
+    claim: _PublicationClaim, final: Path, completion_marker_bytes: bytes | None = None
+) -> None:
+    _assert_claim_owned(claim, completion_marker_bytes)
+    if claim.anchor.descriptor is not None:
+        os.fsync(claim.anchor.descriptor)
+        try:
+            _linux_rename_directory_no_replace(claim.path, final)
+        except FileExistsError as exc:
+            raise ValueError("output destination already exists") from exc
+        return
+    _close_retained_files(claim)
+    if _path_directory_identity(claim.path) != claim.anchor.identity:
+        raise _ownership_lost()
+    for file in claim.files:
+        if not _file_identity_matches(file.identity):
+            raise _ownership_lost()
+    _close_directory_anchor(claim.anchor)
+    try:
+        _windows_move_directory_no_replace(claim.path, final)
+    except FileExistsError as exc:
+        raise ValueError("output destination already exists") from exc
 
 
 def _verify_canonical_attestation(raw: bytes, expected: ToolAttestation) -> None:
@@ -755,10 +1048,7 @@ def freeze_candidate(
     if _snapshot_tree(candidate) != initial_snapshot:
         raise ValueError("candidate changed during freeze")
 
-    try:
-        claimed = _claim_publication_directory(final)
-    except FileExistsError as exc:
-        raise ValueError("output destination already exists") from exc
+    claimed = _create_staging_claim(root)
     try:
         _write_owned(claimed, "freeze-manifest.json", manifest_bytes)
         _write_owned(
@@ -782,20 +1072,11 @@ def freeze_candidate(
         )
         _verify_canonical_attestation(published_attestation, attestation)
         _finish_claim(claimed, completion_marker_bytes)
+        _publish_staging(claimed, final, completion_marker_bytes)
     finally:
         _close_claim(claimed)
 
-    try:
-        if _directory_identity(final) != (claimed.device, claimed.inode):
-            raise _ownership_lost()
-        _fsync_directory(final)
-        if _directory_identity(final) != (claimed.device, claimed.inode):
-            raise _ownership_lost()
-        _fsync_directory(root)
-    except PublicationOwnershipLost:
-        raise
-    except (OSError, ValueError):
-        raise _ownership_lost() from None
+    _fsync_directory(root)
     published = read_frozen_candidate(final)
     if published != (manifest, attestation):
         raise ValueError("completed publication changed")

@@ -264,28 +264,32 @@ assignment and must be supported version 1. Tool attestation identifies the exac
 repository root, requires a clean committed checkout, and binds each source byte to
 its declared `HEAD`; generation before the tooling commit is refused. In-repository
 output is confined to resolved `release-evidence/**`, while external roots remain
-allowed. Publication atomically claims the final candidate directory without rename,
-immediately records its non-reparse/non-symlink `lstat` device/inode identity and
-resolved parent, and exclusively opens and retains all three fixed files:
-`.d36-publication-state`, `freeze-manifest.json`, and
-`d36-tool-attestation.json`. Their descriptor identities remain in the claim. The
-freezer writes and fsyncs a random 32-byte claim token through the state descriptor,
-then performs every artifact write, truncate, seek, fsync, and bounded readback only
-through the retained descriptors. Ownership is revalidated before and after each such
-operation; a renamed or replaced directory causes ownership loss without touching the
-replacement. After successful artifact validation, canonical `CompletionMarker` bytes
-are written and read back last through the retained state descriptor. All descriptors
-close exactly once in `finally`; failure leaves the incomplete original wherever it was
-moved. Success closes the descriptors, fsyncs the directory only while its identity is
-still owned, and invokes the independent reader. No staging helper, path reopen, hard
-link, rename, or unlink participates in claimed publication. Readers require exactly
-`.d36-publication-state`,
-`freeze-manifest.json`, and `d36-tool-attestation.json`; the state bytes must be the
-canonical completion record, not a claim token, and its exact sizes and SHA-256 values
-must bind both stable canonical artifacts. The reader recomputes the manifest file
-aggregate, requires exact aggregate equality, and derives the exact candidate ID from
-that aggregate and commit. Verified
-files retain no-replace semantics and required fsyncs.
+allowed. The freezer never creates or opens the final candidate path during
+construction. It creates a cryptographically random hidden staging directory directly
+under the validated output root and immediately anchors it: POSIX retains an
+`O_DIRECTORY|O_NOFOLLOW` descriptor and creates every fixed child with `dir_fd`;
+Windows retains a `CreateFileW(FILE_FLAG_BACKUP_SEMANTICS)` directory handle sharing
+read/write but not delete and derives identity with `GetFileInformationByHandle`.
+Every artifact write, fsync, and readback uses retained child descriptors. Anchor type
+or identity drift fails closed. Canonical `CompletionMarker` bytes are written and read
+back last. The completed staging directory is then atomically renamed as a whole with
+true no-replace semantics: Linux `renameat2(RENAME_NOREPLACE)` or Windows
+`MoveFileExW` without replace flags. Windows releases the no-delete anchor only
+immediately before that call. A concurrent final creator wins untouched; no publisher
+write or readback occurs at the final path. After successful rename, the independent
+reader validates the final directory.
+
+Failure never recursively deletes or moves a path whose anchored identity is lost.
+Random incomplete or unpublished staging directories may remain and are rejected as
+evidence because their names are not the content-derived candidate ID. The protection
+covers cooperative concurrent processes and path replacement after anchor acquisition.
+A malicious same-user principal is outside the trust boundary, including mutation in
+the unavoidable `mkdir` to anchor syscall gap; that principal can also tamper process
+memory or handles. The Windows design does not claim an impossible atomic Win32
+`mkdir` plus open. Readers still require exactly `.d36-publication-state`,
+`freeze-manifest.json`, and `d36-tool-attestation.json`, with canonical completion
+bytes binding both artifacts, a recomputed manifest aggregate, and the candidate ID
+derived from that aggregate and commit.
 
 Any candidate-behavior change after D35 requires a new candidate and D36 freeze and
 invalidates affected evaluation evidence. A post-candidate tooling-only change keeps

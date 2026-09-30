@@ -657,7 +657,123 @@ def test_tool_attestation_rejects_uncommitted_or_unbound_source(
         )
 
 
-def test_publication_claims_final_directory_without_rename(
+def test_claim_construction_never_opens_final_candidate_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    original_write = freeze._write_owned
+    observed_paths: list[Path] = []
+
+    def observe_write(claim: Any, name: str, value: bytes) -> None:
+        observed_paths.append(claim.path)
+        assert claim.path.name.startswith(freeze._STAGING_PREFIX)
+        assert not (claim.path.parent / json.loads(value).get("candidate_id", "missing")).exists()
+        original_write(claim, name, value)
+
+    monkeypatch.setattr(freeze, "_write_owned", observe_write)
+    manifest = _freeze(tmp_path, candidate, commit)
+
+    assert observed_paths
+    assert all(path != tmp_path / "output" / manifest.candidate_id for path in observed_paths)
+    assert (tmp_path / "output" / manifest.candidate_id).is_dir()
+
+
+def test_concurrent_final_creator_wins_without_staging_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, commit = _make_candidate(tmp_path)
+    freeze, _, _ = _freeze_api()
+    control_path, digest = _write_control(tmp_path / "control", _control(commit))
+    original_publish = freeze._publish_staging
+    staging: Path | None = None
+
+    def create_winner(claim: Any, final: Path, completion: bytes) -> None:
+        nonlocal staging
+        staging = claim.path
+        final.mkdir()
+        (final / "winner.txt").write_text("concurrent owner", encoding="utf-8")
+        original_publish(claim, final, completion)
+
+    monkeypatch.setattr(freeze, "_publish_staging", create_winner)
+    with pytest.raises(ValueError, match="output destination already exists"):
+        freeze.freeze_candidate(
+            candidate_root=candidate,
+            candidate_control_path=control_path,
+            expected_candidate_control_sha256=digest,
+            output_root=tmp_path / "output",
+        )
+
+    assert staging is not None and staging.is_dir()
+    winners = list((tmp_path / "output").glob("*/winner.txt"))
+    assert len(winners) == 1
+    assert winners[0].read_text(encoding="utf-8") == "concurrent owner"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory handle contract")
+def test_windows_directory_anchor_blocks_native_rename(tmp_path: Path) -> None:
+    freeze, _, _ = _freeze_api()
+    root = tmp_path / "output"
+    root.mkdir()
+    claim = freeze._create_staging_claim(root)
+    moved = root / "moved"
+    freeze._close_retained_files(claim)
+    try:
+        with pytest.raises(PermissionError):
+            claim.path.rename(moved)
+    finally:
+        freeze._close_claim(claim)
+    claim.path.rename(moved)
+    assert moved.is_dir()
+
+
+def test_windows_move_uses_no_replace_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    freeze, _, _ = _freeze_api()
+    calls: list[tuple[str, str, int]] = []
+
+    def move(source: str, destination: str, flags: int) -> bool:
+        calls.append((source, destination, flags))
+        return True
+
+    monkeypatch.setattr(freeze, "_move_file_ex_w", move)
+    freeze._windows_move_directory_no_replace(Path("stage"), Path("final"))
+    assert calls == [(str(Path("stage")), str(Path("final")), 0)]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory descriptor contract")
+def test_posix_anchor_detects_staging_path_replacement(tmp_path: Path) -> None:
+    freeze, _, _ = _freeze_api()
+    root = tmp_path / "output"
+    root.mkdir()
+    claim = freeze._create_staging_claim(root)
+    moved = root / "moved"
+    try:
+        claim.path.rename(moved)
+        claim.path.mkdir()
+        with pytest.raises(freeze.PublicationOwnershipLost):
+            freeze._write_owned(claim, "freeze-manifest.json", b"replacement test")
+        assert list(claim.path.iterdir()) == []
+    finally:
+        freeze._close_claim(claim)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux renameat2 contract")
+def test_linux_rename_noreplace_preserves_existing_destination(tmp_path: Path) -> None:
+    freeze, _, _ = _freeze_api()
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    (destination / "winner").write_text("kept", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        freeze._linux_rename_directory_no_replace(source, destination)
+
+    assert source.is_dir()
+    assert (destination / "winner").read_text(encoding="utf-8") == "kept"
+
+
+def test_publication_does_not_use_overwrite_capable_os_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, commit = _make_candidate(tmp_path)
@@ -669,32 +785,6 @@ def test_publication_claims_final_directory_without_rename(
     monkeypatch.setattr(freeze.os, "rename", forbidden_rename)
     manifest = _freeze(tmp_path, candidate, commit)
     assert (tmp_path / "output" / manifest.candidate_id / "freeze-manifest.json").is_file()
-
-
-def test_concurrent_precreated_destination_is_retained(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate, commit = _make_candidate(tmp_path)
-    freeze, _, _ = _freeze_api()
-    control_path, digest = _write_control(tmp_path / "control", _control(commit))
-    original_claim = freeze._claim_publication_directory
-
-    def race_before_claim(path: Path) -> Any:
-        path.mkdir()
-        (path / "owner.txt").write_text("other owner", encoding="utf-8")
-        return original_claim(path)
-
-    monkeypatch.setattr(freeze, "_claim_publication_directory", race_before_claim)
-    with pytest.raises((FileExistsError, ValueError)):
-        freeze.freeze_candidate(
-            candidate_root=candidate,
-            candidate_control_path=control_path,
-            expected_candidate_control_sha256=digest,
-            output_root=tmp_path / "output",
-        )
-    owners = list((tmp_path / "output").glob("*/owner.txt"))
-    assert len(owners) == 1
-    assert owners[0].read_text(encoding="utf-8") == "other owner"
 
 
 @pytest.mark.parametrize(
@@ -837,7 +927,7 @@ def test_failure_closes_all_three_retained_descriptors_exactly_once(
     candidate, commit = _make_candidate(tmp_path)
     freeze, _, _ = _freeze_api()
     control_path, digest = _write_control(tmp_path / "control", _control(commit))
-    original_claim = freeze._claim_publication_directory
+    original_claim = freeze._create_staging_claim
     original_close = freeze.os.close
     original_read = freeze._read_retained
     retained: set[int] = set()
@@ -858,7 +948,7 @@ def test_failure_closes_all_three_retained_descriptors_exactly_once(
             raise ValueError("injected readback failure")
         return original_read(file, maximum, label=label)
 
-    monkeypatch.setattr(freeze, "_claim_publication_directory", capture_claim)
+    monkeypatch.setattr(freeze, "_create_staging_claim", capture_claim)
     monkeypatch.setattr(freeze.os, "close", count_close)
     monkeypatch.setattr(freeze, "_read_retained", fail_manifest_readback)
 
@@ -874,7 +964,7 @@ def test_failure_closes_all_three_retained_descriptors_exactly_once(
     assert close_counts == {descriptor: 1 for descriptor in retained}
 
 
-def test_post_publish_verification_failure_leaves_incomplete_claim_and_retry_refuses(
+def test_staging_validation_failure_leaves_random_non_evidence_per_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, commit = _make_candidate(tmp_path)
@@ -902,13 +992,17 @@ def test_post_publish_verification_failure_leaves_incomplete_claim_and_retry_ref
         "d36-tool-attestation.json",
         "freeze-manifest.json",
     }
-    with pytest.raises(ValueError, match="output destination already exists"):
+    with pytest.raises(ValueError, match="published freeze manifest changed"):
         freeze.freeze_candidate(
             candidate_root=candidate,
             candidate_control_path=control_path,
             expected_candidate_control_sha256=digest,
             output_root=tmp_path / "output",
         )
+    candidates = list((tmp_path / "output").iterdir())
+    assert len(candidates) == 2
+    assert incomplete in candidates
+    assert all(path.name.startswith(freeze._STAGING_PREFIX) for path in candidates)
     assert {path.name for path in incomplete.iterdir()} == {
         freeze._PUBLICATION_STATE_NAME,
         "d36-tool-attestation.json",

@@ -28,23 +28,24 @@ change unnoticed.
   `HEAD` blobs. Real output generation is valid only after the tooling commit.
 - Permit in-repository output only below resolved `<tool-repo>/release-evidence/`;
   permit external roots without treating other ignored in-repository roots as evidence.
-- Claim the final candidate directory with exclusive `mkdir`; immediately record its
-  non-reparse/non-symlink `lstat` device/inode identity and strict resolved parent, then
-  exclusively open and retain descriptors for `.d36-publication-state`,
-  `freeze-manifest.json`, and `d36-tool-attestation.json`. Store all three descriptor
-  identities in the claim and write/fsync a random 32-byte token through the state
-  descriptor. Before and after every artifact write/readback and completion-state
-  write/readback, require the same directory, fixed-file paths, descriptors, parent,
-  and expected state bytes. Every write, truncate, seek, fsync, and pre-completion
-  readback MUST use only those retained descriptors; never reopen a claimed fixed file,
-  hard-link it, or perform a path-based file write. After validating both artifacts,
-  write and read back canonical `CompletionMarker` bytes last through the retained
-  state descriptor. Close each descriptor exactly once in `finally`. On failure or
-  ownership loss, touch no publication path; leave the incomplete original wherever
-  moved and leave any replacement empty. On success, close descriptors, fsync the
-  directory only if its identity is still owned, then validate through the independent
-  reader. No staging publication helper or staging name remains. Readers MUST require
-  exactly the canonical
+- Never create or open a child at the final candidate path. Create a cryptographically
+  random hidden staging directory directly under the validated output root and acquire
+  its platform directory anchor immediately. POSIX MUST retain an
+  `O_DIRECTORY|O_NOFOLLOW` descriptor, derive identity with `fstat`, and create every
+  fixed child with `dir_fd`. Windows MUST retain a `CreateFileW` directory handle with
+  backup semantics and read/write sharing but no delete sharing, derive identity with
+  `GetFileInformationByHandle`, and hold it until immediately before publication.
+  Build and validate the complete staging directory through retained file descriptors;
+  write/read back canonical `CompletionMarker` bytes last. Atomically publish the whole
+  directory with Linux `renameat2(RENAME_NOREPLACE)` or Windows `MoveFileExW` without a
+  replace flag. A concurrent final creator wins untouched. Perform no final-path writes
+  or publisher readbacks; invoke the independent reader only after successful rename.
+  On failure or identity loss, never recursively delete or move an unowned path; random
+  staging may remain and MUST be rejected as evidence. This protects cooperative
+  processes and post-anchor path replacement. Malicious same-user mutation in the
+  unavoidable `mkdir` to anchor gap is outside the trust boundary because that
+  principal can also tamper process memory/handles; do not claim atomic Win32 mkdir+open.
+  Readers MUST require exactly the canonical
   artifact pair plus `.d36-publication-state`, and MUST accept that state only when its
   bytes are the exact canonical completion record with the artifact sizes and SHA-256
   values. Require exact canonical artifact bytes, fsyncs, a recomputed tool-attestation
@@ -59,13 +60,12 @@ No tag, publication, deployment, or final readiness claim.
 
 The same checkout and inputs reproduce byte-identical canonical manifest bytes,
 including deterministic `created_at`. Any relevant byte change is detected. The
-manifest fingerprints reconstruct from the declared commit. A concurrent pre-existing
-or post-claim replacement final directory is never replaced or removed. Race tests at
-write, readback, and cleanup boundaries preserve a replacement sentinel at the exact
-final path, preserve an empty replacement, and return the bounded ownership-lost error.
-An ordinary failed claim remains incomplete and non-evidentiary, and a retry fails
-closed until operator cleanup. Deterministic races at the former check/unlink boundaries
-leave replacement exact paths untouched. A successful reader rejects a missing,
+manifest fingerprints reconstruct from the declared commit. Construction occurs only
+inside an anchored random hidden staging directory. A concurrent final creator wins
+untouched under true no-replace publication, while the unpublished staging directory
+remains non-evidentiary. Windows tests cover mocked API flags and native no-delete
+handle behavior; POSIX tests cover anchored `dir_fd` behavior and Linux no-replace where
+available. Failures perform no recursive or identity-blind cleanup. A successful reader rejects a missing,
 altered, replaced, non-regular, or token-valued state file and every extra entry. A
 successful final directory contains exactly two evidence files and one state file, with
 no random token remaining in the state bytes. The frozen candidate can be reconstructed
