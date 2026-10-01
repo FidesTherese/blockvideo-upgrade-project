@@ -1,11 +1,13 @@
-# D38 work report — synthetic aggregate importer; review pending
+# D38 work report — reviewed synthetic aggregate importer
 
 ## Outcome and boundary
 
 Tasks 1–3 implement the external D38 importer and its fixed redacted CLI. D37's
 `EvaluationProtocol`, `CategoryResult`, `ModeResult`, `ExcludedCaseToken` and
 `EvaluationResultBundle` are unchanged. No app/frontend, dependency, lock, immutable
-candidate, private input or later-unit source changed. No push or approval occurred.
+candidate, private input or later-unit source changed. Independent source,
+specification and quality/security review through `aacc828` approved D38 tooling;
+real aggregate acceptance and release approval remain separate gates.
 
 The importer verifies the separately supplied SHA-256 before parsing the bundle,
 requires canonical bounded public artifacts and the complete D36 publication, binds
@@ -38,8 +40,10 @@ component before collapsing `..`; links/reparses cannot be hidden by normalizati
   and 225 D38 tests. Missing historical/publication/import/CLI boundaries were observed
   RED before production code. A real Linux probe exposed an alias regression; a clean
   CLI probe exposed the documented relative-path regression. Both gained GREEN proof.
-- Task 3 is the documentation/gate commit. Independent controller review remains
-  pending; this is not a `[DONE]` approval/delivery commit.
+- `aacc828`: Task 3 documentation and historical full-gate record; independently
+  approved afterward.
+- `d5a9da9`: deterministic prior-unit timestamp tests and the user's revised 4 GiB
+  project budget. Tooling behavior and the source inventory are unchanged.
 
 The unpublished initial Task 2 commit was amended after the relative-path regression;
 final source/gates below refer to `577b9defe7d1d14bf0ccde53a8a332a8dda1ce95`.
@@ -72,11 +76,24 @@ correction passed 682 with six skips. Final combined focus had 683 passes, six s
 and one failure in the unchanged D37 same-size streamed-mutation test; isolation also
 failed, while a timestamp-observing diagnostic rejected the mutation. The complete
 final backend rerun included that same test and passed without waiver or skip. This
-Windows timestamp-sensitive prior-unit regression remains an independent-review item.
+Independent review found no mismatched-trial false accept: that mutation writes to
+the next unread chunk, whose digest binds the changed content, while D37 checks the
+pinned index hash before/after execution. Metadata guards are not snapshot locks.
+The test now forces a real, observable timestamp change to prove rejection without
+scheduler assumptions. A separate native test requires either mutation refusal or
+exact changed-content SHA-256, never the old pinned digest. Removing timestamp guards
+produced the expected RED failure; the corrected streamed/index/fingerprint tests
+passed **8/8**. No production behavior was patched.
 
-All Python/Node/shell/Git working sets were sampled during gates, with an additional
-4 GiB reserve for runtime/WSL and unobserved spikes. Maximum conservative observed
-estimate was 5817.5 MiB; no parallel heavy gates, installs, browser or model runs.
+Earlier gates used the former budget and a 4 GiB uncertainty reserve, yielding a
+5817.5 MiB conservative estimate; this is not proof of the newly requested 4 GiB cap.
+Under the revised cap, the controller reran all D38 tests: **223 passed, 2 skipped**
+in 257.48 s. A verified native Windows Job Object capped the owned test process tree
+to 1 GiB committed memory; one worker ran, with a 3.5 GiB conservative working-set
+stop guard and 0.5 GiB transient margin. Sampled process working-set peak was
+**1.739 GiB**, including the agent runtime and conservatively counted platform
+processes. Full backend/frontend results above predate this stricter budget; they
+were not rerun or relabeled as new-budget verification.
 
 ## Source attestation and pending acceptance
 
@@ -90,7 +107,7 @@ A newly trusted digest can authenticate a changed evaluator identity/time, typed
 exclusion reason or sealed hash without proving those private claims. Source integrity
 is not evaluator/provider truth; model identifiers are not immutable weight provenance.
 
-Real aggregate transfer, independent review and readiness remain pending. Preserve all
+D38 tooling review is approved; real aggregate transfer and readiness remain pending. Preserve all
 historical evidence; new real runs require final clean tooling and fresh evidence roots.
 Historical recorded source remains verifiable after later tooling changes. D39/D40,
 private-ledger reconstruction, candidate mutation and release approval remain out of scope.

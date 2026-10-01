@@ -1,4 +1,4 @@
-# Plan C Handoff — D38 synthetic importer implemented; review/real transfer pending
+# Plan C Handoff — D38 tooling approved; 4 GiB cap; real transfer pending
 
 ## D38 current result
 
@@ -6,7 +6,8 @@ Read `work-unit-38.md`, `work-report-38.md`, `docs/implementation-plan-38.md` an
 canonical D38 sections of `docs/DTD.md`. Tasks 1–3 implement the detached-hash importer,
 fixed redacted CLI, historical Git source verification and native no-replace accepted
 triplet. Shared D37 models, app/frontend, dependencies, locks and the immutable D35
-candidate are unchanged. No private input, real aggregate, push or approval occurred.
+candidate are unchanged. Independent source/specification/quality-security review
+through `aacc828` approved the tooling; no private input or real aggregate was used.
 
 Source tasks: `8e56000` and `577b9de`. Final full backend: **2018 passed, 13 skipped**
 with the existing Starlette/httpx warning; full Ruff and frontend **157 tests**,
@@ -14,7 +15,17 @@ build/typecheck and lint passed sequentially. D38 contributes **223 passes and t
 platform skips**. Four scoped native Linux probes and the committed-tooling synthetic
 CLI passed. The final combined focused run had an intermittent unchanged D37 streamed
 mutation failure; the subsequent full run included it and passed without skip/waiver.
-Keep that Windows timestamp-sensitive regression visible to independent review.
+Independent review found no concrete trial content-binding false pass. Test-only
+`d5a9da9` now forces an observable real timestamp change; an additional native test
+requires refusal or the exact changed-content digest. The removed-guard mutation
+fails, and all eight targeted streamed/index/fingerprint regressions pass.
+
+The user's hard project budget is now **4 GiB aggregate** (target 3 GiB), including
+agent runtime and owned descendants. Controller rerun under a verified 1 GiB native
+Job commit cap: **223 passed, 2 skipped**, sampled conservative working-set peak
+**1.739 GiB**. Earlier full backend/frontend/native Linux gates are historical and
+are not represented as new-budget verification. Run only one bounded group at a time;
+follow `AGENTS.md` for headroom, sampling and stop thresholds.
 
 The clean 25-path D38 source aggregate is
 `c7153f45e5c6deed40f1edb66bcded52a852aeda5fe0ccfc95d7e57cd36f7f5b`.
@@ -24,12 +35,14 @@ plus the complete D36 publication. It never reads/enumerates sealed evidence and
 not reconstruct private approval decisions. A failed stage may remain unaccepted;
 never delete replacement paths or resume/overwrite a final.
 
-Independent controller review and real aggregate transfer remain pending. Do not mark
-D38 approved, push, decide readiness or begin later units. New real runs require final
-clean tooling and fresh evidence roots; preserve previous publications. Historical
-attestations are verified against recorded Git blobs, not current working-source
-identity. The current ignored D36 publication was not read or overwritten by this task.
-Readiness remains **NOT READY**.
+D38 tooling is approved; real aggregate transfer remains evaluator-controlled and
+pending. D39 implementation may follow with the 4 GiB budget and synthetic inputs;
+the frozen README prerequisite mismatch remains a known documentation gate failure.
+New real runs require final clean tooling and fresh evidence roots; preserve previous
+publications. Historical attestations are verified against recorded Git blobs, not
+current working-source identity. Refresh D36/D37 working-source attestations after
+final source commits rather than overwrite evidence. Readiness remains **NOT READY**;
+no actual evaluation, tag, release publication or deployment is authorized.
 
 ## D37 historical result
 
