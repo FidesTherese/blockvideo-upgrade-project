@@ -274,42 +274,51 @@ class _ExecutionGroup:
 
 def _remove_group_directory(path: Path, anchor: freeze._DirectoryAnchor) -> None:
     materialization._assert_directory(path, anchor)
+    inventory: list[tuple[str, os.stat_result]] = []
     with os.scandir(path) as entries:
-        names = [entry.name for entry in entries]
-    if len(names) > 262144:
-        raise ValueError("group cleanup inventory exceeded")
-    for name in names:
+        for entry in entries:
+            if len(inventory) >= 262144:
+                raise ValueError("group cleanup inventory exceeded")
+            materialization._assert_directory(path, anchor)
+            observed = (path / entry.name).lstat()
+            if observed.st_ino <= 0:
+                raise ValueError("group child identity unavailable")
+            inventory.append((entry.name, observed))
+    for name, before in inventory:
         materialization._assert_directory(path, anchor)
         child = path / name
-        before = child.lstat()
+        expected = (materialization._identity(before), stat.S_IFMT(before.st_mode), blinded_io.is_reparse(before))
+        named = child.lstat()
+        if (materialization._identity(named), stat.S_IFMT(named.st_mode), blinded_io.is_reparse(named)) != expected:
+            raise ValueError("group child identity or type lost")
         if stat.S_ISDIR(before.st_mode) and not blinded_io.is_reparse(before):
             nested = materialization._open_anchor(child)
             try:
-                if nested.identity != materialization._directory_identity(child):
+                if nested.identity != expected[0] or materialization._directory_identity(child) != expected[0]:
                     raise ValueError("group child identity lost")
                 _remove_group_directory(child, nested)
             finally:
                 freeze._close_directory_anchor(nested)
         else:
             descriptor = -1
-            if stat.S_ISREG(before.st_mode) and not blinded_io.is_reparse(before):
-                descriptor = materialization._file_descriptor(child)
-                opened = materialization._descriptor_stat(descriptor)
-                if materialization._identity(opened) != materialization._identity(before):
-                    os.close(descriptor)
-                    raise ValueError("group leaf changed before open")
-                before = opened
             try:
-                if materialization._identity(child.lstat()) != materialization._identity(before):
-                    raise ValueError("group leaf identity lost")
+                if stat.S_ISREG(before.st_mode) and not blinded_io.is_reparse(before):
+                    descriptor = materialization._file_descriptor(child)
+                    opened = materialization._descriptor_stat(descriptor)
+                    if (materialization._identity(opened), stat.S_IFMT(opened.st_mode), blinded_io.is_reparse(opened)) != expected:
+                        raise ValueError("group leaf changed before open")
+                named = child.lstat()
+                if (materialization._identity(named), stat.S_IFMT(named.st_mode), blinded_io.is_reparse(named)) != expected:
+                    raise ValueError("group leaf identity or type lost")
                 if os.name == "nt" and stat.S_ISREG(before.st_mode) and not blinded_io.is_reparse(before):
                     os.chmod(child, stat.S_IREAD | stat.S_IWRITE)
                 materialization._assert_directory(path, anchor)
                 if descriptor >= 0:
                     os.close(descriptor)
                     descriptor = -1
-                if materialization._identity(child.lstat()) != materialization._identity(before):
-                    raise ValueError("group leaf identity lost")
+                named = child.lstat()
+                if (materialization._identity(named), stat.S_IFMT(named.st_mode), blinded_io.is_reparse(named)) != expected:
+                    raise ValueError("group leaf identity or type lost")
                 if anchor.descriptor is not None:
                     os.unlink(name, dir_fd=anchor.descriptor)
                 elif stat.S_ISDIR(before.st_mode):

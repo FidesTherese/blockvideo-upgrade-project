@@ -224,6 +224,160 @@ def test_group_source_drift_is_detected_and_generated_state_is_removed(publicati
     cleanup_candidate_runtime(runtime_root=runtime, work_root=publication[2], materialization_path=publication[3], expected_materialization_sha256=digest)
 
 
+@pytest.mark.parametrize("kind", ["directory", "file"])
+def test_cleanup_inventory_lstat_matches_full_native_opened_identity(tmp_path: Path, kind: str) -> None:
+    materialization = release.materialization
+    target = tmp_path / "owned-child"
+    if kind == "directory":
+        target.mkdir()
+        anchor = materialization._open_anchor(target)
+        try:
+            identity = materialization._anchor_identity(anchor)
+            if os.name == "nt":
+                assert anchor.handle is not None
+                assert identity == materialization._native_identity(anchor.handle)
+            assert materialization._identity(target.lstat()) == identity
+            assert identity[1] > 0
+        finally:
+            release.freeze._close_directory_anchor(anchor)
+    else:
+        target.write_bytes(b"owned file")
+        descriptor = materialization._file_descriptor(target)
+        try:
+            identity = materialization._identity(materialization._descriptor_stat(descriptor))
+            if os.name == "nt":
+                import msvcrt
+                assert identity == materialization._native_identity(msvcrt.get_osfhandle(descriptor))
+            assert materialization._identity(target.lstat()) == identity
+            assert identity[1] > 0
+        finally:
+            os.close(descriptor)
+
+
+def test_generated_child_anchor_replacement_is_not_adopted(publication: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    materialization = release.materialization
+    materialized, runtime, digest = _materialize(publication)
+    group = release._ExecutionGroup(publication[2], runtime, materialized)
+    child = group.root / "generated-child"
+    moved = group.work / (group.root.name + "-original-child")
+    child.mkdir()
+    (child / "original").write_bytes(b"owned original")
+    original_id = materialization._directory_identity(child)
+    open_anchor = materialization._open_anchor
+    replacement_id: tuple[int, int] | None = None
+
+    def replace_before_anchor(path: Path) -> release.freeze._DirectoryAnchor:
+        nonlocal replacement_id
+        if path == child and replacement_id is None:
+            assert materialization._identity(path.lstat()) == original_id
+            path.rename(moved)
+            path.mkdir()
+            (path / "sentinel").write_bytes(b"replacement sentinel")
+            replacement_id = materialization._identity(path.lstat())
+            assert replacement_id != original_id
+        return open_anchor(path)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(materialization, "_open_anchor", replace_before_anchor)
+            with pytest.raises(ValueError, match="identity"):
+                group.cleanup()
+            assert replacement_id is not None
+            assert (child / "sentinel").read_bytes() == b"replacement sentinel"
+            assert (moved / "original").read_bytes() == b"owned original"
+            group.assert_owned()
+            assert group.anchor is not None and not group.anchor.closed
+    finally:
+        try:
+            assert materialization._directory_identity(group.work) == group.work_anchor.identity
+            for path, identity in ((child, replacement_id if replacement_id is not None else original_id), (moved, original_id)):
+                if path.exists():
+                    retained = open_anchor(path)
+                    try:
+                        assert retained.identity == identity
+                        materialization._assert_directory(path, retained)
+                        release._remove_group_directory(path, retained)
+                    finally:
+                        release.freeze._close_directory_anchor(retained)
+            if group.root.exists():
+                group.cleanup()
+        finally:
+            if group.anchor is not None:
+                release.freeze._close_directory_anchor(group.anchor)
+            release.freeze._close_directory_anchor(group.work_anchor)
+            materialization.cleanup_candidate_runtime(runtime_root=runtime, work_root=publication[2], materialization_path=publication[3], expected_materialization_sha256=digest)
+
+
+def test_generated_leaf_inventory_replacement_is_not_adopted(publication: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    materialization = release.materialization
+    materialized, runtime, digest = _materialize(publication)
+    group = release._ExecutionGroup(publication[2], runtime, materialized)
+    child = group.root / "generated-leaf"
+    moved = group.work / (group.root.name + "-original-leaf")
+    child.write_bytes(b"owned original")
+    original_id = materialization._identity(child.lstat())
+    scandir = os.scandir
+    replacement_id: tuple[int, int] | None = None
+
+    class ReplacingInventory:
+        def __enter__(self) -> ReplacingInventory:
+            self.entries = scandir(group.root)
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.entries.close()
+
+        def __iter__(self) -> ReplacingInventory:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            nonlocal replacement_id
+            try:
+                return next(self.entries)
+            except StopIteration:
+                if replacement_id is None:
+                    assert materialization._identity(child.lstat()) == original_id
+                    child.rename(moved)
+                    child.write_bytes(b"replacement sentinel")
+                    replacement_id = materialization._identity(child.lstat())
+                    assert replacement_id != original_id
+                raise
+
+    def replace_after_inventory(path: Path) -> Any:
+        return ReplacingInventory() if path == group.root and replacement_id is None else scandir(path)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "scandir", replace_after_inventory)
+            with pytest.raises(ValueError, match="identity|changed"):
+                group.cleanup()
+            assert replacement_id is not None
+            assert child.read_bytes() == b"replacement sentinel"
+            assert moved.read_bytes() == b"owned original"
+            group.assert_owned()
+            assert group.anchor is not None and not group.anchor.closed
+    finally:
+        try:
+            assert materialization._directory_identity(group.work) == group.work_anchor.identity
+            for path, identity in ((child, replacement_id if replacement_id is not None else original_id), (moved, original_id)):
+                if path.exists():
+                    descriptor = materialization._file_descriptor(path)
+                    try:
+                        assert materialization._identity(materialization._descriptor_stat(descriptor)) == identity
+                        assert materialization._identity(path.lstat()) == identity
+                    finally:
+                        os.close(descriptor)
+                    assert materialization._identity(path.lstat()) == identity
+                    path.unlink()
+            if group.root.exists():
+                group.cleanup()
+        finally:
+            if group.anchor is not None:
+                release.freeze._close_directory_anchor(group.anchor)
+            release.freeze._close_directory_anchor(group.work_anchor)
+            materialization.cleanup_candidate_runtime(runtime_root=runtime, work_root=publication[2], materialization_path=publication[3], expected_materialization_sha256=digest)
+
+
 def test_smoke_reader_rejects_arbitrary_hashes_and_wrong_runtime(publication: tuple[Path, Path, Path, Path], tmp_path: Path) -> None:
     read = _api("_read_smoke")
     materialized, runtime, digest = _materialize(publication)
@@ -662,6 +816,79 @@ def test_group_cleanup_failure_is_not_erased_by_successful_runtime_cleanup(publi
     assert result.status == "failed" and result.cleanup_status == "failed"
     assert len(result.commands) == 5 and not runtime.exists()
     assert json.loads(publication[3].with_name(publication[3].name + ".cleanup.json").read_bytes())["status"] == "completed"
+
+
+def test_generated_child_replacement_is_reported_as_cleanup_failed(publication: tuple[Path, Path, Path, Path], tools_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    materialization = release.materialization
+    materialized, runtime, digest = _materialize(publication)
+    cleanup = release._ExecutionGroup.cleanup
+    open_anchor = materialization._open_anchor
+    group: release._ExecutionGroup | None = None
+    child: Path | None = None
+    moved: Path | None = None
+    original_id: tuple[int, int] | None = None
+    replacement_id: tuple[int, int] | None = None
+
+    def prepare_cleanup(value: release._ExecutionGroup) -> None:
+        nonlocal group, child, moved, original_id
+        if group is None:
+            group = value
+            child = value.root / "generated-child"
+            moved = value.work / (value.root.name + "-original-child")
+            child.mkdir()
+            (child / "original").write_bytes(b"owned original")
+            original_id = materialization._identity(child.lstat())
+        cleanup(value)
+
+    def replace_before_anchor(path: Path) -> release.freeze._DirectoryAnchor:
+        nonlocal replacement_id
+        if path == child and replacement_id is None:
+            assert moved is not None and materialization._identity(path.lstat()) == original_id
+            path.rename(moved)
+            path.mkdir()
+            (path / "sentinel").write_bytes(b"replacement sentinel")
+            replacement_id = materialization._identity(path.lstat())
+            assert replacement_id != original_id
+        return open_anchor(path)
+
+    try:
+        with monkeypatch.context() as patch:
+            _inventory_fixture(patch)
+            patch.setattr(release._ExecutionGroup, "cleanup", prepare_cleanup)
+            patch.setattr(materialization, "_open_anchor", replace_before_anchor)
+            patch.setattr(release, "_trusted_tool_root", lambda: tools_repo)
+            smoke_path = tools_repo / "evidence/smoke/smoke-manifest.json"
+            smoke_path.parent.mkdir()
+            smoke_path.write_bytes(_bytes(_synthetic_smoke(materialized, digest)))
+            output = tools_repo / "evidence/verification"
+            result = release.verify_release_candidate(candidate_root=publication[0], freeze_manifest_path=publication[1], runtime_root=runtime, materialization_path=publication[3], expected_materialization_sha256=digest, work_root=publication[2], output_dir=output, smoke_manifest_path=smoke_path)
+            assert result.status == "failed" and result.cleanup_status == "failed"
+            # A real memory preflight may refuse command launch before cleanup.
+            # This regression asserts cleanup truth, not successful command execution.
+            assert len(result.commands) <= 5 and not runtime.exists()
+            assert tuple((item.name, item.argv) for item in result.commands) == release.D39_REQUIRED_COMMANDS[:len(result.commands)]
+            assert group is not None and child is not None and moved is not None and replacement_id is not None
+            assert group.anchor is not None and materialization._directory_identity(group.root) == group.anchor.identity
+            assert (child / "sentinel").read_bytes() == b"replacement sentinel"
+            assert (moved / "original").read_bytes() == b"owned original"
+            assert json.loads((output / "verification-manifest.json").read_bytes())["cleanup_status"] == "failed"
+            assert json.loads(publication[3].with_name(publication[3].name + ".cleanup.json").read_bytes())["status"] == "completed"
+    finally:
+        if group is not None:
+            assert materialization._directory_identity(group.work) == group.work_anchor.identity
+            assert child is not None and moved is not None and group.anchor is not None
+            if child.exists():
+                assert materialization._directory_identity(child) == replacement_id
+            for path, identity in ((moved, original_id), (group.root, group.anchor.identity)):
+                if path.exists():
+                    retained = open_anchor(path)
+                    try:
+                        assert retained.identity == identity
+                        materialization._assert_directory(path, retained)
+                        release._remove_group_directory(path, retained)
+                    finally:
+                        release.freeze._close_directory_anchor(retained)
+        materialization.cleanup_candidate_runtime(runtime_root=runtime, work_root=publication[2], materialization_path=publication[3], expected_materialization_sha256=digest)
 
 
 def test_installed_native_node_and_npx_origins_without_package_fetch(publication: tuple[Path, Path, Path, Path]) -> None:
