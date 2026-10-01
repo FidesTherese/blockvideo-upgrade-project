@@ -1,6 +1,6 @@
 # D39 Exact-Candidate Verification Implementation Plan
 
-> Future implementation only. The 2026-09-30 stack audit changes documentation, not source, candidate, locks or evidence. Use `docs/DTD.md` as the implementation contract and execute its probe prerequisites sequentially before claiming integration acceptance.
+> Implementation checkpoint: Tasks 1/2 are independently source-approved. Task 3 source and 34 focused checks are implemented, but review and fresh/browser/full-unit gates are blocked or pending. The original design-audit commands below are not evidence that they ran. `specification.md` records current results; unchecked acceptance items remain obligations. Use canonical `docs/DTD.md` and never waive a failed prerequisite.
 
 **Goal:** Verify immutable D35 `522775516c0797abdb313e3432339a3a444b7ae2` through external tooling, with installation, regression, migration/restore, both-mode, browser/media, automated documentation and secret-scan evidence. No release approval is inferred.
 
@@ -103,6 +103,7 @@ def run_candidate_smokes(
     *, candidate_root: Path, freeze_manifest_path: Path,
     runtime_root: Path, materialization_path: Path,
     expected_materialization_sha256: str, work_root: Path, output_dir: Path,
+    browser_executable: Path | None = None,
 ) -> SmokeManifest: ...
 ```
 

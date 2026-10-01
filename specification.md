@@ -133,12 +133,12 @@ and readers before terminal evidence. The gate uses isolated native base Python
 validated environment and cwd. Failed command evidence validates every available native
 binding; unavailable launch observations may remain empty. Terminal memory/output/timeout
 failures settle after reader teardown and cannot become success on parent exit zero.
-Original D37 entry-point behavior is unchanged. Task 3 smoke/browser integration,
-complete live 19-path attestation and D40 remain unimplemented. Synthetic schema/FS
+Original D37 entry-point behavior is unchanged. This checkpoint precedes the Task 3
+implementation below; complete live 19-path attestation and D40 remain pending. Synthetic schema/FS
 and native process tests are not candidate acceptance, private approval, provider
 truth or operational readiness.
 
-### D39 Task 2 checkpoint (implemented; scoped review pending)
+### D39 Task 2 checkpoint (independently source-approved; non-operational)
 
 The external verifier and fixed redacted CLI consume bound readonly runtime evidence
 and existing six-receipt smoke schemas. They execute the immutable nine-command
@@ -152,11 +152,36 @@ Tracked source, candidate snapshots, exact freeze bytes and tooling source are c
 around execution. Four bounded scan rules report counts, not matched values. Group
 teardown and detached runtime cleanup precede atomic publication of exactly two
 artifacts; failed evidence retains actual attempted prefixes and absent observations
-as null. Any cleanup loss remains failed. Task 3's missing files block the full literal
-19-file live attestation and operational publication; no reduced closure or fabricated
-smoke replaces them. Focused tests include real native/Git/filesystem seams and explicitly
-synthetic installation-boundary fixtures under the 4 GiB aggregate limit. Real D35
-installation/regression, browser/media, private evaluation and readiness remain deferred.
+as null. Any cleanup loss remains failed. The full literal 19-file live attestation
+requires clean committed Task 3 source; no reduced closure or fabricated smoke replaces
+it. Scoped re-review approved the child-identity cleanup correction at `f9f9ac9`.
+Focused tests include real native/Git/filesystem seams and explicitly synthetic
+installation-boundary fixtures. Fresh D39 operational gates remain pending.
+
+### D39 Task 3 checkpoint (implemented source; review and operational gates blocked)
+
+The separate smoke controller now implements the six ordered typed stages and fixed
+candidate-only bootstrap. Genuine pinned-D35 synthetic integration verifies legacy
+migration, stopped/live-lease restore, source/profile-bound index, both startup modes,
+and fake-provider FFmpeg/ffprobe publication. These helper checks are not a fresh
+extras-install or complete owned-browser run. The browser helper uses sandbox
+websockets/CDP with a new owned profile, tagged loopback listeners, actual keyboard/
+POST/playback observations and individually recorded documentation checks. All synthetic
+project speaker discovery points to the owned fake provider, not a user's engine.
+Media is bounded to 320x240/12 fps, not a full-HD performance claim.
+
+Failed observations preserve actual receipts only; drift prevents binding/publication,
+group cleanup leaves readonly runtime for the final verifier or explicit bound cleanup,
+and no partial workflow emits a complete smoke manifest. Successful administrative
+server shutdown permits scope reuse only after confirmed teardown; actual termination
+codes and late failures remain unchanged. Candidate behavior and locks remain unchanged.
+
+The current focused suite has 34 passes under a sequential 768 MiB Job; its measured
+conservative working-set peak is 1.548 GiB. Scoped mypy and backend-wide Ruff pass. A selected earlier native-regression rerun
+has 11 passes and 10 failures at the unchanged aggregate-memory preflight, not waived
+successes. Independent source review is blocked by worker account/model rejection.
+Browser/fresh-install/full-unit gates and D40 are still pending. The pinned README
+prerequisite mismatch remains a mandatory failure; readiness remains **Not ready**.
 
 ### Stack and tooling-contract audit (2026-09-30; design only)
 

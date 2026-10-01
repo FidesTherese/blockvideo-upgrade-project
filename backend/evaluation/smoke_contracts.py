@@ -224,7 +224,15 @@ class BrowserSummary(StrictEvidenceModel):
     duplicate_post_count: Calls
     horizontal_overflow: bool
     playback_ok: bool
-    documentation_checks: bool
+    documentation_checks: dict[str, bool]
+
+    @field_validator("documentation_checks", mode="before")
+    @classmethod
+    def documentation(cls, value: object) -> object:
+        required = {"setup_paths", "locked_versions", "mode_commands", "recovery_codes", "migration_restore", "limitation_boundary"}
+        if type(value) is not dict or set(value) != required or any(type(item) is not bool for item in value.values()):
+            raise ValueError("documentation requires six exact raw checks")
+        return value
 
 
 class FFmpegSummary(StrictEvidenceModel):
@@ -282,8 +290,8 @@ class SmokeStageReceipt(StrictEvidenceModel):
                 raise ValueError("all-tools startup observation mismatch")
             if isinstance(summary, StatefulStartupSummary) and (summary.index_sha256 is None or summary.profile_sha256 is None or summary.embedding_calls < 1 or summary.model_calls < 1):
                 raise ValueError("passed stateful startup requires verified retrieval")
-            if isinstance(summary, BrowserSummary) and summary.duplicate_post_count != 1:
-                raise ValueError("passed browser requires one POST")
+            if isinstance(summary, BrowserSummary) and (summary.duplicate_post_count != 1 or not all(summary.documentation_checks.values())):
+                raise ValueError("passed browser requires one POST and all documentation checks")
             if isinstance(summary, FFmpegSummary) and (summary.ffmpeg_exit_code != 0 or summary.ffprobe_exit_code != 0 or summary.duration_ms < 1):
                 raise ValueError("passed FFmpeg requires zero exits and duration")
         if len(canonical_json_bytes(self)) + 1 > 65536:

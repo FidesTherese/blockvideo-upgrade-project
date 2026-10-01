@@ -2442,7 +2442,12 @@ actual bounded output sizes/hashes, not raw text; `release_verification` adds ca
 inventory and prevalidated tool bindings. This helper imports neither verification nor
 smoke/result models. Reconcile latched memory/output/timeout/stop failures after final
 reader and process settlement, with teardown failure taking precedence; parent exit
-zero never clears a later observed failure. Failed CommandEvidence validates every
+zero never clears a later observed failure. An explicit administrative `stop()` of a
+still-running owned server/browser before its deadline permits later commands only
+after confirmed tree/reader teardown; its real nonzero termination code remains
+recorded and is never a passed command. This exception does not clear an already
+exited nonzero child, any prior scope failure, timeout, output/memory latch or teardown
+failure. Ordinary command completion still requires zero. Failed CommandEvidence validates every
 populated native alias/version/hash binding too; only genuinely unavailable launch
 observations may be empty. It reuses D37 gate/tree/drain primitives and extends no candidate
 contract. D40 may import contracts but never invokes this helper.
@@ -2461,7 +2466,10 @@ before bounded failed evidence is published; unknown teardown is a failed result
 not a successful command. The group-local package fetches are the only installation
 network allowance; smoke providers are loopback only, and decision has none. Entries 1–5 execute in the single backend group sandbox and entries 6–9
 execute in the single frontend group sandbox; the separate smoke group adds no entry
-to this inventory. The verifier uses the tuple to execute, and D40 independently
+to this inventory. Partial/failed smoke has only actual receipt files and a fixed
+redacted failure; `run_candidate_smokes` raises without a complete SmokeManifest.
+The verifier can consume the intended absent/failed smoke path to emit truthful failed
+verification and perform bound runtime cleanup. The verifier uses the tuple to execute, and D40 independently
 compares the parsed manifest's full `(name, argv)` sequence to it and checks every
 exit code; D40 never trusts `VerificationManifest.status` as a substitute. Every entry in a passed manifest must have
 `outcome == "completed"` and `exit_code == 0`, the specified deadline, bounded output
@@ -2605,7 +2613,10 @@ call its exact `prepare_storage(directory)`, `exclusive_demo(directory)`,
 `demo_settings(directory, mode, model, index)`, and
 `create_demo_app(settings, frontend)` seams. Before create_demo_app, assign the Settings
 object's explicit synthetic `language_base_url`, `language_retrieval_profile`,
-`language_embedding_base_url`, and `language_retrieval_index`; keep readiness/all-tools
+`language_embedding_base_url`, and `language_retrieval_index`; bind `voicevox_url` on
+settings and every synthetic project to the owned fake provider's bounded
+GET `/v1/speakers`, so UI discovery never queries an unrelated local VOICEVOX service;
+use a 5 s fake-provider connection timeout; keep readiness/all-tools
 fallback/reasoning flags as defined by D35. No source-file or `.env` write occurs.
 Use `uvicorn.run(app, host="127.0.0.1", port=owned_port, workers=1, reload=False)`.
 The external controller supplies only fixed mode plus validated owned storage/frontend/
@@ -2614,7 +2625,12 @@ expression, Python import, shell command or case-selected hook. Reject incomplet
 stateful configuration before serving. Build frontend in the smoke group's writable
 copy first, then serve that group's dist path. This bootstrapping seam is synthetic
 configuration evidence, not a claim that the unmodified interactive demo CLI accepts
-new flags or that production ONNX weights were exercised.
+new flags or that production ONNX weights were exercised. Media smoke additionally
+sets synthetic output to 320x240 at 12 fps with a 48 px subtitle band before app
+creation, keeping the owned 4 GiB lane bounded; it verifies publication/playback,
+not full-HD throughput. Import modules that capture settings only after this demo
+configuration is bound. The browser's fake-provider playback media uses the same
+bounded configuration, and the later FFmpeg stage remains separately performed.
 
 Official browser protocol research: <https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/json/browser_protocol.json>
 and <https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/json/js_protocol.json>
@@ -2630,10 +2646,22 @@ called only by `evaluation/scripts/d39_smoke.py`, never by the decision process.
 Use already locked/installed `websockets` 16.1.1 (via Uvicorn standard) and
 `websockets.sync.client.connect(uri, proxy=None, compression=None, open_timeout=5,
 close_timeout=5, max_size=2*1024*1024, max_queue=4)` with one connection/reader.
+The controller launches this standalone helper using the verified sandbox Python;
+its actual transport import/version/hash belongs to that sandbox, not a different
+controller installation. The helper imports no candidate app or current evaluation
+package. It reads bounded ephemeral CDP JSON (duplicate/nonfinite/depth refusal),
+not the canonical evidence string limit: screenshot/base64 and generated protocol
+fields can legitimately exceed 8 KiB. Durable typed receipts continue through the
+shared canonical evidence parser.
 The installed signature was probed; live websockets documentation retrieval failed,
 so behavior is checked by the later local roundtrip. Launch a user-supplied installed
-native Chrome/Chromium executable under the owned Job Object, bind version/hash,
-use a new group-local profile, loopback debugging address and ephemeral port, and
+native Chrome/Chromium executable under the owned Job Object, bind version/hash.
+The smoke CLI accepts optional `--browser-executable` and the Python smoke API optional
+`browser_executable: Path | None = None`; omission checks only fixed native installed
+Chrome/Chromium locations (Windows Program Files Chrome and Linux chrome/chromium
+PATH entries), never a running profile/account. Reject script launchers/links/reparses;
+missing installed native browser is a failed prerequisite, never a download or skip.
+Use a new group-local profile, loopback debugging address and ephemeral port, and
 poll the bounded `DevToolsActivePort`/`/json/version` and `/json/list` only for this
 owned process (5 s request / 30 s startup). Never attach to a user's browser.
 Recheck its installed `/json/protocol` before driving it. Official CDP master
@@ -2646,7 +2674,13 @@ and `Page.captureScreenshot(format="png",captureBeyondViewport=False)`. Reject C
 errors, `exceptionDetails`, unexpected IDs, oversized frames/screenshots, and missing
 methods. Fixed repository-owned expressions inspect role/status text, focus, scroll
 width and media readiness; synthetic values are JSON-encoded data, never JS fragments.
-Provider/backend/network counters prove exactly one action POST. The Chrome protocol
+Provider/backend/network counters prove exactly one action POST. Each server receives
+a fresh 64-hex synthetic `owner_token` in its bounded fixed configuration. A fixed
+bootstrap-only middleware GET `/__d39-owned` returns that token; readiness requires
+its exact match and a still-active owned process before health/status are trusted,
+so an accidentally reused loopback port cannot adopt an unrelated server. This
+synthetic ownership token is not an application credential. The same middleware
+atomically records actual operation POST counts from an initially observed zero. The Chrome protocol
 roundtrip is still a **Blocked fact**; it cannot be counted as browser acceptance yet.
 
 Documentation checks in `BrowserSummary.documentation_checks` have exactly keys

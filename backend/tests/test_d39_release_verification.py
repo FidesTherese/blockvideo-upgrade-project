@@ -50,7 +50,7 @@ def _summary(stage: str) -> dict[str, object]:
         "restore": {"restored_version": 1, "integrity_ok": True, "foreign_keys_enabled": True, "rows_equal": True, "identities_equal": True, "lease_exclusion_passed": True},
         "all_tools_startup": {"mode": "all_tools", "startup_ready": True, "health_ok": True, "request_completed": True, "model_calls": 1, "index_sha256": None},
         "stateful_startup": {"mode": "stateful", "startup_ready": True, "health_ok": True, "request_completed": True, "model_calls": 1, "index_sha256": SHA, "profile_sha256": SHA, "embedding_calls": 1, "retrieval_verified": True},
-        "browser": {"narrow_width": 390, "wide_width": 1440, "waiting_ok": True, "safe_retry_ok": True, "unknown_remote_blocked": True, "migration_failed_ok": True, "keyboard_ok": True, "duplicate_post_count": 1, "horizontal_overflow": False, "playback_ok": True, "documentation_checks": True},
+        "browser": {"narrow_width": 390, "wide_width": 1440, "waiting_ok": True, "safe_retry_ok": True, "unknown_remote_blocked": True, "migration_failed_ok": True, "keyboard_ok": True, "duplicate_post_count": 1, "horizontal_overflow": False, "playback_ok": True, "documentation_checks": dict.fromkeys(("setup_paths", "locked_versions", "mode_commands", "recovery_codes", "migration_restore", "limitation_boundary"), True)},
         "ffmpeg": {"providers_fake": True, "ffmpeg_exit_code": 0, "ffprobe_exit_code": 0, "video_present": True, "subtitle_present": True, "publication_bound": True, "duration_ms": 500},
     }
     return {"stage": stage, **values[stage]}

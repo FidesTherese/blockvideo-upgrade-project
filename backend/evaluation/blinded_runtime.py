@@ -936,6 +936,7 @@ class OwnedProcess:
         self._sizes = [0, 0]
         self._hashes = [hashlib.sha256(), hashlib.sha256()]
         self._stop_reason: OwnedOutcome | None = None
+        self._administrative_stop = False
         self._started_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._deadline = time.monotonic() + deadline_seconds
         self._terminate_lock = asyncio.Lock()
@@ -1060,7 +1061,7 @@ class OwnedProcess:
             reason = "timeout"
         elif self._stop_reason is not None:
             reason = self._stop_reason
-        if reason != "completed" or self._process.returncode != 0:
+        if reason != "completed" or (self._process.returncode != 0 and not self._administrative_stop):
             self.scope._failed = True
             for child in self.scope._children:
                 if child is not self and child.outcome is None:
@@ -1077,7 +1078,11 @@ class OwnedProcess:
     async def stop(self) -> OwnedCommandOutcome:
         if self.outcome is None:
             if self._stop_reason is None:
-                self._stop_reason = "completed"
+                if time.monotonic() >= self._deadline:
+                    self._stop_reason = "timeout"
+                else:
+                    self._administrative_stop = self._process is not None and self._process.returncode is None and not self.scope._failed
+                    self._stop_reason = "completed"
             await self._terminate()
         return await self.wait()
 
