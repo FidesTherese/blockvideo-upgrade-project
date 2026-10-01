@@ -38,9 +38,9 @@ D38 verifies detached/canonical bytes, historical recorded Git blobs, identity c
 
 ## D39 foundation
 
-`smoke_contracts` owns strict frozen summaries/inventory; `release_verification` only re-exports them. The materializer copies verified tracked bytes into readonly source. Physical IDs and locked marker transitions make cleanup detached-bound and replacement-safe. Interrupted cleaning resumes recorded subsets; bounded receipts survive.
+Pure frozen `smoke_contracts` are re-exported by `release_verification`. The materializer copies tracked bytes into readonly source. Locked identity-bound markers refuse replacement cleanup. Published failures mark cleaning before deletion; interruption resumes subsets. Failed commands validate available native bindings.
 
-`OwnedProcessScope`, `start_owned_process` and `run_owned_command` gate base Python before Job/session registration, cap output at 2 MiB, monitor commit/resident limits and confirm descendant/reader teardown. Failures block later commands; D37 APIs are unchanged. Task 2/3, 19-path attestation and D40 remain deferred; Windows checks are not POSIX or candidate acceptance.
+`OwnedProcessScope`, `start_owned_process` and `run_owned_command` isolate base Python (`-I -S -B`) before Job/session registration, preserving target environment/cwd. They cap output at 2 MiB, monitor memory and confirm descendants/readers. Latched failures settle after teardown and block later commands. D37 is unchanged; Task 2/3, attestation and D40 remain deferred. Windows checks are not candidate acceptance.
 
 ## Key decisions and limits
 
@@ -52,4 +52,4 @@ Candidate failures retain fixed classifications. Trusted-host logs remain bounde
 
 ## Relevant verification
 
-Focused synthetic coverage lives in `backend/tests/test_d36_candidate_protocol.py`, `test_d37_blinded_runner.py`, `test_d38_result_import.py` and `test_d39_release_verification.py`. The Task 1 harness uses sequential 768 MiB Jobs, resident monitoring and explicit platform skips. Run those first, then backend pytest/Ruff and frontend test/build/lint gates sequentially. Tests use repository synthetic fixtures and fake providers only. `test_evidence_json.py` is the standalone pure-parser boundary. `tests/d37_pinned_support.py` verifies every exact-D35 archive blob and builds/loads an external synthetic source/profile index in candidate-rooted subprocesses. Pinned tests cover both modes, restart resend, original-target preservation, actual retrieval (not fallback-only), unchanged complete source/index hashes and invalid-index negatives. This is not real evaluation, optional ONNX proof or independent acceptance.
+Focused coverage lives in `backend/tests/test_d36_candidate_protocol.py`, `test_d37_blinded_runner.py`, `test_d38_result_import.py` and `test_d39_release_verification.py`. Task 1 uses sequential 768 MiB Jobs, resident monitoring and explicit platform skips. Checks cover startup hooks, late-reader failures and interrupted published cleanup with synthetic fixtures. Broader backend/frontend gates remain separate. `test_evidence_json.py` is the standalone pure-parser boundary. `tests/d37_pinned_support.py` verifies every exact-D35 archive blob and builds/loads an external synthetic source/profile index in candidate-rooted subprocesses. Pinned tests cover both modes, restart resend, original-target preservation, actual retrieval (not fallback-only), unchanged complete source/index hashes and invalid-index negatives. This is not real evaluation, optional ONNX proof or independent acceptance.

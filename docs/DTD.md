@@ -2167,6 +2167,8 @@ fails closed. Publish immutable materialization before setting active with its e
 LF-byte digest. Cleanup resumes only active/cleaning with that binding; missing paths
 are permitted only as an already-cleaning subset of the recorded owned paths.
 Verify each remaining identity/type/content before chmod/unlink, never a replacement.
+A published active-runtime failure transitions to cleaning before destructive cleanup,
+so an interrupted remaining subset is resumable under the same detached binding.
 A cleaned marker with absent runtime proves idempotence. Building failure may clean
 only this invocation's retained owned objects; unexplained partial roots survive.
 `<materialization-filename>.cleanup.json` records schema_version, instance,
@@ -2175,8 +2177,11 @@ materialization_sha256 and status=`completed`|`failed`, never absolute paths.
 Extend `blinded_runtime` with async `OwnedProcessScope` and
 `start_owned_process(*, scope, argv, cwd, env, stdout_path, stderr_path,
 deadline_seconds) -> OwnedProcess`. The scope owns one group, long-lived server/browser
-and command children alike. Each child is stdin-gated until group Job assignment or
-POSIX session registration; no breakaway. `OwnedProcess` exposes pid, async wait,
+and command children alike. Each child uses the native base Python supervisor with `-I -S -B` (isolated startup,
+no sitecustomize/user-site/cwd import hooks) and is stdin-gated until group Job
+assignment or POSIX session registration; no breakaway. After assignment the fixed
+supervisor launches the intended target with its explicitly validated environment;
+supervisor isolation must not erase target sandbox semantics. `OwnedProcess` exposes pid, async wait,
 stop and terminal outcome; closing the scope stops and confirms all descendants and
 readers. `run_owned_command` accepts an optional scope, otherwise owns a temporary
 one, and returns `OwnedCommandOutcome`: outcome, exit_code, started_at, finished_at,
@@ -2368,7 +2373,11 @@ deadline_seconds: int) -> Awaitable[OwnedCommandOutcome]` for D39 bootstrap/comm
 smoke. `OwnedCommandOutcome` contains outcome, nullable exit code, timestamps and
 actual bounded output sizes/hashes, not raw text; `release_verification` adds canonical
 inventory and prevalidated tool bindings. This helper imports neither verification nor
-smoke/result models. It reuses D37 gate/tree/drain primitives and extends no candidate
+smoke/result models. Reconcile latched memory/output/timeout/stop failures after final
+reader and process settlement, with teardown failure taking precedence; parent exit
+zero never clears a later observed failure. Failed CommandEvidence validates every
+populated native alias/version/hash binding too; only genuinely unavailable launch
+observations may be empty. It reuses D37 gate/tree/drain primitives and extends no candidate
 contract. D40 may import contracts but never invokes this helper.
 
 All commands use the existing trusted stdin gate before Windows Job Object assignment,

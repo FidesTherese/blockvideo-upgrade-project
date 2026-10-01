@@ -324,7 +324,7 @@ class SmokeManifest(StrictEvidenceModel):
 class CommandEvidence(StrictEvidenceModel):
     name: str
     argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=64)]
-    resolved_argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=64)]
+    resolved_argv: Annotated[tuple[str, ...], Field(max_length=64)]
     tool_bindings: Annotated[tuple[ToolExecutionBinding, ...], Field(max_length=16)]
     cwd: Literal["backend", "frontend"]
     deadline_seconds: Annotated[int, Field(gt=0)]
@@ -361,33 +361,37 @@ class CommandEvidence(StrictEvidenceModel):
             raise ValueError("command output or timestamp bounds violated")
         if self.outcome == "completed" and self.exit_code is None:
             raise ValueError("completed command requires an exit code")
-        if self.outcome == "completed":
-            roles = tuple(item.role for item in self.tool_bindings)
-            expected_roles = ("python_bootstrap", "uv") if index == 0 else ("python",) if index < 5 else ("node", "npx", "pnpm")
-            if roles != expected_roles:
-                raise ValueError("completed command requires exact native tool roles")
-            executable_alias = "tools/python_bootstrap" if index == 0 else "tools/python_sandbox" if index < 5 else "tools/node"
-            expected_argv = (executable_alias, *self.argv[1:]) if index < 5 else (executable_alias, "tools/npx_cli", *self.argv[1:])
+        roles = tuple(item.role for item in self.tool_bindings)
+        expected_roles = ("python_bootstrap", "uv") if index == 0 else ("python",) if index < 5 else ("node", "npx", "pnpm")
+        if any(role not in expected_roles for role in roles):
+            raise ValueError("command contains an unexpected native tool role")
+        if self.outcome == "completed" and roles != expected_roles:
+            raise ValueError("completed command requires exact native tool roles")
+        executable_alias = "tools/python_bootstrap" if index == 0 else "tools/python_sandbox" if index < 5 else "tools/node"
+        expected_argv = (executable_alias, *self.argv[1:]) if index < 5 else (executable_alias, "tools/npx_cli", *self.argv[1:])
+        if self.resolved_argv:
             if self.resolved_argv != expected_argv:
                 raise ValueError("resolved command argv must match native aliases")
-            if len({(item.executable.path, item.executable.size, item.executable.sha256) for item in self.tool_bindings}) != 1:
-                raise ValueError("shared native executable bindings disagree")
-            versions = {"python_bootstrap": "3.12.12", "uv": "0.12.15", "python": "3.12.12", "node": "24.11.1", "pnpm": "10.18.3"}
-            launchers = {"uv": "tools/uv_module", "npx": "tools/npx_cli", "pnpm": "tools/pnpm_cjs"}
-            total = 0
-            for binding in self.tool_bindings:
-                if binding.executable.path != executable_alias or (binding.role in versions and binding.version != versions[binding.role]):
-                    raise ValueError("native tool alias or version mismatch")
-                launcher_alias = launchers.get(binding.role)
-                if (binding.launcher is None) != (launcher_alias is None) or (binding.launcher is not None and binding.launcher.path != launcher_alias):
-                    raise ValueError("native tool launcher mismatch")
-                for blob in (binding.executable, binding.launcher):
-                    if blob is not None:
-                        if blob.size > 256 * 1024 * 1024:
-                            raise ValueError("native tool blob size limit exceeded")
-                        total += blob.size
-            if total > 1024 * 1024 * 1024:
-                raise ValueError("native tool total size limit exceeded")
+        elif self.outcome != "launch_failed":
+            raise ValueError("launched command requires resolved native argv")
+        if len({(item.executable.path, item.executable.size, item.executable.sha256) for item in self.tool_bindings}) > 1:
+            raise ValueError("shared native executable bindings disagree")
+        versions = {"python_bootstrap": "3.12.12", "uv": "0.12.15", "python": "3.12.12", "node": "24.11.1", "pnpm": "10.18.3"}
+        launchers = {"uv": "tools/uv_module", "npx": "tools/npx_cli", "pnpm": "tools/pnpm_cjs"}
+        total = 0
+        for binding in self.tool_bindings:
+            if binding.executable.path != executable_alias or (binding.role in versions and binding.version != versions[binding.role]):
+                raise ValueError("native tool alias or version mismatch")
+            launcher_alias = launchers.get(binding.role)
+            if (binding.launcher is None) != (launcher_alias is None) or (binding.launcher is not None and binding.launcher.path != launcher_alias):
+                raise ValueError("native tool launcher mismatch")
+            for blob in (binding.executable, binding.launcher):
+                if blob is not None:
+                    if blob.size > 256 * 1024 * 1024:
+                        raise ValueError("native tool blob size limit exceeded")
+                    total += blob.size
+        if total > 1024 * 1024 * 1024:
+            raise ValueError("native tool total size limit exceeded")
         return self
 
 

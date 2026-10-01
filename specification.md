@@ -122,13 +122,18 @@ command evidence, verification evidence and physical runtime ownership. The sepa
 materializer verifies a complete D36 publication and clean detached committed source,
 copies only tracked bytes, checks streamed fingerprints and readonly permissions,
 and binds every child identity to a locked, inode-preserving external marker.
-Detached-hash-first cleanup refuses replacement, drift and unknown absence; interrupted
-cleaning resumes only its recorded remaining subset. The same CLI has a cleanup action.
+Detached-hash-first cleanup refuses replacement, drift and unknown absence. Published
+failures mark cleaning before deletion; interruption resumes only the recorded remaining
+subset. The same CLI has a cleanup action.
 
 Additive owned process scopes retain a memory-limited Windows Job (or POSIX sessions),
 gate target execution before assignment, cap shared output, and confirm descendants
-and readers before terminal evidence. The gate uses native base Python, not a Windows
-venv redirector. Original D37 entry-point behavior is unchanged. Task 2 nine-command
+and readers before terminal evidence. The gate uses isolated native base Python
+(`-I -S -B`), not a Windows venv redirector, then preserves the assigned target's
+validated environment and cwd. Failed command evidence validates every available native
+binding; unavailable launch observations may remain empty. Terminal memory/output/timeout
+failures settle after reader teardown and cannot become success on parent exit zero.
+Original D37 entry-point behavior is unchanged. Task 2 nine-command
 execution, Task 3 smoke/browser integration, full 19-path attestation and D40 remain
 unimplemented in this checkpoint. Synthetic schema/FS and native process tests are
 not candidate acceptance, private approval, provider truth or operational readiness.

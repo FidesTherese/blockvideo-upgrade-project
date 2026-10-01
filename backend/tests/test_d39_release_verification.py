@@ -149,6 +149,63 @@ def test_completed_command_requires_exact_native_role_aliases(kind: str) -> None
         parse_canonical_model(_bytes(payload), contracts.CommandEvidence, maximum=65536)
 
 
+@pytest.mark.parametrize("outcome", ["launch_failed", "timeout", "output_limit", "memory_limit", "teardown_failed"])
+@pytest.mark.parametrize("kind", ["raw_path", "resolved_tail", "version", "role", "executable", "launcher", "blob_size", "shared_hash", "shared_size", "duplicate_role"])
+def test_failed_command_rejects_untrusted_populated_native_proof(outcome: str, kind: str) -> None:
+    contracts = _module("evaluation.smoke_contracts")
+    payload = _command()
+    payload.update(outcome=outcome, exit_code=None)
+    parse_canonical_model(_bytes(payload), contracts.CommandEvidence, maximum=65536)
+    if kind == "raw_path":
+        payload["resolved_argv"][0] = "C:/synthetic-private/python.exe"
+    elif kind == "resolved_tail":
+        payload["resolved_argv"][-1] = "--untrusted"
+    elif kind == "version":
+        payload["tool_bindings"][0]["version"] = "3.13.0"
+    elif kind == "role":
+        payload["tool_bindings"][0]["role"] = "python"
+    elif kind == "executable":
+        payload["tool_bindings"][0]["executable"]["path"] = "tools/other"
+    elif kind == "launcher":
+        payload["tool_bindings"][1]["launcher"] = None
+    elif kind == "blob_size":
+        payload["tool_bindings"][1]["launcher"]["size"] = 256 * 1024 * 1024 + 1
+    elif kind == "shared_hash":
+        payload["tool_bindings"][1]["executable"]["sha256"] = "f" * 64
+    elif kind == "shared_size":
+        payload["tool_bindings"][1]["executable"]["size"] = 4
+    else:
+        payload["tool_bindings"].append(payload["tool_bindings"][1])
+    with pytest.raises(ValueError):
+        parse_canonical_model(_bytes(payload), contracts.CommandEvidence, maximum=65536)
+
+
+def test_unavailable_failed_launch_keeps_empty_native_observations() -> None:
+    contracts = _module("evaluation.smoke_contracts")
+    payload = _command()
+    payload.update(outcome="launch_failed", exit_code=None, resolved_argv=[], tool_bindings=[])
+    result = parse_canonical_model(_bytes(payload), contracts.CommandEvidence, maximum=65536)
+    assert result.resolved_argv == () and result.tool_bindings == ()
+    assert result.exit_code is None
+    payload["outcome"] = "completed"
+    payload["exit_code"] = 0
+    with pytest.raises(ValueError):
+        parse_canonical_model(_bytes(payload), contracts.CommandEvidence, maximum=65536)
+
+
+@pytest.mark.parametrize("role", ["python_bootstrap", "uv"])
+def test_partial_failed_launch_still_validates_available_binding(role: str) -> None:
+    contracts = _module("evaluation.smoke_contracts")
+    payload = _command()
+    payload.update(outcome="launch_failed", exit_code=None, resolved_argv=[])
+    payload["tool_bindings"] = [item for item in payload["tool_bindings"] if item["role"] == role]
+    result = parse_canonical_model(_bytes(payload), contracts.CommandEvidence, maximum=65536)
+    assert tuple(item.role for item in result.tool_bindings) == (role,)
+    payload["tool_bindings"][0]["version"] = "unverified"
+    with pytest.raises(ValueError):
+        parse_canonical_model(_bytes(payload), contracts.CommandEvidence, maximum=65536)
+
+
 def test_failed_verification_accepts_only_attempted_prefix_and_truthful_nulls() -> None:
     release = _module("evaluation.release_verification")
     payload = {"schema_version": 1, "candidate_id": CANDIDATE, "git_commit": COMMIT, "freeze_sha256": SHA, "verifier_tool_sha256": SHA, "status": "failed", "commands": [], "smoke_manifest_sha256": None, "smoke_manifest": None, "secret_scan_passed": False, "candidate_clean_before": True, "candidate_clean_after": False, "candidate_snapshot_before_sha256": SHA, "candidate_snapshot_after_sha256": None, "materialization_sha256": SHA, "runtime_instance_id": SHA, "runtime_source_sha256": SHA, "runtime_snapshot_after_sha256": None, "cleanup_status": "failed"}
@@ -351,6 +408,66 @@ def test_cleanup_interruption_resumes_only_recorded_remaining_subset(publication
     assert json.loads(output.with_name(output.name + ".cleanup.json").read_bytes())["status"] == "failed"
     _cleanup(publication, runtime, digest)
     assert not runtime.exists()
+
+
+@pytest.mark.parametrize("replace_remaining", [False, True])
+def test_published_failure_cleanup_resumes_without_deleting_replacements(publication: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch, replace_remaining: bool) -> None:
+    module = _module("evaluation.runtime_materialization")
+    candidate, frozen, work, output = publication
+    original_update = module._marker_update
+    original_unlink = os.unlink
+    deleted: list[Path] = []
+    runtime: Path | None = None
+    attempts = 0
+
+    def change_after_activation(*args: Any, **kwargs: Any) -> Any:
+        nonlocal runtime
+        marker = original_update(*args, **kwargs)
+        if kwargs.get("state") == "active":
+            runtime = work / ("runtime-" + marker.runtime_instance_id)
+            (candidate / "backend/pyproject.toml").write_bytes(b"synthetic post-activation source drift\n")
+        return marker
+
+    def interrupted_unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal attempts
+        if runtime is not None and (kwargs.get("dir_fd") is not None or runtime in Path(path).parents):
+            attempts += 1
+            if attempts == 2:
+                raise OSError("synthetic published cleanup interruption")
+            deleted.append(Path(path))
+        original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_marker_update", change_after_activation)
+        patch.setattr(os, "unlink", interrupted_unlink)
+        with pytest.raises(ValueError, match="cleanup_failed"):
+            module.materialize_candidate_runtime(candidate_root=candidate, freeze_manifest_path=frozen, work_root=work, output_path=output)
+    assert runtime is not None and runtime.exists() and len(deleted) == 1 and attempts == 2
+    record = json.loads(output.read_bytes())
+    assert sum((runtime / item["path"]).exists() for item in record["files"]) == len(record["files"]) - 1
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    marker_path = output.with_name(output.name + ".ownership.json")
+    assert json.loads(marker_path.read_bytes())["state"] == "cleaning"
+    assert json.loads(output.with_name(output.name + ".cleanup.json").read_bytes())["status"] == "failed"
+    if replace_remaining:
+        target = next(runtime / item["path"] for item in record["files"] if (runtime / item["path"]).exists())
+        data = target.read_bytes()
+        os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+        target.rename(output.parent / "retained-old-source")
+        target.write_bytes(data)
+        os.chmod(target, stat.S_IREAD)
+        before = target.stat()
+        with pytest.raises(ValueError):
+            _cleanup(publication, runtime, digest)
+        assert target.read_bytes() == data
+        assert target.stat().st_ino == before.st_ino and target.stat().st_mode == before.st_mode
+        assert json.loads(marker_path.read_bytes())["state"] == "cleaning"
+    else:
+        _cleanup(publication, runtime, digest)
+        _cleanup(publication, runtime, digest)
+        assert not runtime.exists()
+        assert json.loads(marker_path.read_bytes())["state"] == "cleaned"
+        assert json.loads(output.with_name(output.name + ".cleanup.json").read_bytes())["status"] == "completed"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX special-file/symlink behavior; Windows reparse test separate")
@@ -577,6 +694,78 @@ def test_job_assignment_failure_never_releases_payload(tmp_path: Path, monkeypat
     assert not (tmp_path / "payload-ran").exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="native Windows pre-assignment startup hooks")
+@pytest.mark.parametrize("hook", ["sitecustomize", "subprocess"])
+@pytest.mark.parametrize("refuse_assignment", [False, True])
+def test_isolated_supervisor_blocks_startup_hook_descendants_before_assignment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hook: str, refuse_assignment: bool) -> None:
+    runtime = _module("evaluation.blinded_runtime")
+    base_python = str(getattr(sys, "_base_executable", sys.executable))
+    marker = tmp_path / "startup-descendant-ran"
+    payload = f"from pathlib import Path; Path({str(marker)!r}).write_text('synthetic hook descendant')"
+    (tmp_path / "hook-descendant.py").write_text(payload)
+    hook_code = f"import os\nos.spawnv(os.P_WAIT, {base_python!r}, ('python', '-I', '-S', '-B', 'hook-descendant.py'))\n"
+    hook_root = tmp_path / "bootstrap-dependencies"
+    hook_root.mkdir()
+    (hook_root / (hook + ".py")).write_text(hook_code)
+    if hook == "subprocess":
+        (tmp_path / "subprocess.py").write_text(hook_code)
+    original_launch = asyncio.create_subprocess_exec
+    original_assign = runtime.OwnedProcessScope._assign_job
+    checked: list[int] = []
+
+    async def observe_startup(*args: Any, **kwargs: Any) -> Any:
+        process = await original_launch(*args, **kwargs)
+        until = time.monotonic() + 1
+        while not marker.exists() and process.returncode is None and time.monotonic() < until:
+            await asyncio.sleep(0.01)
+        return process
+
+    def assign(scope: Any, process: Any, child: Any) -> None:
+        checked.append(process.pid)
+        if refuse_assignment:
+            raise OSError("synthetic assignment refusal")
+        original_assign(scope, process, child)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_startup)
+    monkeypatch.setattr(runtime.OwnedProcessScope, "_assign_job", assign)
+    environment = runtime.clean_subprocess_environment(Path(__file__).parents[2])
+    environment["PYTHONPATH"] = str(hook_root)
+
+    async def exercise() -> None:
+        async with runtime.OwnedProcessScope() as scope:
+            result = await runtime.run_owned_command(scope=scope, argv=(base_python, "-I", "-S", "-B", "-c", "open('target-ran','w').write('assigned target')"), cwd=tmp_path, env=environment, stdout_path=tmp_path / "out", stderr_path=tmp_path / "err", deadline_seconds=5)
+            assert result.outcome == ("launch_failed" if refuse_assignment else "completed")
+            assert (tmp_path / "target-ran").exists() is not refuse_assignment
+        assert scope.teardown_confirmed and checked
+        assert not marker.exists()
+    asyncio.run(exercise())
+
+
+def test_isolated_supervisor_preserves_assigned_target_environment_and_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = _module("evaluation.blinded_runtime")
+    dependency_root = tmp_path / "bootstrap-dependencies"
+    dependency_root.mkdir()
+    assigned = tmp_path / "assigned"
+    target_hook = tmp_path / "target-hook"
+    (dependency_root / "sitecustomize.py").write_text(f"from pathlib import Path\nPath({str(target_hook)!r}).write_text('assigned' if Path({str(assigned)!r}).exists() else 'premature')\n")
+    (dependency_root / "bootstrap_dependency.py").write_text("value = 'dependency-loaded'\n")
+    original_assign = runtime.OwnedProcessScope._assign_job
+
+    def assign(scope: Any, process: Any, child: Any) -> None:
+        original_assign(scope, process, child)
+        assert not target_hook.exists()
+        assigned.write_text("owned")
+
+    monkeypatch.setattr(runtime.OwnedProcessScope, "_assign_job", assign)
+    environment = runtime.clean_subprocess_environment(Path(__file__).parents[2])
+    environment.update(PYTHONPATH=str(dependency_root), D39_BOOTSTRAP="original-environment")
+    code = "import bootstrap_dependency,os; print(bootstrap_dependency.value); print(os.environ['D39_BOOTSTRAP']); print(os.getcwd())"
+    result = asyncio.run(runtime.run_owned_command(argv=(sys.executable, "-B", "-c", code), cwd=tmp_path, env=environment, stdout_path=tmp_path / "out", stderr_path=tmp_path / "err", deadline_seconds=5))
+    assert result.outcome == "completed" and result.exit_code == 0
+    assert (tmp_path / "out").read_text().splitlines() == ["dependency-loaded", "original-environment", str(tmp_path)]
+    assert target_hook.read_text() == "assigned"
+
+
 @pytest.mark.parametrize("reason", ["pressure", "accounting"])
 def test_scope_stops_owned_work_on_memory_or_accounting_loss(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
     runtime = _module("evaluation.blinded_runtime")
@@ -596,6 +785,141 @@ def test_scope_stops_owned_work_on_memory_or_accounting_loss(tmp_path: Path, mon
             armed = True
             result = await child.wait()
             assert result.outcome == "memory_limit"
+        assert scope.teardown_confirmed
+    asyncio.run(exercise())
+
+
+def _pipe_holding_parent(tmp_path: Path, *, flood: bool = False) -> str:
+    output = "sys.stdout.buffer.write(b'x' * 2200000); sys.stdout.flush()" if flood else "print('late', flush=True)"
+    (tmp_path / "pipe-child.py").write_text("import pathlib,sys,time\nwhile not pathlib.Path('release-descendant').exists(): time.sleep(0.01)\n" + output + "\ntime.sleep(60)\n")
+    base_python = str(getattr(sys, "_base_executable", sys.executable))
+    return f"import subprocess; p=subprocess.Popen([{base_python!r},'-I','-S','-B','pipe-child.py']); open('child.pid','w').write(str(p.pid))"
+
+
+@pytest.mark.parametrize("reason", ["memory_limit", "timeout"])
+def test_parent_drain_latches_late_failures_and_refuses_next_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
+    runtime = _module("evaluation.blinded_runtime")
+    original_wait = asyncio.wait
+    original_read = runtime.OwnedProcess._read
+    injected: list[int] = []
+    parent_code = _pipe_holding_parent(tmp_path)
+
+    async def drain(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("timeout") == runtime.HOST_PIPE_DRAIN_GRACE_SECONDS:
+            (tmp_path / "release-descendant").write_text("parent exited")
+        return await original_wait(*args, **kwargs)
+
+    async def read(child: Any, stream: Any, descriptor: int, index: int) -> None:
+        original_chunk = stream.read
+        async def chunk(size: int = -1) -> bytes:
+            value = await original_chunk(size)
+            if index == 0 and value and not injected:
+                assert child._process.returncode == 0
+                injected.append(child.pid)
+                if reason == "memory_limit":
+                    child.scope._memory_lost.set()
+                else:
+                    child._stop_reason = "timeout"
+            return value
+        monkeypatch.setattr(stream, "read", chunk)
+        await original_read(child, stream, descriptor, index)
+
+    monkeypatch.setattr(asyncio, "wait", drain)
+    monkeypatch.setattr(runtime.OwnedProcess, "_read", read)
+    async def exercise() -> None:
+        async with runtime.OwnedProcessScope() as scope:
+            result = await runtime.run_owned_command(scope=scope, argv=(sys.executable, "-B", "-c", parent_code), cwd=tmp_path, env=runtime.clean_subprocess_environment(Path(__file__).parents[2]), stdout_path=tmp_path / "out", stderr_path=tmp_path / "err", deadline_seconds=5)
+            assert injected and result.exit_code == 0
+            assert result.outcome == reason
+            assert (tmp_path / "out").read_text() == "late\n"
+            with pytest.raises(ValueError, match="failed"):
+                await runtime.run_owned_command(scope=scope, argv=(sys.executable, "-c", "open('next-command','w').write('unsafe')"), cwd=tmp_path, env={}, stdout_path=tmp_path / "next.out", stderr_path=tmp_path / "next.err", deadline_seconds=5)
+        assert scope.teardown_confirmed
+        assert not (tmp_path / "next-command").exists()
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows Job final-reader settlement seam")
+@pytest.mark.parametrize("reason", ["output_limit", "memory_limit", "memory_over_output", "timeout", "teardown_failed"])
+def test_final_readers_latch_failures_after_real_descendant_teardown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
+    runtime = _module("evaluation.blinded_runtime")
+    original_wait = asyncio.wait
+    original_read = runtime.OwnedProcess._read
+    original_terminate = runtime._terminate_job_confirmed
+    tree_settled = asyncio.Event()
+    observed: list[int] = []
+    flood = reason in {"output_limit", "memory_over_output"}
+    parent_code = _pipe_holding_parent(tmp_path, flood=flood)
+
+    async def drain(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("timeout") == runtime.HOST_PIPE_DRAIN_GRACE_SECONDS:
+            (tmp_path / "release-descendant").write_text("parent exited")
+        return await original_wait(*args, **kwargs)
+
+    async def terminate(handle: int, *, deadline: float | None = None) -> None:
+        await original_terminate(handle, deadline=deadline)
+        tree_settled.set()
+
+    async def read(child: Any, stream: Any, descriptor: int, index: int) -> None:
+        if index == 0 and flood:
+            original_chunk = stream.read
+            count = 0
+            async def chunk(size: int = -1) -> bytes:
+                nonlocal count
+                value = await original_chunk(size)
+                count += len(value)
+                if count > 2 * 1024 * 1024 and not tree_settled.is_set():
+                    assert child._process.returncode == 0
+                    await tree_settled.wait()
+                return value
+            monkeypatch.setattr(stream, "read", chunk)
+        await original_read(child, stream, descriptor, index)
+        if index == 0:
+            assert tree_settled.is_set() and child._process.returncode == 0
+            observed.append(child.pid)
+            if reason in {"memory_limit", "memory_over_output", "teardown_failed"}:
+                child.scope._memory_lost.set()
+            if reason == "timeout":
+                child._stop_reason = "timeout"
+            if reason == "teardown_failed":
+                raise ValueError("synthetic final reader failure after real drain")
+
+    monkeypatch.setattr(asyncio, "wait", drain)
+    monkeypatch.setattr(runtime.OwnedProcess, "_read", read)
+    monkeypatch.setattr(runtime, "_terminate_job_confirmed", terminate)
+    async def exercise() -> None:
+        scope = runtime.OwnedProcessScope()
+        await scope.__aenter__()
+        try:
+            result = await runtime.run_owned_command(scope=scope, argv=(sys.executable, "-B", "-c", parent_code), cwd=tmp_path, env=runtime.clean_subprocess_environment(Path(__file__).parents[2]), stdout_path=tmp_path / "out", stderr_path=tmp_path / "err", deadline_seconds=5)
+            assert observed and result.exit_code == 0
+            assert result.outcome == ("memory_limit" if reason == "memory_over_output" else reason)
+            raw = (tmp_path / "out").read_bytes()
+            assert result.stdout_size == len(raw) == (2 * 1024 * 1024 if flood else len(b"late\r\n"))
+            assert result.stdout_sha256 == hashlib.sha256(raw).hexdigest()
+            with pytest.raises(ValueError, match="failed"):
+                await runtime.run_owned_command(scope=scope, argv=(sys.executable, "-c", "open('next-command','w').write('unsafe')"), cwd=tmp_path, env={}, stdout_path=tmp_path / "next.out", stderr_path=tmp_path / "next.err", deadline_seconds=5)
+        finally:
+            if reason == "teardown_failed":
+                with pytest.raises(ValueError, match="teardown_failed"):
+                    await scope.close()
+            else:
+                await scope.close()
+                assert scope.teardown_confirmed
+        assert not (tmp_path / "next-command").exists()
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("reason", ["memory_limit", "output_limit", "timeout"])
+def test_explicit_stop_cannot_clear_an_already_latched_failure(tmp_path: Path, reason: str) -> None:
+    runtime = _module("evaluation.blinded_runtime")
+    async def exercise() -> None:
+        async with runtime.OwnedProcessScope() as scope:
+            child = await runtime.start_owned_process(scope=scope, argv=(sys.executable, "-c", "import time; time.sleep(60)"), cwd=tmp_path, env=runtime.clean_subprocess_environment(Path(__file__).parents[2]), stdout_path=tmp_path / "out", stderr_path=tmp_path / "err", deadline_seconds=5)
+            child._stop_reason = reason
+            result = await child.stop()
+            assert result.outcome == reason
+            assert scope._failed
         assert scope.teardown_confirmed
     asyncio.run(exercise())
 

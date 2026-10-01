@@ -1049,6 +1049,17 @@ class OwnedProcess:
             await self._terminate()
         except (OSError, ValueError):
             reason = "teardown_failed"
+        latched = (reason, self._stop_reason)
+        if "teardown_failed" in latched:
+            reason = "teardown_failed"
+        elif self.scope._memory_lost.is_set() or "memory_limit" in latched:
+            reason = "memory_limit"
+        elif self._overflow.is_set() or "output_limit" in latched:
+            reason = "output_limit"
+        elif "timeout" in latched:
+            reason = "timeout"
+        elif self._stop_reason is not None:
+            reason = self._stop_reason
         if reason != "completed" or self._process.returncode != 0:
             self.scope._failed = True
             for child in self.scope._children:
@@ -1065,7 +1076,8 @@ class OwnedProcess:
 
     async def stop(self) -> OwnedCommandOutcome:
         if self.outcome is None:
-            self._stop_reason = "completed"
+            if self._stop_reason is None:
+                self._stop_reason = "completed"
             await self._terminate()
         return await self.wait()
 
@@ -1096,7 +1108,7 @@ async def start_owned_process(*, scope: OwnedProcessScope, argv: tuple[str, ...]
         scope._children.append(child)
         try:
             options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-            child._process = await asyncio.create_subprocess_exec(getattr(sys, "_base_executable", sys.executable), "-B", "-c", _OWNED_GATE, *argv, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **options)
+            child._process = await asyncio.create_subprocess_exec(getattr(sys, "_base_executable", sys.executable), "-I", "-S", "-B", "-c", _OWNED_GATE, *argv, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **options)
             process = child._process
             child.pid = process.pid
             if process.stdout is None or process.stderr is None or process.stdin is None:

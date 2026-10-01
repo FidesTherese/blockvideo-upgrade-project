@@ -522,6 +522,8 @@ def materialize_candidate_runtime(*, candidate_root: Path, freeze_manifest_path:
                     _assert_file(marker_path, descriptor, marker_id)
                     if _read_descriptor(descriptor, maximum=MAX_OWNERSHIP_BYTES) != canonical_json_bytes(marker) + b"\n":
                         raise ValueError("building ownership lost")
+                    if digest is not None:
+                        marker = _marker_update(marker_path, descriptor, marker, state="cleaning", digest=digest)
                     tree.remove()
                     if digest is not None:
                         marker = _marker_update(marker_path, descriptor, marker, state="cleaned", digest=digest)
