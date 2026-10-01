@@ -6,7 +6,7 @@ The evaluation package runs D37 blinded trials against the immutable D35 candida
 
 ## Project position
 
-The D37 runner invokes the D36 host, which starts candidate application interfaces in subprocesses. D38 consumes unchanged D37 contracts; D40 remains planned. D38 imports contracts, canonical parsing, filesystem and attestation helpers, never the runner or later executors. Shared contract imports account for the attested app-contract closure.
+The D37 runner invokes the D36 host, which starts candidate application interfaces in subprocesses. D38 consumes unchanged D37 contracts. D39 Task 1 adds pure contracts, materialization and reusable owned scopes; D39 operational groups/smokes and D40 remain planned. D38 imports contracts, canonical parsing, filesystem and attestation helpers, never the runner or later executors. Shared contract imports account for the attested app-contract closure.
 
 ## Inputs and outputs
 
@@ -36,6 +36,12 @@ D24 `switch_target` changes selection, then rereads the original request/respons
 
 D38 verifies detached/canonical bytes, historical recorded Git blobs, identity chains and exact token/category accounting before clean current-source attestation and no-replace publication. Existing finals are refused; lost ownership or faults never authorize pathname cleanup.
 
+## D39 foundation
+
+`smoke_contracts` owns strict frozen summaries/inventory; `release_verification` only re-exports them. The materializer copies verified tracked bytes into readonly source. Physical IDs and locked marker transitions make cleanup detached-bound and replacement-safe. Interrupted cleaning resumes recorded subsets; bounded receipts survive.
+
+`OwnedProcessScope`, `start_owned_process` and `run_owned_command` gate base Python before Job/session registration, cap output at 2 MiB, monitor commit/resident limits and confirm descendant/reader teardown. Failures block later commands; D37 APIs are unchanged. Task 2/3, 19-path attestation and D40 remain deferred; Windows checks are not POSIX or candidate acceptance.
+
 ## Key decisions and limits
 
 Protocol/result caps are 64/128 MiB, used for publication/readback. The scanner's 8,000,000-token cap admits the proven maximum bundle of 4,980,838 tokens; 65,535-case/category fixtures prove canonical roundtrip without relaxing depth/string/type/accounting restrictions. Stored media paths must be canonical relative POSIX paths; component and descriptor identities fail closed on links, reparses, special files, containment violations, or races. Missing media emits only the path hash. The design protects against cooperative path replacement, not a hostile same-user principal able to tamper with process memory or exploit unavoidable platform syscall gaps.
@@ -46,4 +52,4 @@ Candidate failures retain fixed classifications. Trusted-host logs remain bounde
 
 ## Relevant verification
 
-Focused synthetic coverage lives in `backend/tests/test_d36_candidate_protocol.py`, `test_d37_blinded_runner.py` and `test_d38_result_import.py`. Run those first, then backend pytest/Ruff and frontend test/build/lint gates sequentially. Tests use repository synthetic fixtures and fake providers only. `test_evidence_json.py` is the standalone pure-parser boundary. `tests/d37_pinned_support.py` verifies every exact-D35 archive blob and builds/loads an external synthetic source/profile index in candidate-rooted subprocesses. Pinned tests cover both modes, restart resend, original-target preservation, actual retrieval (not fallback-only), unchanged complete source/index hashes and invalid-index negatives. This is not real evaluation, optional ONNX proof or independent acceptance.
+Focused synthetic coverage lives in `backend/tests/test_d36_candidate_protocol.py`, `test_d37_blinded_runner.py`, `test_d38_result_import.py` and `test_d39_release_verification.py`. The Task 1 harness uses sequential 768 MiB Jobs, resident monitoring and explicit platform skips. Run those first, then backend pytest/Ruff and frontend test/build/lint gates sequentially. Tests use repository synthetic fixtures and fake providers only. `test_evidence_json.py` is the standalone pure-parser boundary. `tests/d37_pinned_support.py` verifies every exact-D35 archive blob and builds/loads an external synthetic source/profile index in candidate-rooted subprocesses. Pinned tests cover both modes, restart resend, original-target preservation, actual retrieval (not fallback-only), unchanged complete source/index hashes and invalid-index negatives. This is not real evaluation, optional ONNX proof or independent acceptance.

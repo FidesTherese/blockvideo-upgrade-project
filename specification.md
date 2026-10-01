@@ -113,7 +113,25 @@ Final synthetic gates: 2018 backend passes with 13 explicit skips, Ruff, 157 fro
 passes, build/typecheck and lint. Independent review and real aggregate transfer remain
 pending; no readiness or release approval follows. Exact verification history and the
 prior-unit timestamp-sensitive focused failure are in `docs/plan-c/work-report-38.md`.
-D39/D40 remain deferred.
+D39/D40 operational acceptance remains deferred.
+
+### D39 Task 1 checkpoint (synthetic and native Windows checks; review pending)
+
+Pure frozen, strict D39 schemas now cover six discriminated smoke summaries,
+command evidence, verification evidence and physical runtime ownership. The separate
+materializer verifies a complete D36 publication and clean detached committed source,
+copies only tracked bytes, checks streamed fingerprints and readonly permissions,
+and binds every child identity to a locked, inode-preserving external marker.
+Detached-hash-first cleanup refuses replacement, drift and unknown absence; interrupted
+cleaning resumes only its recorded remaining subset. The same CLI has a cleanup action.
+
+Additive owned process scopes retain a memory-limited Windows Job (or POSIX sessions),
+gate target execution before assignment, cap shared output, and confirm descendants
+and readers before terminal evidence. The gate uses native base Python, not a Windows
+venv redirector. Original D37 entry-point behavior is unchanged. Task 2 nine-command
+execution, Task 3 smoke/browser integration, full 19-path attestation and D40 remain
+unimplemented in this checkpoint. Synthetic schema/FS and native process tests are
+not candidate acceptance, private approval, provider truth or operational readiness.
 
 ### Stack and tooling-contract audit (2026-09-30; design only)
 

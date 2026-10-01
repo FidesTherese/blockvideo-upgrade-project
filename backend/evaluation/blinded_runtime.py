@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import hashlib
 import os
 import signal
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from evaluation import blinded_io
 
@@ -551,3 +555,605 @@ async def invoke_trial_host(
     finally:
         overflow_task.cancel()
         await asyncio.gather(overflow_task, return_exceptions=True)
+
+
+OwnedOutcome = Literal["completed", "launch_failed", "timeout", "output_limit", "memory_limit", "teardown_failed"]
+_MIB = 1024 * 1024
+_OWNED_GATE = (
+    "import subprocess,sys; ready=sys.stdin.buffer.read(1); "
+    "raise SystemExit(125) if ready != b'1' else "
+    "SystemExit(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL))"
+)
+_ACCOUNTED_NAMES = frozenset({
+    "node", "python", "python3", "python3.12", "git", "ruff", "ffmpeg", "ffprobe",
+    "uv", "esbuild", "powershell", "pwsh", "bash", "cmd", "wslservice", "vmmemwsa",
+})
+
+
+@dataclass(frozen=True)
+class OwnedCommandOutcome:
+    outcome: OwnedOutcome
+    exit_code: int | None
+    started_at: str
+    finished_at: str
+    stdout_size: int
+    stderr_size: int
+    stdout_sha256: str
+    stderr_sha256: str
+
+
+class _JobAccounting(ctypes.Structure):
+    _fields_ = [
+        ("user_time", ctypes.c_int64), ("kernel_time", ctypes.c_int64),
+        ("period_user_time", ctypes.c_int64), ("period_kernel_time", ctypes.c_int64),
+        ("faults", ctypes.c_uint32), ("total", ctypes.c_uint32),
+        ("active", ctypes.c_uint32), ("terminated", ctypes.c_uint32),
+    ]
+
+
+class _ProcessEntry(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32), ("usage", ctypes.c_uint32), ("pid", ctypes.c_uint32),
+        ("heap", ctypes.c_size_t), ("module", ctypes.c_uint32), ("threads", ctypes.c_uint32),
+        ("parent", ctypes.c_uint32), ("priority", ctypes.c_long), ("flags", ctypes.c_uint32),
+        ("name", ctypes.c_wchar * 260),
+    ]
+
+
+class _MemoryCounters(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32), ("faults", ctypes.c_uint32),
+        ("peak_ws", ctypes.c_size_t), ("ws", ctypes.c_size_t),
+        ("peak_paged", ctypes.c_size_t), ("paged", ctypes.c_size_t),
+        ("peak_nonpaged", ctypes.c_size_t), ("nonpaged", ctypes.c_size_t),
+        ("pagefile", ctypes.c_size_t), ("peak_pagefile", ctypes.c_size_t),
+        ("private", ctypes.c_size_t),
+    ]
+
+
+def _win_function(name: str, args: list[object], result: object = ctypes.c_int) -> object:
+    function = getattr(ctypes.WinDLL("kernel32", use_last_error=True), name)
+    function.argtypes = args
+    function.restype = result
+    return function
+
+
+def _new_owned_job(limit: int | None) -> int:
+    create = _win_function("CreateJobObjectW", [ctypes.c_void_p, ctypes.c_wchar_p], ctypes.c_void_p)
+    job = create(None, None)
+    if not job:
+        raise OSError("owned Job creation failed")
+    information = _ExtendedLimitInformation()
+    information.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if limit is not None:
+        information.basic_limit_information.limit_flags |= 0x200
+        information.job_memory_limit = limit
+    try:
+        setter = _win_function("SetInformationJobObject", [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32])
+        if not setter(job, 9, ctypes.byref(information), ctypes.sizeof(information)):
+            raise OSError("owned Job limits failed")
+        actual = _ExtendedLimitInformation()
+        _query_job(int(job), 9, actual)
+        if actual.basic_limit_information.limit_flags != information.basic_limit_information.limit_flags or actual.job_memory_limit != information.job_memory_limit:
+            raise ValueError("owned Job limits not verified")
+        return int(job)
+    except BaseException:
+        _windows_close_handle(int(job))
+        raise
+
+
+def _query_job(handle: int, kind: int, result: object) -> None:
+    query = _win_function("QueryInformationJobObject", [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p])
+    if not query(handle, kind, ctypes.byref(result), ctypes.sizeof(result), None):
+        raise OSError("owned Job accounting unavailable")
+
+
+def _job_pids(handle: int) -> set[int]:
+    class ProcessIds(ctypes.Structure):
+        _fields_ = [("assigned", ctypes.c_uint32), ("count", ctypes.c_uint32), ("ids", ctypes.c_size_t * 8192)]
+    information = ProcessIds()
+    _query_job(handle, 3, information)
+    if information.count > 8192:
+        raise ValueError("owned process inventory limit exceeded")
+    return set(information.ids[:information.count])
+
+
+def _assign_owned_job(handle: int, pid: int) -> None:
+    opener = _win_function("OpenProcess", [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32], ctypes.c_void_p)
+    process = opener(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, 0, pid)
+    if not process:
+        raise OSError("owned process handle unavailable")
+    try:
+        assign = _win_function("AssignProcessToJobObject", [ctypes.c_void_p, ctypes.c_void_p])
+        if not assign(handle, process):
+            raise OSError("owned Job assignment failed")
+    finally:
+        _windows_close_handle(int(process))
+
+
+def _windows_process_table() -> dict[int, tuple[int, str]]:
+    snapshot = _win_function("CreateToolhelp32Snapshot", [ctypes.c_uint32, ctypes.c_uint32], ctypes.c_void_p)(2, 0)
+    if snapshot in (None, ctypes.c_void_p(-1).value):
+        raise OSError("resident process inventory unavailable")
+    table: dict[int, tuple[int, str]] = {}
+    try:
+        first = _win_function("Process32FirstW", [ctypes.c_void_p, ctypes.POINTER(_ProcessEntry)])
+        next_entry = _win_function("Process32NextW", [ctypes.c_void_p, ctypes.POINTER(_ProcessEntry)])
+        entry = _ProcessEntry()
+        entry.size = ctypes.sizeof(entry)
+        if not first(snapshot, ctypes.byref(entry)):
+            raise OSError("resident process inventory unavailable")
+        while True:
+            table[entry.pid] = (entry.parent, entry.name.lower().removesuffix(".exe"))
+            if len(table) > 32768:
+                raise ValueError("resident inventory limit exceeded")
+            if not next_entry(snapshot, ctypes.byref(entry)):
+                if ctypes.get_last_error() != 18:
+                    raise OSError("resident process inventory lost")
+                break
+        return table
+    finally:
+        _windows_close_handle(int(snapshot))
+
+
+def _windows_resident(pid: int) -> int | None:
+    opener = _win_function("OpenProcess", [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32], ctypes.c_void_p)
+    handle = opener(0x1000, 0, pid)
+    if not handle:
+        if ctypes.get_last_error() == 87:
+            return None
+        raise OSError("resident accounting unavailable")
+    try:
+        counters = _MemoryCounters()
+        counters.size = ctypes.sizeof(counters)
+        query = ctypes.WinDLL("psapi", use_last_error=True).GetProcessMemoryInfo
+        query.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MemoryCounters), ctypes.c_uint32]
+        query.restype = ctypes.c_int
+        if not query(handle, ctypes.byref(counters), counters.size):
+            raise OSError("resident accounting unavailable")
+        return counters.ws
+    finally:
+        _windows_close_handle(int(handle))
+
+
+def _posix_process_table() -> dict[int, tuple[int, str, int, int]]:
+    table: dict[int, tuple[int, str, int, int]] = {}
+    with os.scandir("/proc") as entries:
+        for entry in entries:
+            if not entry.name.isdecimal():
+                continue
+            try:
+                with open(f"/proc/{entry.name}/stat", "rb") as stream:
+                    raw = stream.read(4097)
+                if len(raw) > 4096:
+                    raise ValueError("resident accounting unavailable")
+                end = raw.rindex(b")")
+                fields = raw[end + 2:].split()
+                name = raw[raw.index(b"(") + 1:end].decode("utf-8", "strict")
+                table[int(entry.name)] = (int(fields[1]), name, int(fields[3]), int(fields[21]) * os.sysconf("SC_PAGE_SIZE"))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if len(table) > 32768:
+                raise ValueError("resident inventory limit exceeded")
+    return table
+
+
+def _owned_memory_sample(scope: OwnedProcessScope | None = None) -> tuple[int, int]:
+    if os.name == "nt":
+        table = _windows_process_table()
+        owned = _job_pids(scope._job) if scope is not None and scope._job is not None else set()
+    elif os.name == "posix" and Path("/proc").is_dir():
+        posix = _posix_process_table()
+        table = {pid: (record[0], record[1]) for pid, record in posix.items()}
+        sessions = scope._sessions if scope is not None else set()
+        owned = {pid for pid, record in posix.items() if record[2] in sessions}
+    else:
+        raise ValueError("resident accounting unavailable")
+    ancestors: set[int] = set()
+    pid = os.getpid()
+    while pid and pid not in ancestors and pid in table:
+        ancestors.add(pid)
+        pid = table[pid][0]
+    selected = owned | ancestors | {pid for pid, (_, name) in table.items() if name in _ACCOUNTED_NAMES}
+    group = 0
+    outside = 0
+    unknown_outside = False
+    for pid in selected:
+        try:
+            size = _windows_resident(pid) if os.name == "nt" else posix[pid][3]
+        except OSError:
+            if pid in owned:
+                raise ValueError("owned resident accounting lost") from None
+            unknown_outside = True
+            continue
+        if size is None:
+            continue
+        if pid in owned:
+            group += size
+        else:
+            outside += size
+    if unknown_outside or not any(table[pid][1] == "node" for pid in ancestors):
+        outside += 1024 * _MIB
+    return group, outside
+
+
+class OwnedProcessScope:
+    """One memory-gated Job/session registry for commands and long-lived children."""
+    def __init__(self) -> None:
+        self._job: int | None = None
+        self._sessions: set[int] = set()
+        self._children: list[OwnedProcess] = []
+        self._monitor: asyncio.Task[None] | None = None
+        self._memory_lost = asyncio.Event()
+        self._entered = False
+        self._failed = False
+        self._closing = False
+        self._closed = False
+        self._launch_lock = asyncio.Lock()
+        self._teardown_deadline: float | None = None
+        self.committed_memory_limit: int = 0
+        self.peak_aggregate_resident: int = 0
+        self.teardown_confirmed: bool = False
+
+    async def __aenter__(self) -> OwnedProcessScope:
+        if self._entered or self._closed:
+            raise ValueError("owned scope is single-use")
+        group, outside = _owned_memory_sample()
+        limit = min(1536 * _MIB, 3072 * _MIB - outside - 512 * _MIB)
+        if group + outside >= 3072 * _MIB or limit < 768 * _MIB or outside + limit + 512 * _MIB > 3072 * _MIB:
+            raise ValueError("insufficient aggregate memory headroom")
+        self.committed_memory_limit = limit
+        self.peak_aggregate_resident = group + outside
+        if os.name == "nt":
+            self._job = _new_owned_job(limit)
+        self._entered = True
+        self._monitor = asyncio.create_task(self._monitor_memory())
+        return self
+
+    async def __aexit__(self, *exception: object) -> None:
+        await self.close()
+
+    def _assign_job(self, process: asyncio.subprocess.Process, child: OwnedProcess) -> None:
+        if os.name == "nt":
+            if self._job is None:
+                raise ValueError("owned group Job unavailable")
+            _assign_owned_job(self._job, process.pid)
+            child._job = _new_owned_job(None)
+            try:
+                _assign_owned_job(child._job, process.pid)
+            except BaseException:
+                _windows_close_handle(child._job)
+                child._job = None
+                raise
+        else:
+            self._sessions.add(process.pid)
+
+    async def _monitor_memory(self) -> None:
+        while not self._closing:
+            try:
+                group, outside = _owned_memory_sample(self)
+                self.peak_aggregate_resident = max(self.peak_aggregate_resident, group + outside)
+                if group + outside >= 3072 * _MIB or group >= self.committed_memory_limit:
+                    self._memory_lost.set()
+                if self._job is not None:
+                    limits = _ExtendedLimitInformation()
+                    _query_job(self._job, 9, limits)
+                    if limits.peak_job_memory_used >= self.committed_memory_limit:
+                        self._memory_lost.set()
+            except (OSError, ValueError):
+                self._memory_lost.set()
+            if self._memory_lost.is_set():
+                self._failed = True
+                if self._job is not None:
+                    terminate = _win_function("TerminateJobObject", [ctypes.c_void_p, ctypes.c_uint32])
+                    terminate(self._job, 125)
+                else:
+                    for session in self._sessions:
+                        try:
+                            os.killpg(session, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                for child in tuple(self._children):
+                    child._stop_reason = "memory_limit"
+                return
+            await asyncio.sleep(0.1)
+
+    async def close(self) -> None:
+        if self._closed:
+            if not self.teardown_confirmed:
+                raise ValueError("owned scope teardown_failed")
+            return
+        self._closing = True
+        self._teardown_deadline = time.monotonic() + HOST_TEARDOWN_SECONDS
+        if self._job is not None:
+            terminate = _win_function("TerminateJobObject", [ctypes.c_void_p, ctypes.c_uint32])
+            terminate(self._job, 125)
+        else:
+            for session in self._sessions:
+                try:
+                    os.killpg(session, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        if self._monitor is not None:
+            self._monitor.cancel()
+            await asyncio.gather(self._monitor, return_exceptions=True)
+        confirmed = True
+        for child in tuple(self._children):
+            try:
+                await child.stop()
+            except (OSError, ValueError):
+                confirmed = False
+            if child.outcome is not None and child.outcome.outcome == "teardown_failed":
+                confirmed = False
+        if self._job is not None:
+            try:
+                await _terminate_job_confirmed(self._job, deadline=self._teardown_deadline)
+            except (OSError, ValueError):
+                confirmed = False
+            finally:
+                _windows_close_handle(self._job)
+                self._job = None
+        if os.name == "posix":
+            for session in self._sessions:
+                try:
+                    os.killpg(session, 0)
+                except ProcessLookupError:
+                    continue
+                confirmed = False
+        self.teardown_confirmed = confirmed
+        self._closed = True
+        if not confirmed:
+            raise ValueError("owned scope teardown_failed")
+
+
+async def _terminate_job_confirmed(handle: int, *, deadline: float | None = None) -> None:
+    terminate = _win_function("TerminateJobObject", [ctypes.c_void_p, ctypes.c_uint32])
+    if not terminate(handle, 125):
+        raise OSError("owned Job termination failed")
+    until = deadline if deadline is not None else time.monotonic() + HOST_TEARDOWN_SECONDS
+    while True:
+        information = _JobAccounting()
+        _query_job(handle, 1, information)
+        if information.active == 0:
+            return
+        if time.monotonic() >= until:
+            raise ValueError("owned Job descendant teardown_failed")
+        await asyncio.sleep(0.02)
+
+
+class OwnedProcess:
+    """A gated native child with incremental receipts and confirmed terminal teardown."""
+    def __init__(self, scope: OwnedProcessScope, deadline_seconds: int) -> None:
+        self.scope = scope
+        self.pid: int = 0
+        self.outcome: OwnedCommandOutcome | None = None
+        self._process: asyncio.subprocess.Process | None = None
+        self._job: int | None = None
+        self._readers: tuple[asyncio.Task[None], ...] = ()
+        self._task: asyncio.Task[OwnedCommandOutcome] | None = None
+        self._overflow = asyncio.Event()
+        self._budget = 0
+        self._sizes = [0, 0]
+        self._hashes = [hashlib.sha256(), hashlib.sha256()]
+        self._stop_reason: OwnedOutcome | None = None
+        self._started_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._deadline = time.monotonic() + deadline_seconds
+        self._terminate_lock = asyncio.Lock()
+        self._terminated = False
+        self._tree_confirmed = False
+
+    async def _read(self, stream: asyncio.StreamReader, descriptor: int, index: int) -> None:
+        try:
+            while chunk := await stream.read(65536):
+                remaining = max(0, HOST_OUTPUT_CAP_BYTES - self._budget)
+                value = chunk[:remaining]
+                self._budget += len(value)
+                if len(chunk) > remaining:
+                    self._overflow.set()
+                offset = 0
+                while offset < len(value):
+                    written = os.write(descriptor, value[offset:])
+                    if written < 1:
+                        raise ValueError("owned output write failed")
+                    self._sizes[index] += written
+                    self._hashes[index].update(value[offset:offset + written])
+                    offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    async def _terminate(self) -> None:
+        async with self._terminate_lock:
+            if self._terminated:
+                if not self._tree_confirmed:
+                    raise ValueError("owned child teardown_failed")
+                return
+            deadline = time.monotonic() + HOST_TEARDOWN_SECONDS
+            if self.scope._teardown_deadline is not None:
+                deadline = min(deadline, self.scope._teardown_deadline)
+            confirmed = True
+            process = self._process
+            try:
+                if self._job is not None:
+                    await _terminate_job_confirmed(self._job, deadline=deadline)
+                elif process is not None and os.name == "posix":
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                elif process is not None and process.returncode is None:
+                    process.kill()
+                if process is not None:
+                    await asyncio.wait_for(process.wait(), timeout=max(0.01, deadline - time.monotonic()))
+                if os.name == "posix" and process is not None:
+                    while True:
+                        try:
+                            os.killpg(process.pid, 0)
+                        except ProcessLookupError:
+                            break
+                        if time.monotonic() >= deadline:
+                            raise ValueError("owned session descendant teardown_failed")
+                        await asyncio.sleep(0.02)
+                    self.scope._sessions.discard(process.pid)
+                if self._readers:
+                    await asyncio.wait_for(asyncio.gather(*self._readers), timeout=max(0.01, deadline - time.monotonic()))
+            except (OSError, ValueError, TimeoutError):
+                confirmed = False
+                for task in self._readers:
+                    task.cancel()
+                await asyncio.gather(*self._readers, return_exceptions=True)
+            finally:
+                if self._job is not None:
+                    _windows_close_handle(self._job)
+                    self._job = None
+                self._terminated = True
+                self._tree_confirmed = confirmed
+            if not confirmed:
+                raise ValueError("owned child teardown_failed")
+
+    def _result(self, reason: OwnedOutcome) -> OwnedCommandOutcome:
+        self.outcome = OwnedCommandOutcome(
+            outcome=reason, exit_code=self._process.returncode if self._process is not None else None,
+            started_at=self._started_at, finished_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            stdout_size=self._sizes[0], stderr_size=self._sizes[1],
+            stdout_sha256=self._hashes[0].hexdigest(), stderr_sha256=self._hashes[1].hexdigest(),
+        )
+        return self.outcome
+
+    async def _watch(self) -> OwnedCommandOutcome:
+        reason: OwnedOutcome = "completed"
+        assert self._process is not None
+        while True:
+            if self.scope._memory_lost.is_set():
+                reason = "memory_limit"
+                break
+            if self._overflow.is_set():
+                reason = "output_limit"
+                break
+            if self._stop_reason is not None:
+                reason = self._stop_reason
+                break
+            if time.monotonic() >= self._deadline:
+                reason = "timeout"
+                break
+            if self._process.returncode is not None:
+                await asyncio.wait(self._readers, timeout=HOST_PIPE_DRAIN_GRACE_SECONDS)
+                if self._overflow.is_set():
+                    reason = "output_limit"
+                break
+            if any(task.done() and task.exception() is not None for task in self._readers):
+                reason = "teardown_failed"
+                break
+            await asyncio.sleep(0.02)
+        try:
+            await self._terminate()
+        except (OSError, ValueError):
+            reason = "teardown_failed"
+        if reason != "completed" or self._process.returncode != 0:
+            self.scope._failed = True
+            for child in self.scope._children:
+                if child is not self and child.outcome is None:
+                    child._stop_reason = reason
+        return self._result(reason)
+
+    async def wait(self) -> OwnedCommandOutcome:
+        if self.outcome is not None:
+            return self.outcome
+        if self._task is None:
+            raise ValueError("owned process has no terminal observer")
+        return await asyncio.shield(self._task)
+
+    async def stop(self) -> OwnedCommandOutcome:
+        if self.outcome is None:
+            self._stop_reason = "completed"
+            await self._terminate()
+        return await self.wait()
+
+
+async def start_owned_process(*, scope: OwnedProcessScope, argv: tuple[str, ...], cwd: Path, env: dict[str, str], stdout_path: Path, stderr_path: Path, deadline_seconds: int) -> OwnedProcess:
+    """Register a stdin-gated child before allowing any target instruction to run."""
+    if scope._failed:
+        raise ValueError("owned scope failed; further commands refused")
+    if not scope._entered or scope._closing or scope._closed:
+        raise ValueError("owned scope is not active")
+    if type(deadline_seconds) is not int or deadline_seconds < 1 or type(argv) is not tuple or not argv or any(type(arg) is not str or not arg or "\0" in arg for arg in argv):
+        raise ValueError("invalid owned command contract")
+    blinded_io.validate_directory(cwd.absolute(), "owned cwd")
+    if type(env) is not dict or any(type(key) is not str or type(value) is not str for key, value in env.items()):
+        raise ValueError("invalid owned environment")
+    async with scope._launch_lock:
+        group, outside = _owned_memory_sample(scope)
+        if group + outside >= 3072 * _MIB or scope._memory_lost.is_set():
+            raise ValueError("aggregate memory headroom lost")
+        child = OwnedProcess(scope, deadline_seconds)
+        stdout_descriptor = blinded_io.open_exclusive_regular(stdout_path, "owned stdout")
+        try:
+            stderr_descriptor = blinded_io.open_exclusive_regular(stderr_path, "owned stderr")
+        except BaseException:
+            os.close(stdout_descriptor)
+            raise
+        descriptors_owned = True
+        scope._children.append(child)
+        try:
+            options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+            child._process = await asyncio.create_subprocess_exec(getattr(sys, "_base_executable", sys.executable), "-B", "-c", _OWNED_GATE, *argv, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **options)
+            process = child._process
+            child.pid = process.pid
+            if process.stdout is None or process.stderr is None or process.stdin is None:
+                raise ValueError("owned pipes unavailable")
+            scope._assign_job(process, child)
+            child._readers = (asyncio.create_task(child._read(process.stdout, stdout_descriptor, 0)), asyncio.create_task(child._read(process.stderr, stderr_descriptor, 1)))
+            descriptors_owned = False
+            if time.monotonic() >= child._deadline:
+                child._stop_reason = "timeout"
+            elif scope._memory_lost.is_set():
+                child._stop_reason = "memory_limit"
+            else:
+                process.stdin.write(b"1")
+                await process.stdin.drain()
+            process.stdin.close()
+            try:
+                await process.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                if child._stop_reason is None:
+                    raise
+            child._task = asyncio.create_task(child._watch())
+            return child
+        except BaseException as error:
+            reason: OwnedOutcome = "launch_failed"
+            try:
+                await child._terminate()
+            except (OSError, ValueError):
+                reason = "teardown_failed"
+            if descriptors_owned:
+                os.close(stdout_descriptor)
+                os.close(stderr_descriptor)
+            scope._failed = True
+            child._result(reason)
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            return child
+
+
+async def run_owned_command(*, argv: tuple[str, ...], cwd: Path, env: dict[str, str], stdout_path: Path, stderr_path: Path, deadline_seconds: int, scope: OwnedProcessScope | None = None) -> OwnedCommandOutcome:
+    """Return only bounded observations after native descendant and reader proof."""
+    if scope is None:
+        temporary = OwnedProcessScope()
+        await temporary.__aenter__()
+        result: OwnedCommandOutcome | None = None
+        cleanup_failed = False
+        try:
+            result = await run_owned_command(scope=temporary, argv=argv, cwd=cwd, env=env, stdout_path=stdout_path, stderr_path=stderr_path, deadline_seconds=deadline_seconds)
+        finally:
+            try:
+                await asyncio.shield(temporary.close())
+            except (OSError, ValueError):
+                cleanup_failed = True
+        assert result is not None
+        return replace(result, outcome="teardown_failed") if cleanup_failed else result
+    child = await start_owned_process(scope=scope, argv=argv, cwd=cwd, env=env, stdout_path=stdout_path, stderr_path=stderr_path, deadline_seconds=deadline_seconds)
+    try:
+        return await child.wait()
+    except asyncio.CancelledError:
+        await asyncio.shield(scope.close())
+        raise

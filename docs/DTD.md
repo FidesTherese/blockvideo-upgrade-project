@@ -2125,6 +2125,17 @@ unchanged.
 
 #### D39 implementation precision and 4 GiB ownership envelope
 
+Task 1 implementation checkpoint: the pure contracts, separate materializer/cleanup
+CLI and additive owned-process APIs are implemented. `release_verification` currently
+re-exports contracts/constants only; nine-command execution and smoke/browser entry
+points remain deferred to Tasks 2/3. Windows native gate, Job, filesystem and failure
+checks use synthetic fixtures, not the actual D35 acceptance lane. The trusted gate
+uses native base Python before assignment; a Windows venv redirector may spawn its
+interpreter before it can be assigned. File/directory ownership uses full native
+volume/file IDs on Windows, since CRT/scandir metadata may expose zero file IDs.
+The original D37 public APIs remain unchanged. No complete 19-file source attestation,
+real private input, readiness approval, release or D40 execution is claimed here.
+
 `smoke_contracts` owns the pure serialized schemas below; runtime/materialization
 modules re-export their own records but models import no executor. Hashes are exact
 lowercase 64-hex, commits 40-hex, timestamps exact UTC seconds
