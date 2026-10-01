@@ -13,6 +13,16 @@ For Plan C work, read `specification.md` and `docs/DTD.md` before changing opera
 - Keep secrets, real user data, generated media, and `.env` files out of Git and logs.
 - Keep work units 11+ out of work-unit-01–10 changes.
 
+## Resource budget
+
+The user's project RAM limit is **4 GiB aggregate**, including agent runtime,
+subagents and all project process trees. Target at most 3 GiB; start no nontrivial
+work at 3.5 GiB. Sample working sets before and during bounded checks, reserving
+headroom for uncertain peaks. Use one worker/process group at a time, bounded
+reads and output, and stop only owned work before the limit is reached. Keep
+unrelated user processes and historical evidence intact. Do not infer that older
+verification satisfied this stricter limit.
+
 ## Verification
 
 Run focused tests first, then:

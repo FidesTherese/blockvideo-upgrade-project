@@ -365,13 +365,15 @@ regression bounds actual equality operations without a wall-clock threshold; nam
 fields, equations, and thresholds stay unchanged. Maximum-size model parsing is not
 yet an operational acceptance claim.
 
-All agent/controller descendants share hard aggregate RAM <=16 GiB; target <=12 GiB,
-reserve runtime headroom, and start no nontrivial process at >=14 GiB. One command or
-smoke group runs at a time. No browser/model/download/build/test is run during this
-audit. Future execution uses one pytest worker, one Vitest worker, one compiler/build
-child, and NumPy/ONNX thread limits of one; it measures working sets and aborts only
-owned jobs on memory pressure. All child output is bounded and every started child
-has an owner and teardown deadline.
+The user's revised project budget is hard aggregate RAM <=4 GiB, including the
+agent/controller runtime and every owned descendant. Follow `AGENTS.md`'s 3 GiB
+target and 3.5 GiB no-start threshold; reserve headroom and measure working sets
+before and during execution. Run one command/smoke group, pytest/Vitest worker or
+compiler child at a time, with NumPy/ONNX thread limits of one. Bound input/output
+and stop only owned jobs before the hard cap; every child has an owner and teardown
+deadline. Earlier 16 GiB verification is historical, not evidence of compliance
+with this stricter budget. Do not reload a whole tree or repeat maximum-size probes
+when a targeted check suffices.
 
 #### Executable-probe blueprint and acceptance checklist (D37 orders 1–2 and 5 implemented)
 

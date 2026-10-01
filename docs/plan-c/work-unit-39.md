@@ -50,7 +50,8 @@ This future unit's acceptance is not established by the docs-only stack audit.
   attempted prefixes and null absent observations, not manufactured passed fields.
 - Enforce DTD per-command/stage deadlines, shared 2 MiB child output cap, gated Job
   Objects/confirmed descendant teardown, group-local caches/env/temp and one worker.
-  Sequential aggregate RAM <=16 GiB, target <=12; no new nontrivial job at >=14.
+  Sequential aggregate project RAM <=4 GiB, target <=3; include agent runtime and
+  all owned descendants, sample memory, and start no nontrivial job at >=3.5 GiB.
 - Reconcile setup, operations, recovery, migration, limitations, and evaluation
   documentation with the frozen implementation.
 

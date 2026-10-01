@@ -172,7 +172,8 @@ is not inferred from previous synthetic reports.
 Final real evaluation follows the final committed/pinned tooling checkout and refreshed
 D36 freeze/trial-tool attestation. Later source mismatch requires a new run/evidence
 ID, never in-place normalization/regeneration. All probes are sequential and share
-hard aggregate RAM <=16 GiB (target <=12); directory handles protect root identity,
+hard aggregate RAM <=4 GiB under the user's revised project budget (target <=3);
+prior larger-budget checks remain historical. Directory handles protect root identity,
 not contents/ancestors or malicious same-user mutation.
 
 Implementation remains layered: production `app` code never imports evaluation

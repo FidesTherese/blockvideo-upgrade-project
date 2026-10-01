@@ -420,7 +420,41 @@ def test_streamed_blob_detects_same_size_mutation_and_bounds_each_read(
     from evaluation import blinded_io as io
 
     path = tmp_path / "blob"
-    path.write_bytes(b"a" * (2 * 1024 * 1024))
+    original = b"a" * (2 * 1024 * 1024)
+    path.write_bytes(original)
+    initial = path.stat()
+    changed_mtime_ns = initial.st_mtime_ns + 2_000_000_000
+    read = os.read
+    calls = 0
+
+    def mutating_read(descriptor: int, length: int) -> bytes:
+        nonlocal calls
+        assert length <= 1024 * 1024
+        data = read(descriptor, length)
+        calls += 1
+        if calls == 1:
+            with path.open("r+b") as stream:
+                stream.seek(1024 * 1024)
+                stream.write(b"b")
+            os.utime(path, ns=(initial.st_atime_ns, changed_mtime_ns))
+            assert path.stat().st_mtime_ns == changed_mtime_ns
+        return data
+
+    monkeypatch.setattr(io.os, "read", mutating_read)
+    with pytest.raises(ValueError, match="changed"):
+        io.fingerprint_regular(path, maximum=64_000_000)
+    assert path.read_bytes() == original[:1024 * 1024] + b"b" + original[1024 * 1024 + 1:]
+
+
+def test_streamed_blob_native_mutation_rejects_or_binds_changed_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from evaluation import blinded_io as io
+
+    path = tmp_path / "blob"
+    original = b"a" * (2 * 1024 * 1024)
+    changed = original[:1024 * 1024] + b"b" + original[1024 * 1024 + 1:]
+    path.write_bytes(original)
     read = os.read
     calls = 0
 
@@ -436,8 +470,14 @@ def test_streamed_blob_detects_same_size_mutation_and_bounds_each_read(
         return data
 
     monkeypatch.setattr(io.os, "read", mutating_read)
-    with pytest.raises(ValueError, match="changed"):
-        io.fingerprint_regular(path, maximum=64_000_000)
+    try:
+        result = io.fingerprint_regular(path, maximum=64_000_000)
+    except ValueError as error:
+        assert "changed" in str(error)
+    else:
+        assert result == (len(changed), hashlib.sha256(changed).hexdigest())
+        assert result[1] != hashlib.sha256(original).hexdigest()
+    assert path.read_bytes() == changed
 
 
 def test_blinded_contracts_do_not_depend_on_result_contracts() -> None:
