@@ -11,11 +11,20 @@
 ## Constraints and facts not yet verified
 
 - D38 and shared strict parser/host/index prerequisites precede this unit. D39 imports pure shared evidence/smoke contracts, never forks D37 result/protocol models or calls private evaluation.
-- Fresh extras install, native launcher/esbuild availability, browser protocol/ownership roundtrip and exact-D35 real-worker synthetic index integration are pending facts, not passed checks. Pinned README advertises Python 3.13+/Node 20+ rather than the audited lane: the mandatory documentation check has a known blocker. No candidate edit, stack substitution or silent gate waiver is authorized; a successor candidate or explicit policy revision requires separate user scope. Absent runtime support fails rather than silently skipping or downloading weights.
+- Fresh extras install, native launcher/esbuild availability and browser protocol/ownership roundtrip are pending. D37 already proved exact-D35 synthetic index/worker behavior; it is not D39 fresh-sandbox or new-budget acceptance. Pinned README advertises Python 3.13+/Node 20+ rather than the audited lane: the mandatory documentation check has a known blocker. No candidate edit, stack substitution or silent gate waiver is authorized; a successor candidate or explicit policy revision requires separate user scope. Absent runtime support fails rather than silently skipping or downloading weights.
 - Candidate/runtime contain no venv, node_modules, caches, build output, database, media, profile, logs or evidence. All writable state is group-local outside both roots. No candidate source/config/lock mutation, real data or cloud spend.
 - Hard aggregate project RAM <=4 GiB, target <=3 GiB; start no nontrivial job at >=3.5 GiB. Include agent runtime and all owned descendants; sample before/during checks and reserve headroom. One execution group/command at a time, one test/build worker and one NumPy/ONNX thread. Use bounded reads/output; stop only owned work before the cap. Earlier larger-budget gates do not establish 4 GiB compliance.
 - Preserve published evidence. A candidate behavior defect requires a new candidate and D36 boundary; a tooling-only correction requires a new source attestation and new evidence/run ID. Final evaluation waits for the final committed tooling closure.
 - This unit cannot tag, push a release, publish, deploy or decide readiness. Future tooling delivery follows the repository workflow; this audit specifically does not push.
+
+The DTD's D39 implementation-precision section fixes RuntimeMaterialization,
+ownership/cleanup fields and in-place marker lifecycle, per-child identities,
+OwnedProcessScope/run_owned_command/long-lived child APIs, role/alias/version maps,
+4 GiB group accounting, failed summary/null semantics and four bounded scan rules.
+Implement those contracts verbatim; no identity-blind cleanup or guessed fields.
+D40's shared canonical typed-array API belongs to evidence_json, preserving its
+existing model parser; compact gate families evaluate every category without
+unbounded per-category output. These precision amendments precede code.
 
 ## Task 1: Pure contracts, materialization and owned execution
 
@@ -80,7 +89,7 @@ frontend_lint             ("npx", "-y", "pnpm@10.18.3", "lint")
 - [ ] Prove native bootstrap Python 3.12.12 and its uv 0.12.15 origin/version/hash. Set `UV_PYTHON` to the verified absolute executable, `UV_PROJECT_ENVIRONMENT` and uv cache inside the backend group. Optional extras are not default dev groups; `--locked` rejects stale metadata rather than updating it. Check the created interpreter/base and package origins, including NumPy/ONNXRuntime/tokenizers, before command 2.
 - [ ] Resolve commands 2–5 directly to that sandbox venv Python. No `uv run` resync, global pytest/Ruff fallback or ambient Python imports. Retrieval extras eliminate NumPy-based ONNX unit-test skips; fake loopback runtime embeddings need HTTPX, not optional ONNX wheels, and do not load weights.
 - [ ] Resolve `node.exe` plus installed `npx-cli.js`, run `(node_exe, npx_cli, *canonical_argv[1:])` with `shell=False`, and bind actual pnpm.cjs 10.18.3 hash/version. Never launch .cmd/.bat. Canonical argv and alias-resolved native argv are different evidence fields, not a false assertion they were identical.
-- [ ] Apply the exact DTD group-local env/cache/temp/config policy and low concurrency: uv downloads 2/builds 1/installs 1, pnpm network 2/child 1, Node heap 2048 MiB, Vitest one worker and thread limits one. Strip inherited provider credentials/config/production-only settings; writable generated `.npmrc` is untracked sandbox state, not candidate mutation.
+- [ ] Apply the exact DTD group-local env/cache/temp/config policy and low concurrency: uv downloads 2/builds 1/installs 1, pnpm network 2/child 1, Node heap 512 MiB, Vitest one worker and thread limits one. Strip inherited provider credentials/config/production-only settings; writable generated `.npmrc` is untracked sandbox state, not candidate mutation.
 - [ ] Stream/drain shared stdout+stderr <=2 MiB per command, record complete sizes/hashes without raw content in the manifest, stop subsequent commands on first failure and clean the group in finally.
 - [ ] Check locked native esbuild after ignored-script install before build. Candidate `allowBuilds` is not assumed valid authorization under pinned v10. There is no automatic rebuild, new v12 flag, lock repair or broad dependency script approval. Missing native build capability blocks the lane; a future narrowly authorized v10 change needs a new documented/probed run contract.
 - [ ] Explicit pinned package test/build/lint scripts may internally use a shell; trusted script source and fixed args are the boundary, not a claim of shell-free npm internals.

@@ -4,7 +4,7 @@
 
 ### Document control
 
-- **Status:** Contracts reconciled; D38 synthetically verified, independent review pending; D39–D40 deferred
+- **Status:** D38 tooling independently approved; D39–D40 contracts implementation-ready after scoped DTD preflight
 - **Delivery mode:** High-Risk for D31 security, D32 concurrency, D34 migration,
   and D37–D40 tooling integrity, privacy, and resource ownership
 - **Specification:** `specification.md`, `docs/plan-c/work-unit-31.md` through
@@ -14,8 +14,9 @@
 - **Scope:** sequential hardening, blinded evaluation, and release-readiness decision.
   D38 aggregate import is implemented and synthetically verified only; D39–D40
   remain design-only. No real aggregate acceptance or readiness approval is inferred.
-- **Blocked facts:** a clean extras installation, native Windows launcher/descendant
-  roundtrip, and pinned-D35 real-worker/stateful-index roundtrip are not yet verified.
+- **Blocked facts:** D39 clean extras installation and its native launcher/browser
+  roundtrip remain unverified. D37 already proved pinned-D35 synthetic stateful/worker
+  behavior; that historical proof is not D39 fresh-sandbox or 4 GiB acceptance.
   Independent model-weight provenance, real aggregate, and human/independent acceptance
   remain evaluator/operator inputs, not facts inferred by implementation. Pinned
   D35 README advertises Python 3.13+ / Node 20+; this does not describe the audited
@@ -2122,6 +2123,97 @@ replace per-command argv, cwd alias, exit code, timestamps, or bounded stdout/st
 hashes. The verifier also proves the original candidate and immutable runtime remain
 unchanged.
 
+#### D39 implementation precision and 4 GiB ownership envelope
+
+`smoke_contracts` owns the pure serialized schemas below; runtime/materialization
+modules re-export their own records but models import no executor. Hashes are exact
+lowercase 64-hex, commits 40-hex, timestamps exact UTC seconds
+`YYYY-MM-DDTHH:MM:SSZ`. Every primitive is raw-type checked; models are frozen,
+strict and extra-forbid. Integer counts/identities are nonnegative (inodes positive),
+strings bounded to 512 bytes except fixed enums, lists unique/sorted and <=8192.
+
+`RuntimeMaterialization` fields are `schema_version=1`, `candidate_id`, `git_commit`,
+`freeze_sha256`, `candidate_snapshot_sha256`, `runtime_instance_id` (64-hex),
+`files` (sorted FileFingerprint tuple), `owned_paths` (sorted OwnedPathIdentity tuple),
+`runtime_source_sha256`, `runtime_device`, `runtime_inode`, `marker_device`,
+`marker_inode`, `root_aliases=("candidate","runtime","work")`, and
+`status="materialized"`. `OwnedPathIdentity` has lexical `path`,
+`kind="file"|"directory"`, `device`, `inode`; it records every runtime child identity,
+not merely equal content, so cleanup cannot delete a same-byte replacement. File
+paths exactly equal the freeze inventory; directories are exactly its required
+parents. Materialization metadata cap is 16 MiB.
+
+The marker filename is `<materialization-filename>.ownership.json`, beside that
+record, cap 4 KiB. `RuntimeOwnership` fields: `schema_version=1`,
+`runtime_instance_id`, `runtime_device`, `runtime_inode`, `marker_device`,
+`marker_inode`, `work_root_alias="work"`, `runtime_root_alias="runtime"`,
+`materialization_sha256` (nullable only while building), and
+`state="building"|"active"|"cleaning"|"cleaned"`. Create root/marker exclusively;
+retain physical identities and lock the marker (Windows byte-range lock / POSIX
+flock) while validating/updating it. State updates use the retained descriptor,
+truncate/write/fsync in place, preserving the marker inode. A crash-truncated marker
+fails closed. Publish immutable materialization before setting active with its exact
+LF-byte digest. Cleanup resumes only active/cleaning with that binding; missing paths
+are permitted only as an already-cleaning subset of the recorded owned paths.
+Verify each remaining identity/type/content before chmod/unlink, never a replacement.
+A cleaned marker with absent runtime proves idempotence. Building failure may clean
+only this invocation's retained owned objects; unexplained partial roots survive.
+`<materialization-filename>.cleanup.json` records schema_version, instance,
+materialization_sha256 and status=`completed`|`failed`, never absolute paths.
+
+Extend `blinded_runtime` with async `OwnedProcessScope` and
+`start_owned_process(*, scope, argv, cwd, env, stdout_path, stderr_path,
+deadline_seconds) -> OwnedProcess`. The scope owns one group, long-lived server/browser
+and command children alike. Each child is stdin-gated until group Job assignment or
+POSIX session registration; no breakaway. `OwnedProcess` exposes pid, async wait,
+stop and terminal outcome; closing the scope stops and confirms all descendants and
+readers. `run_owned_command` accepts an optional scope, otherwise owns a temporary
+one, and returns `OwnedCommandOutcome`: outcome, exit_code, started_at, finished_at,
+stdout_size, stderr_size, stdout_sha256, stderr_sha256, using exactly the existing
+CommandEvidence outcome vocabulary. No raw output enters a serialized model.
+On Windows query retained Job active-process count after termination before closing
+its handle; parent exit alone is not teardown proof. On POSIX confirm registered
+session/group absence. Keep existing D37 host API behavior compatible.
+
+Include the agent/controller and all out-of-group owned resident memory B. Reserve
+1 GiB if agent runtime cannot be sampled. Group committed-memory limit is
+`min(1536 MiB, 3072 MiB - B - 512 MiB)`; refuse a full execution group below
+768 MiB or projected aggregate above 3 GiB. Measure group and outside resident memory
+at intervals <=250 ms; lost owned accounting or aggregate >=3 GiB stops owned work.
+Never start at >=3.5 GiB, and never exceed the user's 4 GiB ceiling. Windows Job
+memory is a committed-memory cap, not a resident-memory proof: both are required.
+Pure focused unit checks may use smaller externally supervised groups with known
+peaks. Native browser flags bound caches/renderers and disable background networking;
+only owned loopback URLs/profile/CDP targets are allowed. No browser/weights download.
+
+Command role/alias mapping is fixed: backend sync binds `python_bootstrap` 3.12.12
+(`tools/python_bootstrap`, no launcher) and `uv` 0.12.15 (same executable,
+`tools/uv_module`); commands 2--5 bind `python` 3.12.12 (`tools/python_sandbox`).
+Frontend binds `node` 24.11.1 (`tools/node`), `npx` to its actually verified bundled
+npm version with launcher `tools/npx_cli`, and `pnpm` 10.18.3 with launcher
+`tools/pnpm_cjs`. Resolved argv substitutes these aliases only; logical argv stays
+unchanged. Smoke additionally binds installed `chrome`, `ffmpeg`, `ffprobe` and
+`websockets` 16.1.1 as used; versions are actual verified values, not guessed pins.
+Native tool aliases/hashes are compared before/after use. Summary integer fields:
+versions 0/1, widths exact 390/1440, calls 0--4, duplicate_post_count 0--4,
+backup_size <=32 MiB, duration_ms 0--60000. Other observation fields are raw booleans;
+index/profile/backup hashes and ffmpeg/ffprobe exit codes may be null only on failure.
+Passed stages require every documented observation, exact zero exits, nonnull hashes
+and stateful embedding calls >=1. A failed stage emits only actual observations and
+its bounded summary artifact; an unattempted stage emits no receipt. A missing/failed
+smoke produces failed verification with nullable smoke and confirmed cleanup, never
+fabricated complete receipts. D40 tooling may follow even when D35 acceptance fails.
+
+Secret scan uses four fixed rule IDs: `tracked_private_state` (tracked .env except
+.env.example, private corpus/review/key/evidence or storage paths),
+`tracked_generated_state` (venv/node_modules/cache/dist/bytecode/media outputs),
+`credential_token` (OpenAI/Anthropic sk-, GitHub token and AWS access-key shapes),
+`private_key_block` (PEM private-key headers). Match byte patterns in bounded streamed
+candidate tracked files and D39 public metadata, with 4 KiB chunk overlap; exclude
+only exact placeholder/example tokens, not all tests. Report rule/counts only.
+Passing means no matches under these bounded rules, not proof of every possible
+secret absence. Define/test literal pattern constants before scanning.
+
 `ToolExecutionBinding` is owned by `smoke_contracts`; `release_verification` imports it.
 
 ```python
@@ -2247,7 +2339,7 @@ Set group-local npm cache/config, pnpm store/cache/state, `HOME`, `USERPROFILE`,
 `APPDATA`, `LOCALAPPDATA`, `XDG_*`, `TEMP`, `TMP`, and `TMPDIR`. A generated untracked
 `.npmrc` in the writable sandbox supplies group-local `store-dir` and
 `cache-dir`, `child-concurrency=1`, `network-concurrency=2`, and engine-strict checking;
-it is not a candidate tracked-file modification. Set `NODE_OPTIONS=--max-old-space-size=2048`,
+it is not a candidate tracked-file modification. Set `NODE_OPTIONS=--max-old-space-size=512`,
 `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `MKL_NUM_THREADS=1`,
 `NUMEXPR_NUM_THREADS=1`, `PYTHONDONTWRITEBYTECODE=1`, `PYTHONNOUSERSITE=1`,
 `RUFF_CACHE_DIR`, and `PYTEST_ADDOPTS` with the cache path inside the group. No inherited
@@ -2686,6 +2778,24 @@ def decide_readiness(
     decision_tool_attestation: ToolAttestation,
 ) -> ReadinessDecision: ...
 ```
+
+#### D40 shared array parsing and bounded gate output
+
+Add `parse_canonical_typed(raw: bytes, adapter: TypeAdapter[T], *, maximum: int) -> T`
+to `evidence_json`, sharing the existing lexical/duplicate/nonfinite/raw canonical
+checks and sanitized errors. Validate JSON strictly, then require
+`canonical_json_bytes(adapter.dump_python(value, mode="json")) + b"\\n" == raw`.
+`parse_canonical_model` remains compatible and delegates without a second parser.
+This API parses the limitations tuple; no strict Python list-to-tuple conversion.
+
+Evaluate every category, but emit a fixed bounded gate family rather than one row
+per category: two-mode completion, overall quality, category completion, category
+quality and safety, plus each existing integrity/review/limitation family. At most
+64 gate rows/blockers, name <=128 characters, detail <=1024; failed category detail
+contains only total failure count and the first eight sorted opaque tokens. All
+categories still affect the outcome. This keeps decision.json <=1 MiB even for the
+maximum topology and reveals no category names/text. Use an explicitly supplied
+complete refreshed D36 publication; never auto-select the first historical manifest.
 
 The optional limitations input is one canonical JSON array, parsed explicitly with
 `TypeAdapter(tuple[AcceptedNonSafetyLimitation, ...]).validate_json(..., strict=True)`
