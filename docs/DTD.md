@@ -2126,9 +2126,10 @@ unchanged.
 #### D39 implementation precision and 4 GiB ownership envelope
 
 Task 1 implementation checkpoint: the pure contracts, separate materializer/cleanup
-CLI and additive owned-process APIs are implemented. `release_verification` currently
-re-exports contracts/constants only; nine-command execution and smoke/browser entry
-points remain deferred to Tasks 2/3. Windows native gate, Job, filesystem and failure
+CLI and additive owned-process APIs are independently approved. Task 2 adds the fixed
+nine-command driver, native origins/environment/scanner and verifier CLI; it imports
+these contracts/constants unchanged. Smoke/browser entry points remain deferred to
+Task 3, and live full-closure attestation/operational acceptance remain blocked. Windows native gate, Job, filesystem and failure
 checks use synthetic fixtures, not the actual D35 acceptance lane. The trusted gate
 uses native base Python before assignment; a Windows venv redirector may spawn its
 interpreter before it can be assigned. File/directory ownership uses full native
@@ -2229,6 +2230,72 @@ candidate tracked files and D39 public metadata, with 4 KiB chunk overlap; exclu
 only exact placeholder/example tokens, not all tests. Report rule/counts only.
 Passing means no matches under these bounded rules, not proof of every possible
 secret absence. Define/test literal pattern constants before scanning.
+
+Task 2 precision: `release_verification` owns the fixed scanner and native resolver,
+without extending the 19-path source closure. Path matching is case-insensitive on
+POSIX lexical components: private components `private`, `corpus`, `keys`, `secrets`,
+`reviews`, `evidence`, `storage`; filenames `.env`/`.env.*` except exact `.env.example`,
+`held-out.jsonl`, `human-review.json`, `independent-review.json`. Only the four exact
+committed synthetic blinded fixture paths with these purposes are approved path
+exceptions; content is still scanned. Generated components are `.venv`, `venv`,
+`node_modules`, `dist`, `__pycache__`, `.cache`, `.pytest_cache`, `.ruff_cache`,
+`media`, `generated`; suffixes `.pyc`, `.pyo`, `.mp4`, `.webm`, `.wav` also match.
+Credential byte shapes are bounded alphanumeric/underscore/hyphen OpenAI/Anthropic
+`sk-` (20--200), GitHub `gh[pousr]_` (20--200) or `github_pat_` (20--200), and AWS
+`AKIA`/`ASIA` plus 16 uppercase alphanumeric characters; PEM headers cover PRIVATE,
+RSA PRIVATE, EC PRIVATE and OPENSSH PRIVATE KEY. Exact full example tokens made
+only from `x` or `X` (and AWS example `AKIAIOSFODNN7EXAMPLE`) are excluded; there is
+no test-directory exemption. Scan 64 KiB chunks with 4 KiB overlap, count each
+absolute match offset once, cap each rule count at 8192, and fail on byte/inventory
+caps. Emit only the four rule IDs/counts, never matched paths or bytes.
+
+Native probes use fixed source strings through `run_owned_command` within the same
+scope, bounded output and a 30-second deadline, not extra inventory entries. Their
+noncanonical tool/package JSON is capped at 64 KiB and reuses evidence_json's lexical,
+duplicate-key, nonfinite and value guards; durable evidence remains canonical. Python
+probes check real sys.executable/base prefix/base executable and every declared
+runtime/dev/retrieval import origin beneath the group's exact site-packages directory; bootstrap uv must be within the native base
+installation, not user-site, and its module launcher and discovered native binary
+are rehashed around use. Commands 2--5 require a group-local site-packages origin,
+include-system-site-packages=false, and the verified bootstrap base. Frontend first
+primes only group-local npm cache using fixed pinned pnpm `--version`, then locates
+one matching npm `_npx` pnpm package, verifies its exact package version and cjs
+launcher, and rehashes it around every command. Installed npx belongs to the resolved
+native Node installation. Esbuild preflight runs a fixed JS require/transform against
+the locked installed esbuild (no scripts/rebuild/download); failure stops before
+build. The environment is constructed from scratch: only validated Windows system
+root/windir and fixed system/native executable PATH directories survive; all writable
+homes/config/cache/temp and application storage paths are group-local. Python safe
+path is enabled only for bootstrap uv/probes, not candidate-rooted application/tests.
+
+Writable group source is copied using retained native anchors. After confirmed scope
+teardown, generated entries are inventoried under the retained group anchor and
+removed bottom-up; links are unlinked as leaves, never traversed. A lost/replaced
+root, or a component replaced after teardown inventory, fails cleanup, never removes
+a replacement. Publication cleanup uses only retained staged-file identities and
+known byte prefixes; an unknown entry/replacement survives refusal. Runtime cleanup is
+attempted in finally even if attestation, smoke or command preflight fails. Invalid
+materialization binding refuses output rather than fabricating initial hashes.
+Atomic verification publication uses a new disjoint, Git-ignored directory beneath
+the trusted current tool repository, staging exactly `verification-manifest.json`
+and `d39-verifier-attestation.json` with retained native parent/stage/file identities
+and a native no-replace directory rename. It does not call the D38-specialized triplet
+publisher, create a fourth marker, or replace previous evidence. Missing Task 3
+source prevents attestation/publication; cleanup still runs, and no smaller closure
+or substitute attestation is permitted. Native command bindings are schema-validated
+before any target instruction; unavailable prerequisites add no command entry. A
+failed or unconfirmed group teardown sets overall cleanup failed even if the runtime
+cleanup itself completes. Recheck the exact raw freeze digest at every group boundary
+and final check, not only equal candidate files. Convert Git subprocess failures to
+redacted verifier failure without bypassing runtime cleanup. Offload blocking source,
+Git and tool hashing to one executor thread while a scope is active, keeping the
+resident monitor runnable; never overlap two execution groups. Every smoke receipt carries the six bootstrap roles
+`node`, `npx`, `pnpm`, `python`, `python_bootstrap`, `uv`; browser additionally requires
+`chrome` and `websockets`, and FFmpeg additionally requires `ffmpeg` and `ffprobe`.
+Use the same role aliases/pins as commands, `tools/chrome`, `tools/ffmpeg`,
+`tools/ffprobe`, and `tools/websockets_module` for the added launcher. Identical aliases
+must have identical complete fingerprints throughout the smoke manifest; reject
+wrong/missing roles, versions, launchers, oversized tools and conflicting identities.
 
 `ToolExecutionBinding` is owned by `smoke_contracts`; `release_verification` imports it.
 

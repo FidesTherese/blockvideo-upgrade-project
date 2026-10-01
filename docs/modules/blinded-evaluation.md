@@ -6,7 +6,7 @@ The evaluation package runs D37 blinded trials against the immutable D35 candida
 
 ## Project position
 
-The D37 runner invokes the D36 host, which starts candidate application interfaces in subprocesses. D38 consumes unchanged D37 contracts. D39 Task 1 adds pure contracts, materialization and reusable owned scopes; D39 operational groups/smokes and D40 remain planned. D38 imports contracts, canonical parsing, filesystem and attestation helpers, never the runner or later executors. Shared contract imports account for the attested app-contract closure.
+The D37 runner invokes D36's candidate-rooted subprocess host. D38 consumes unchanged D37 contracts. D39 foundations and Task 2's fixed verifier are implemented; Task 3 smokes, full attestation, operational acceptance and D40 remain deferred. D38 imports contracts, canonical parsing, filesystem and attestation helpers, never later executors. D39 controllers import no application, private corpus, D37 runner or D38 importer.
 
 ## Inputs and outputs
 
@@ -38,9 +38,9 @@ D38 verifies detached/canonical bytes, historical recorded Git blobs, identity c
 
 ## D39 foundation
 
-Pure frozen `smoke_contracts` are re-exported by `release_verification`. The materializer copies tracked bytes into readonly source. Locked identity-bound markers refuse replacement cleanup. Published failures mark cleaning before deletion; interruption resumes subsets. Failed commands validate available native bindings.
+`smoke_contracts` owns frozen schemas/inventory, imported unchanged. The materializer copies readonly source with identity-bound, resumable cleanup. Owned scopes gate isolated native base Python before Job/session registration, cap shared output at 2 MiB and confirm descendant/reader teardown.
 
-`OwnedProcessScope`, `start_owned_process` and `run_owned_command` isolate base Python (`-I -S -B`) before Job/session registration, preserving target environment/cwd. They cap output at 2 MiB, monitor memory and confirm descendants/readers. Latched failures settle after teardown and block later commands. D37 is unchanged; Task 2/3, attestation and D40 remain deferred. Windows checks are not candidate acceptance.
+`release_verification.verify_release_candidate(...)` validates materialization/six smoke receipts, then derives distinct backend/frontend source-only groups. It proves native tool origins and contains writable configuration. Missing extras/esbuild stops execution without resync/rebuild/lock repair. One executor thread keeps memory monitoring runnable during blocking hashes/Git checks. Four bounded scan rules report counts only. Finally cleans groups/runtime before native two-artifact publication. Cleanup loss remains failed, never deleting replacements. Missing Task 3 files block the literal 19-file attestation, never reduce it; rejection still attempts bound runtime cleanup. Failed evidence retains actual prefixes/nulls.
 
 ## Key decisions and limits
 
@@ -52,4 +52,4 @@ Candidate failures retain fixed classifications. Trusted-host logs remain bounde
 
 ## Relevant verification
 
-Focused coverage lives in `backend/tests/test_d36_candidate_protocol.py`, `test_d37_blinded_runner.py`, `test_d38_result_import.py` and `test_d39_release_verification.py`. Task 1 uses sequential 768 MiB Jobs, resident monitoring and explicit platform skips. Checks cover startup hooks, late-reader failures and interrupted published cleanup with synthetic fixtures. Broader backend/frontend gates remain separate. `test_evidence_json.py` is the standalone pure-parser boundary. `tests/d37_pinned_support.py` verifies every exact-D35 archive blob and builds/loads an external synthetic source/profile index in candidate-rooted subprocesses. Pinned tests cover both modes, restart resend, original-target preservation, actual retrieval (not fallback-only), unchanged complete source/index hashes and invalid-index negatives. This is not real evaluation, optional ONNX proof or independent acceptance.
+Focused tests are `backend/tests/test_d36_candidate_protocol.py`, `test_d37_blinded_runner.py`, `test_d38_result_import.py`, `test_d39_release_verification.py`, `test_d39_verifier_driver.py` and `test_evidence_json.py`. D39 checks use sequential 768 MiB Jobs with resident monitoring and explicit platform skips. Task 2 covers real Git/index bypasses, native Python/Node/npx seams, bounded scans, failed prefixes, source/freeze drift, replacement refusal and cleanup/publication. Installation-boundary doubles and typed passed fixtures are not operational acceptance. `tests/d37_pinned_support.py` verifies D35 blobs and synthetic index binding, not real evaluation, weights or human review. Backend/frontend gates remain deferred.

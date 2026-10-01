@@ -115,7 +115,7 @@ pending; no readiness or release approval follows. Exact verification history an
 prior-unit timestamp-sensitive focused failure are in `docs/plan-c/work-report-38.md`.
 D39/D40 operational acceptance remains deferred.
 
-### D39 Task 1 checkpoint (synthetic and native Windows checks; review pending)
+### D39 Task 1 checkpoint (independently approved; non-operational)
 
 Pure frozen, strict D39 schemas now cover six discriminated smoke summaries,
 command evidence, verification evidence and physical runtime ownership. The separate
@@ -133,10 +133,30 @@ and readers before terminal evidence. The gate uses isolated native base Python
 validated environment and cwd. Failed command evidence validates every available native
 binding; unavailable launch observations may remain empty. Terminal memory/output/timeout
 failures settle after reader teardown and cannot become success on parent exit zero.
-Original D37 entry-point behavior is unchanged. Task 2 nine-command
-execution, Task 3 smoke/browser integration, full 19-path attestation and D40 remain
-unimplemented in this checkpoint. Synthetic schema/FS and native process tests are
-not candidate acceptance, private approval, provider truth or operational readiness.
+Original D37 entry-point behavior is unchanged. Task 3 smoke/browser integration,
+complete live 19-path attestation and D40 remain unimplemented. Synthetic schema/FS
+and native process tests are not candidate acceptance, private approval, provider
+truth or operational readiness.
+
+### D39 Task 2 checkpoint (implemented; scoped review pending)
+
+The external verifier and fixed redacted CLI consume bound readonly runtime evidence
+and existing six-receipt smoke schemas. They execute the immutable nine-command
+inventory in two distinct fresh writable groups, with exact deadlines, canonical/native
+argv separation and streamed native executable/launcher fingerprints. Python/uv,
+sandbox extras, Node/npx/pnpm and locked native esbuild prerequisites fail closed;
+there is no global test fallback, resync, rebuild, dependency-script approval or lock
+repair. Environment/config/cache/temp state is group-local with low concurrency.
+
+Tracked source, candidate snapshots, exact freeze bytes and tooling source are checked
+around execution. Four bounded scan rules report counts, not matched values. Group
+teardown and detached runtime cleanup precede atomic publication of exactly two
+artifacts; failed evidence retains actual attempted prefixes and absent observations
+as null. Any cleanup loss remains failed. Task 3's missing files block the full literal
+19-file live attestation and operational publication; no reduced closure or fabricated
+smoke replaces them. Focused tests include real native/Git/filesystem seams and explicitly
+synthetic installation-boundary fixtures under the 4 GiB aggregate limit. Real D35
+installation/regression, browser/media, private evaluation and readiness remain deferred.
 
 ### Stack and tooling-contract audit (2026-09-30; design only)
 
