@@ -112,19 +112,29 @@ Jobs, pipe readers and teardown remain real OS operations.
 | Final frontend test, one worker | 157 passed across 17 files; no skips | 3965.8 MiB |
 | Frontend build | Passed (TypeScript and Vite; 190 modules) | 3979.2 MiB |
 | Frontend lint | Passed | 3844.8 MiB |
-| Post-commit D36 CLI | Pending clean-checkout rerun | Pending |
+| D36 CLI on clean implementation commit `d8944c4` | 1 passed; the dirty-tree attestation failure is resolved | 3500.2 MiB |
 
 Skipped platform/optional checks are never counted as passed. Intermediate schema
 fixture failures and pre-policy memory refusals are diagnostic runs, not final
 verification. The full-run skips are 17 unavailable symlink-permission cases,
 7 POSIX/Linux-only cases and 2 directory replacement cases prevented by Windows
 no-delete anchors. All 81 tests in the five added review files are included:
-80 passed and the POSIX session-teardown case was skipped. The dependency warning concerns Starlette/httpx; no dependency
-change is made. The full-run failures are the Node pin prerequisite and the D36 CLI
-clean-tooling check, which is rerun after committing the implementation below.
+80 passed and the POSIX session-teardown case was skipped. The dependency warning
+concerns Starlette/httpx; no dependency change is made. The full-run failures are
+the Node pin prerequisite and the D36 CLI
+clean-tooling check. The latter passed on clean implementation commit `d8944c4`;
+the installed Node pin mismatch is the only unresolved executed-test failure.
+The complete backend suite was not repeated after the documentation-only finalization
+and trailing-blank-line cleanup in one test; all implementation bytes are unchanged.
 The frontend missing-dependency failure was resolved with the existing frozen lock;
 no manifest or lockfile changed. Build regenerated one explanatory comment in the
 tracked Vite JavaScript config; that generated-only difference was restored.
+
+The required commands were run sequentially: backend `python -m uv run pytest -q
+-rs -p no:cacheprovider` and `python -m uv run ruff check .`; frontend pnpm 10.18.3
+`test --maxWorkers=1 --minWorkers=1 --no-file-parallelism`, `build`, and `lint`.
+Frontend commands used installed native Node plus its bundled npx CLI. Logs remain
+outside Git in the Codex task workspace. No real D36/D39 evidence was published.
 
 ## Contract amendments and operational blockers
 
@@ -137,8 +147,8 @@ smoke producer digest require fresh evidence after final tooling attestation.
 
 Operational acceptance still requires Python **3.12.12**, uv **0.12.15**, Node
 **24.11.1**, pnpm **10.18.3**, an installed compatible Chrome and a complete D36
-control publication. This host has Python 3.13.13 and Node 24.13.0 rather than those
-pins; `../blockvideo-d36-control` is absent. No package/lock repair or candidate
+control publication. This host has Python 3.13.13, uv 0.11.31 and Node 24.13.0
+rather than those pins; `../blockvideo-d36-control` is absent. No package/lock repair or candidate
 replacement is performed to manufacture a pass.
 
 D35's README prerequisite mismatch remains failed. Its tracked credential-shaped
@@ -148,3 +158,12 @@ documentation subcheck. Operator-created candidate checkouts must use exact LF
 bytes (`git -c core.autocrlf=false`, configured before checkout); attestation never
 normalizes them. Independent review and fresh final-commit evidence remain pending.
 No tag, release, deployment, held-out execution or human acceptance is claimed.
+
+The current frontend tree exactly matches D35 (verified with `git diff
+522775516c0797abdb313e3432339a3a444b7ae2 HEAD -- frontend`). The local TypeScript
+build emitted one explanatory comment into tracked
+`frontend/vite.config.js`. This was restored after the required build/lint checks.
+A corresponding mutation during D39 would correctly fail the tracked-source gate;
+the pinned operational lane has not been run, so this is a candidate-side build
+reproducibility issue to investigate, not a waived check or a claimed operational
+failure. Fixing frozen candidate behavior requires a separately authorized successor.

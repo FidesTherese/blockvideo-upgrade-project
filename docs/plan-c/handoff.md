@@ -22,6 +22,9 @@ media seams can be tested synthetically without that publication. The pinned REA
 prerequisite mismatch and tracked credential-shaped test literals still fail their
 gates. Independent review remains pending. D35 stays **Not ready**; no materializer,
 verifier or smoke CLI is run against real candidate/evidence paths in this task.
+The local build also regenerated a tracked Vite-config comment in frontend bytes
+identical to D35. Investigate that source-drift condition in the pinned lane;
+the full observation and restored generated difference are recorded in the report.
 
 ## D38 current result
 

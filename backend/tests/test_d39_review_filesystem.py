@@ -230,4 +230,3 @@ def test_l10_screenshot_fingerprint_rejects_ancestor_junction(tmp_path: Path) ->
             producer._screenshot_fingerprint(link / '390-waiting.png')
     finally:
         link.rmdir()
-
