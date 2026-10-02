@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime
 from pathlib import PurePosixPath
-from types import UnionType
-from typing import Annotated, Literal, Self, get_args, get_origin
+from types import MappingProxyType, UnionType
+from typing import Annotated, Literal, Mapping, Self, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
@@ -33,6 +34,19 @@ D39_REQUIRED_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("frontend_lint", ("npx", "-y", "pnpm@10.18.3", "lint")),
 )
 D39_COMMAND_DEADLINES: tuple[int, ...] = (600, 30, 1800, 120, 600, 600, 600, 300, 180)
+TOOL_RULES: Mapping[str, tuple[str | None, str, str | None]] = MappingProxyType({
+    "python_bootstrap": ("3.12.12", "tools/python_bootstrap", None),
+    "python": ("3.12.12", "tools/python_sandbox", None),
+    "uv": ("0.12.15", "tools/python_bootstrap", "tools/uv_module"),
+    "node": ("24.11.1", "tools/node", None),
+    "npx": (None, "tools/node", "tools/npx_cli"),
+    "pnpm": ("10.18.3", "tools/node", "tools/pnpm_cjs"),
+    "chrome": (None, "tools/chrome", None),
+    "ffmpeg": (None, "tools/ffmpeg", None),
+    "ffprobe": (None, "tools/ffprobe", None),
+    "websockets": ("16.1.1", "tools/python_sandbox", "tools/websockets_module"),
+})
+BASE_SMOKE_ROLES: tuple[str, ...] = ("node", "npx", "pnpm", "python", "python_bootstrap", "uv")
 
 
 def _raw_bounds(value: object) -> None:
@@ -166,6 +180,23 @@ class ToolExecutionBinding(StrictEvidenceModel):
     executable: FileFingerprint
     launcher: FileFingerprint | None
 
+    @model_validator(mode="after")
+    def native_binding(self) -> Self:
+        if self.role not in TOOL_RULES:
+            raise ValueError("unknown native tool role")
+        if not 1 <= len(self.version) <= 512 or any(ord(character) < 32 or ord(character) > 126 for character in self.version):
+            raise ValueError('native tool version observation invalid')
+        version, executable, launcher = TOOL_RULES[self.role]
+        if (self.executable.path != executable or version is not None and self.version != version
+                or (launcher is None) != (self.launcher is None)
+                or self.launcher is not None and self.launcher.path != launcher):
+            raise ValueError("native tool alias, version or launcher mismatch")
+        if self.role == "npx" and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", self.version) is None:
+            raise ValueError("native npm version must be observed")
+        if any(blob.size > 256 * 1024 * 1024 for blob in (self.executable, self.launcher) if blob is not None):
+            raise ValueError("native tool blob size limit exceeded")
+        return self
+
 
 class MigrationSummary(StrictEvidenceModel):
     stage: Literal["legacy_migration"]
@@ -212,10 +243,27 @@ class StatefulStartupSummary(StrictEvidenceModel):
     retrieval_verified: bool
 
 
+class DocumentationChecks(StrictEvidenceModel):
+    setup_paths: bool
+    locked_versions: bool
+    mode_commands: bool
+    recovery_codes: bool
+    migration_restore: bool
+    limitation_boundary: bool
+
+    def __getitem__(self, key: str) -> bool:
+        if key not in type(self).model_fields:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def values(self) -> tuple[bool, ...]:
+        return tuple(self[name] for name in type(self).model_fields)
+
+
 class BrowserSummary(StrictEvidenceModel):
     stage: Literal["browser"]
-    narrow_width: Literal[390]
-    wide_width: Literal[1440]
+    narrow_width: Annotated[int, Field(ge=1, le=7680)]
+    wide_width: Annotated[int, Field(ge=1, le=7680)]
     waiting_ok: bool
     safe_retry_ok: bool
     unknown_remote_blocked: bool
@@ -224,15 +272,7 @@ class BrowserSummary(StrictEvidenceModel):
     duplicate_post_count: Calls
     horizontal_overflow: bool
     playback_ok: bool
-    documentation_checks: dict[str, bool]
-
-    @field_validator("documentation_checks", mode="before")
-    @classmethod
-    def documentation(cls, value: object) -> object:
-        required = {"setup_paths", "locked_versions", "mode_commands", "recovery_codes", "migration_restore", "limitation_boundary"}
-        if type(value) is not dict or set(value) != required or any(type(item) is not bool for item in value.values()):
-            raise ValueError("documentation requires six exact raw checks")
-        return value
+    documentation_checks: DocumentationChecks
 
 
 class FFmpegSummary(StrictEvidenceModel):
@@ -243,7 +283,7 @@ class FFmpegSummary(StrictEvidenceModel):
     video_present: bool
     subtitle_present: bool
     publication_bound: bool
-    duration_ms: Annotated[int, Field(ge=0, le=60000)]
+    duration_ms: Annotated[int, Field(ge=0, le=60000)] | None
 
 
 Summary = Annotated[MigrationSummary | RestoreSummary | AllToolsStartupSummary | StatefulStartupSummary | BrowserSummary | FFmpegSummary, Field(discriminator="stage")]
@@ -274,6 +314,12 @@ class SmokeStageReceipt(StrictEvidenceModel):
         _sorted_unique(tuple(item.path for item in self.artifacts))
         if self.stage != self.summary.stage:
             raise ValueError("smoke summary stage mismatch")
+        required = set(BASE_SMOKE_ROLES)
+        required.update({"chrome", "websockets"} if self.stage == "browser" else {"ffmpeg", "ffprobe"} if self.stage == "ffmpeg" else set())
+        roles = {item.role for item in self.tools}
+        if not roles <= required or self.outcome == "passed" and roles != required:
+            raise ValueError("smoke native role inventory mismatch")
+        validate_tool_consistency(self.tools)
         if self.outcome == "passed":
             values = self.summary.model_dump()
             for name, value in values.items():
@@ -290,9 +336,9 @@ class SmokeStageReceipt(StrictEvidenceModel):
                 raise ValueError("all-tools startup observation mismatch")
             if isinstance(summary, StatefulStartupSummary) and (summary.index_sha256 is None or summary.profile_sha256 is None or summary.embedding_calls < 1 or summary.model_calls < 1):
                 raise ValueError("passed stateful startup requires verified retrieval")
-            if isinstance(summary, BrowserSummary) and (summary.duplicate_post_count != 1 or not all(summary.documentation_checks.values())):
+            if isinstance(summary, BrowserSummary) and (summary.narrow_width != 390 or summary.wide_width != 1440 or summary.duplicate_post_count != 1 or not all(summary.documentation_checks.values())):
                 raise ValueError("passed browser requires one POST and all documentation checks")
-            if isinstance(summary, FFmpegSummary) and (summary.ffmpeg_exit_code != 0 or summary.ffprobe_exit_code != 0 or summary.duration_ms < 1):
+            if isinstance(summary, FFmpegSummary) and (summary.ffmpeg_exit_code != 0 or summary.ffprobe_exit_code != 0 or summary.duration_ms is None or summary.duration_ms < 1):
                 raise ValueError("passed FFmpeg requires zero exits and duration")
         if len(canonical_json_bytes(self)) + 1 > 65536:
             raise ValueError("smoke receipt size limit exceeded")
@@ -301,6 +347,7 @@ class SmokeStageReceipt(StrictEvidenceModel):
 
 class SmokeManifest(StrictEvidenceModel):
     schema_version: Literal[1]
+    producer_tool_sha256: Sha256
     candidate_id: CandidateId
     git_commit: Commit
     freeze_sha256: Sha256
@@ -326,7 +373,25 @@ class SmokeManifest(StrictEvidenceModel):
             digest = hashlib.sha256(canonical_json_bytes(item) + b"\n").hexdigest()
             if item.outcome != "passed" or getattr(self, item.stage + "_sha256") != digest:
                 raise ValueError("smoke stage failed or digest mismatch")
+        validate_tool_consistency(tuple(tool for receipt in self.stage_receipts for tool in receipt.tools))
         return self
+
+
+def validate_tool_consistency(tools: tuple[ToolExecutionBinding, ...]) -> None:
+    seen: dict[str, FileFingerprint] = {}
+    roles: dict[str, ToolExecutionBinding] = {}
+    for item in tools:
+        item.native_binding()
+        if item.role in roles and roles[item.role] != item:
+            raise ValueError("native tool role binding changed")
+        roles[item.role] = item
+        for blob in (item.executable, item.launcher):
+            if blob is not None:
+                if blob.path in seen and seen[blob.path] != blob:
+                    raise ValueError("native tool fingerprint mismatch")
+                seen[blob.path] = blob
+    if sum(blob.size for blob in seen.values()) > 1024 * 1024 * 1024:
+        raise ValueError("native tool aggregate limit exceeded")
 
 
 class CommandEvidence(StrictEvidenceModel):
@@ -334,6 +399,7 @@ class CommandEvidence(StrictEvidenceModel):
     argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=64)]
     resolved_argv: Annotated[tuple[str, ...], Field(max_length=64)]
     tool_bindings: Annotated[tuple[ToolExecutionBinding, ...], Field(max_length=16)]
+    media_tools: Annotated[tuple[ToolExecutionBinding, ...], Field(max_length=2)] = ()
     cwd: Literal["backend", "frontend"]
     deadline_seconds: Annotated[int, Field(gt=0)]
     outcome: Outcome
@@ -369,6 +435,14 @@ class CommandEvidence(StrictEvidenceModel):
             raise ValueError("command output or timestamp bounds violated")
         if self.outcome == "completed" and self.exit_code is None:
             raise ValueError("completed command requires an exit code")
+        if self.outcome == "launch_failed" and self.exit_code is not None:
+            raise ValueError("launch_failed has no target exit code")
+        if self.media_tools:
+            if index != 2 or tuple(item.role for item in self.media_tools) != ('ffmpeg', 'ffprobe'):
+                raise ValueError('backend media inventory mismatch')
+            validate_tool_consistency(self.media_tools)
+        if index == 2 and self.outcome == 'completed' and not self.media_tools:
+            raise ValueError('backend pytest requires bound media coverage')
         roles = tuple(item.role for item in self.tool_bindings)
         expected_roles = ("python_bootstrap", "uv") if index == 0 else ("python",) if index < 5 else ("node", "npx", "pnpm")
         if any(role not in expected_roles for role in roles):
@@ -384,15 +458,11 @@ class CommandEvidence(StrictEvidenceModel):
             raise ValueError("launched command requires resolved native argv")
         if len({(item.executable.path, item.executable.size, item.executable.sha256) for item in self.tool_bindings}) > 1:
             raise ValueError("shared native executable bindings disagree")
-        versions = {"python_bootstrap": "3.12.12", "uv": "0.12.15", "python": "3.12.12", "node": "24.11.1", "pnpm": "10.18.3"}
-        launchers = {"uv": "tools/uv_module", "npx": "tools/npx_cli", "pnpm": "tools/pnpm_cjs"}
         total = 0
         for binding in self.tool_bindings:
-            if binding.executable.path != executable_alias or (binding.role in versions and binding.version != versions[binding.role]):
+            binding.native_binding()
+            if binding.executable.path != executable_alias:
                 raise ValueError("native tool alias or version mismatch")
-            launcher_alias = launchers.get(binding.role)
-            if (binding.launcher is None) != (launcher_alias is None) or (binding.launcher is not None and binding.launcher.path != launcher_alias):
-                raise ValueError("native tool launcher mismatch")
             for blob in (binding.executable, binding.launcher):
                 if blob is not None:
                     if blob.size > 256 * 1024 * 1024:
@@ -434,6 +504,8 @@ class VerificationManifest(StrictEvidenceModel):
             raise ValueError("smoke digest and observation must coexist")
         if self.smoke_manifest is not None:
             smoke = self.smoke_manifest
+            if smoke.producer_tool_sha256 != self.verifier_tool_sha256:
+                raise ValueError("smoke producer attestation mismatch")
             if hashlib.sha256(canonical_json_bytes(smoke) + b"\n").hexdigest() != self.smoke_manifest_sha256:
                 raise ValueError("smoke manifest digest mismatch")
             for name in ("candidate_id", "git_commit", "freeze_sha256", "materialization_sha256", "runtime_instance_id", "runtime_source_sha256"):

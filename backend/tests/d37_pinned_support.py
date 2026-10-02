@@ -85,7 +85,7 @@ def verified_archive(repository: Path, root: Path) -> dict[str, str]:
         expected[name.decode("utf-8")] = digest.decode("ascii")
     archive = root.parent / "pinned-d35.tar"
     with archive.open("xb") as output:
-        subprocess.run(["git", "-C", str(repository), "archive", "--format=tar", PINNED_D35],
+        subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "-C", str(repository), "archive", "--format=tar", PINNED_D35],
                        stdout=output, stderr=subprocess.PIPE, check=True, timeout=30)
     root.mkdir()
     with tarfile.open(archive) as entries:

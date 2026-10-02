@@ -15,13 +15,13 @@ For Plan C work, read `specification.md` and `docs/DTD.md` before changing opera
 
 ## Resource budget
 
-The user's project RAM limit is **4 GiB aggregate**, including agent runtime,
-subagents and all project process trees. Target at most 3 GiB; start no nontrivial
-work at 3.5 GiB. Sample working sets before and during bounded checks, reserving
-headroom for uncertain peaks. Use one worker/process group at a time, bounded
+The user's project RAM limit is **16 GiB aggregate** (explicitly updated 2026-10-02),
+including agent runtime, subagents and all project process trees. Target at most
+12 GiB; start no nontrivial work at 14 GiB. Sample working sets before and during
+bounded checks, reserving headroom for uncertain peaks. Use one worker/process group at a time, bounded
 reads and output, and stop only owned work before the limit is reached. Keep
 unrelated user processes and historical evidence intact. Do not infer that older
-verification satisfied this stricter limit.
+verification satisfied this revised limit.
 
 ## Verification
 

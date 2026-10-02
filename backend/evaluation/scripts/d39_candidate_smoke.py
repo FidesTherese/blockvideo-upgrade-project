@@ -7,6 +7,7 @@ import, endpoint or action can be supplied through configuration.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -16,12 +17,12 @@ import stat
 import subprocess
 import sys
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit
 
-ACTIONS = ('build_index', 'legacy_migration', 'restore', 'all_tools_startup', 'stateful_startup',
+ACTIONS: tuple[str, ...] = ('build_index', 'legacy_migration', 'restore', 'all_tools_startup', 'stateful_startup',
            'seed_browser', 'serve', 'ffmpeg', 'contract_tests')
 _KEYS = {'group_root', 'source_root', 'storage', 'frontend', 'profile', 'index', 'provider_url',
          'model', 'port', 'summary_path', 'scenario', 'ffmpeg', 'ffprobe', 'owner_token'}
@@ -100,7 +101,7 @@ def read_configuration(path: Path) -> dict[str, Any]:
         raise ValueError('smoke provider must be literal loopback')
     if type(value['port']) is not int or not 1024 <= value['port'] <= 65535 or type(value['model']) is not str or not 1 <= len(value['model']) <= 128:
         raise ValueError('smoke mode/port invalid')
-    if value['scenario'] not in ('normal', 'migration_failed'):
+    if value['scenario'] not in ('normal', 'stateful', 'migration_failed'):
         raise ValueError('unknown smoke scenario')
     for name in ('ffmpeg', 'ffprobe'):
         if value[name] is not None:
@@ -231,6 +232,16 @@ def _demo(config: dict[str, Any], mode: str) -> tuple[dict[str, Any], Any, Path]
     settings.ffmpeg_path, settings.ffprobe_path = config['ffmpeg'], config['ffprobe']
     settings.output_width, settings.output_height, settings.output_fps = 320, 240, 12
     settings.subtitle_band_height = 48
+    # The candidate's db module captures get_settings at import time. Install
+    # the public demo settings before model registration imports that module.
+    from app.core import config as candidate_config
+    candidate_config.get_settings = lambda: settings
+    from app.db import register_models
+    register_models()
+    if mode == 'stateful':
+        from app.retrieval import contracts, reader, sources
+        profile = contracts.EmbeddingProfile.model_validate_json(_read(Path(config['profile']), maximum=65536))
+        reader.load_index(Path(config['index']), sources.load_sources(), profile)
     return demo, settings, storage
 
 
@@ -248,37 +259,37 @@ def _build_index(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _startup(config: dict[str, Any], mode: str) -> dict[str, Any]:
-    from fastapi.testclient import TestClient
-    demo, settings, storage = _demo(config, mode)
-    with demo['exclusive_demo'](storage):
-        app = demo['create_demo_app'](settings, Path(config['frontend']))
-        with TestClient(app) as client:
-            health = client.get('/api/health')
-            startup = client.get('/api/startup')
-            # Route uses startup-status in the frozen candidate.
-            if startup.status_code == 404:
-                startup = client.get('/api/startup/status')
-            created = client.post('/api/projects', json={'title': 'D39 synthetic startup', 'source_script': '合成テストです。', 'use_fake_providers': True, 'voicevox_url': config['provider_url']})
-            created.raise_for_status()
-            project = created.json()
-            response = client.post('/api/language/requests', json={'request_id': 'd39-' + mode, 'text': '字幕を64pxにして', 'target': {'project_id': project['id']}, 'base_revision': project['revision']})
-            response.raise_for_status()
-            result = response.json()
-            selected = (result.get('diagnostics') or {}).get('retrieval') or {}
-            interpretation = result.get('interpretation') or {}
-            saved = client.get('/api/projects/' + str(project['id']))
-            saved.raise_for_status()
-            effect = saved.json()
-            operation = result.get('result') or {}
-            completed = result.get('status') == 'completed' and result.get('executed') is True and operation.get('operation_id') == 'project.subtitle-font-size.set' and effect.get('subtitle_font_size') == 64 and effect.get('revision') == project['revision'] + 1
-            summary = dict(stage=mode + '_startup', mode=mode, startup_ready=startup.status_code == 200 and startup.json().get('status') == 'ready',
-                           health_ok=health.status_code == 200 and health.json().get('status') == 'ok', request_completed=completed,
-                           model_calls=interpretation.get('attempts', 0), index_sha256=None)
-            if mode == 'stateful':
-                manifest = json.loads(_read(Path(config['index']) / 'manifest.json', maximum=65536))
-                summary.update(index_sha256=manifest['bundle_sha256'], profile_sha256=_hash(Path(config['profile']), maximum=65536)[1],
-                               embedding_calls=selected.get('embedding_calls', 0), retrieval_verified=result.get('mode') == 'semantic' and selected.get('reason') == 'ranked' and selected.get('all_tools_count') == 0 and selected.get('index_sha256') == manifest['bundle_sha256'])
-            return summary
+    import httpx
+    with httpx.Client(base_url='http://127.0.0.1:' + str(config['port']), trust_env=False, follow_redirects=False, timeout=30) as client:
+        owner = client.get('/__d39-owned')
+        if owner.status_code != 200 or len(owner.content) > 4096 or owner.json() != {'owner': config['owner_token']}:
+            raise ValueError('startup server ownership mismatch')
+        health = client.get('/api/health')
+        startup = client.get('/api/startup')
+        # Route uses startup-status in the frozen candidate.
+        if startup.status_code == 404:
+            startup = client.get('/api/startup/status')
+        created = client.post('/api/projects', json={'title': 'D39 synthetic startup', 'source_script': '合成テストです。', 'use_fake_providers': True, 'voicevox_url': config['provider_url']})
+        created.raise_for_status()
+        project = created.json()
+        response = client.post('/api/language/requests', json={'request_id': 'd39-' + mode, 'text': '字幕を64pxにして', 'target': {'project_id': project['id']}, 'base_revision': project['revision']})
+        response.raise_for_status()
+        result = response.json()
+        selected = (result.get('diagnostics') or {}).get('retrieval') or {}
+        interpretation = result.get('interpretation') or {}
+        saved = client.get('/api/projects/' + str(project['id']))
+        saved.raise_for_status()
+        effect = saved.json()
+        operation = result.get('result') or {}
+        completed = result.get('status') == 'completed' and result.get('executed') is True and operation.get('operation_id') == 'project.subtitle-font-size.set' and effect.get('subtitle_font_size') == 64 and effect.get('revision') == project['revision'] + 1
+        summary = dict(stage=mode + '_startup', mode=mode, startup_ready=startup.status_code == 200 and startup.json().get('status') == 'ready',
+                       health_ok=health.status_code == 200 and health.json().get('status') == 'ok', request_completed=completed,
+                       model_calls=interpretation.get('attempts', 0), index_sha256=None)
+        if mode == 'stateful':
+            manifest = json.loads(_read(Path(config['index']) / 'manifest.json', maximum=65536))
+            summary.update(index_sha256=manifest['bundle_sha256'], profile_sha256=_hash(Path(config['profile']), maximum=65536)[1],
+                           embedding_calls=selected.get('embedding_calls', 0), retrieval_verified=result.get('mode') == 'semantic' and selected.get('reason') == 'ranked' and selected.get('all_tools_count') == 0 and selected.get('index_sha256') == manifest['bundle_sha256'])
+        return summary
 
 
 def _hash(path: Path, *, maximum: int) -> tuple[int, str]:
@@ -295,6 +306,8 @@ def _hash(path: Path, *, maximum: int) -> tuple[int, str]:
 
 
 def _seed_browser(config: dict[str, Any]) -> dict[str, int]:
+    from app.db import register_models
+    register_models()
     from sqlalchemy import create_engine, event
     from sqlalchemy.orm import Session
     from app.models.project import Project
@@ -314,7 +327,7 @@ def _seed_browser(config: dict[str, Any]) -> dict[str, int]:
             if owner.status_code != 200 or len(owner.content) > 4096 or owner.json() != {'owner': config['owner_token']}:
                 raise ValueError('seed server ownership mismatch')
             result = {}
-            for name, status in (('waiting', JobStatus.running), ('safe_retry', JobStatus.cancelled), ('unknown_remote', JobStatus.unknown)):
+            for name, status in (('waiting', JobStatus.running), ('safe_retry', JobStatus.cancelled), ('safe_retry_wide', JobStatus.cancelled), ('unknown_remote', JobStatus.unknown)):
                 created = client.post(base_url + '/api/projects', json={'title': 'D39 ' + name, 'source_script': '合成テストです。', 'use_fake_providers': True, 'voicevox_url': config['provider_url']})
                 created.raise_for_status()
                 if len(created.content) > 65536:
@@ -338,7 +351,7 @@ def _seed_browser(config: dict[str, Any]) -> dict[str, int]:
 
 def _serve(config: dict[str, Any]) -> None:
     import uvicorn
-    demo, settings, storage = _demo(config, 'all_tools')
+    demo, settings, storage = _demo(config, 'stateful' if config['scenario'] == 'stateful' else 'all_tools')
     if config['scenario'] == 'migration_failed':
         with closing(_connection(storage / 'demo.db')) as db:
             db.execute('PRAGMA user_version=2')
@@ -367,11 +380,50 @@ def _serve(config: dict[str, Any]) -> None:
         uvicorn.run(app, host='127.0.0.1', port=config['port'], workers=1, reload=False, log_level='warning')
 
 
+@contextmanager
+def _observe_ffmpeg(executable: Path) -> Iterator[list[int]]:
+    """Observe the native waits used by the candidate without changing its files."""
+    original = asyncio.create_subprocess_exec
+    exits: list[int] = []
+    async def spawn(*argv: Any, **kwargs: Any) -> Any:
+        process = await original(*argv, **kwargs)
+        if argv and Path(str(argv[0])).resolve() == executable.resolve():
+            wait = process.wait
+            recorded = False
+            async def observed_wait() -> int:
+                nonlocal recorded
+                code = await wait()
+                if not recorded:
+                    exits.append(code)
+                    recorded = True
+                return code
+            process.wait = observed_wait
+        return process
+    asyncio.create_subprocess_exec = spawn
+    try:
+        yield exits
+    finally:
+        asyncio.create_subprocess_exec = original
+
+
+def _probe_duration(executable: str, video: Path, output_path: Path) -> tuple[int, int | None]:
+    with output_path.open('xb') as output:
+        probe = subprocess.run((executable, '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', str(video)), stdout=output, stderr=subprocess.DEVNULL, timeout=15, check=False)
+    if probe.returncode != 0:
+        return probe.returncode, None
+    raw = _read(output_path, maximum=65536)
+    try:
+        duration = int(float(json.loads(raw.decode('utf-8'))['format']['duration']) * 1000)
+        return probe.returncode, duration if 0 <= duration <= 60000 else None
+    except (ValueError, KeyError, TypeError, OverflowError):
+        return probe.returncode, None
+
+
 def _ffmpeg(config: dict[str, Any]) -> dict[str, Any]:
     from fastapi.testclient import TestClient
     from sqlalchemy import select
     demo, settings, storage = _demo(config, 'all_tools')
-    with demo['exclusive_demo'](storage):
+    with demo['exclusive_demo'](storage), _observe_ffmpeg(Path(config['ffmpeg'])) as exits:
         app = demo['create_demo_app'](settings, Path(config['frontend']))
         from app.models.artifact import GenerationArtifact
         from app.models.project import Project
@@ -389,8 +441,11 @@ def _ffmpeg(config: dict[str, Any]) -> dict[str, Any]:
             with get_session_factory()() as db:
                 artifact = db.scalar(select(GenerationArtifact).where(GenerationArtifact.project_id == project_id))
                 current = db.get(Project, project_id)
+                observed = dict(stage='ffmpeg', providers_fake=current is not None and current.use_fake_providers is True,
+                                ffmpeg_exit_code=next((code for code in exits if code != 0), 0 if exits else None),
+                                ffprobe_exit_code=None, video_present=False, subtitle_present=False, publication_bound=False, duration_ms=None)
                 if artifact is None or current is None:
-                    raise ValueError('fake-provider generation published no artifact')
+                    return observed
                 manifest = artifact.manifest_json
                 video = _regular_path(storage / artifact.video_path, root=storage)
                 subtitle = _regular_path(storage / artifact.subtitle_path, root=storage)
@@ -401,18 +456,9 @@ def _ffmpeg(config: dict[str, Any]) -> dict[str, Any]:
                     if not isinstance(manifest.get(name), dict) or manifest[name].get('sha256') != digest or manifest[name].get('size') != size:
                         raise ValueError('artifact manifest file binding mismatch')
                 probe_path = Path(config['summary_path']).with_suffix('.ffprobe.json')
-                with probe_path.open('xb') as output:
-                    probe = subprocess.run((config['ffprobe'], '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', str(video)), stdout=output, stderr=subprocess.DEVNULL, timeout=15, check=False)
-                with probe_path.open('rb') as stream:
-                    raw = stream.read(65537)
-                if len(raw) > 65536:
-                    raise ValueError('ffprobe output exceeded limit')
-                duration = int(float(json.loads(raw)['format']['duration']) * 1000)
-                # The generation path checks FFmpeg return code; only published success is accepted.
-                passed = detail['status'] == 'completed' and probe.returncode == 0
+                code, duration = _probe_duration(config['ffprobe'], video, probe_path)
                 Path(config['summary_path']).with_suffix('.media.json').write_bytes(_canonical({'project_id': project_id, 'video': video.relative_to(storage).as_posix(), 'subtitle': subtitle.relative_to(storage).as_posix(), 'manifest': manifest}))
-                return dict(stage='ffmpeg', providers_fake=True, ffmpeg_exit_code=0 if passed else None,
-                            ffprobe_exit_code=probe.returncode, video_present=video.is_file(), subtitle_present=subtitle.is_file(),
+                return observed | dict(ffprobe_exit_code=code, video_present=video.is_file(), subtitle_present=subtitle.is_file(),
                             publication_bound=current.current_artifact_id == artifact.id and detail.get('output_video_path') == artifact.video_path and artifact.revision == detail['revision'] and manifest.get('job_id') == artifact.job_id and manifest.get('revision') == artifact.revision and manifest.get('input_fingerprint') == artifact.input_fingerprint, duration_ms=duration)
 
 
@@ -428,8 +474,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == 'contract_tests':
             import pytest
-            result = pytest.main(['tests/test_d34_migrations.py', 'tests/test_d35_startup_recovery_api.py', '-q', '-p', 'no:cacheprovider'])
-            return int(result)
+            class Results:
+                def __init__(self) -> None:
+                    self.results: dict[str, list[bool]] = {'migration_restore': [], 'recovery_codes': []}
+                def pytest_runtest_logreport(self, report: Any) -> None:
+                    if report.when == 'call' or report.failed or report.skipped:
+                        key = 'migration_restore' if 'test_d34_migrations.py' in report.nodeid else 'recovery_codes'
+                        self.results[key].append(report.passed)
+            results = Results()
+            status = pytest.main(['tests/test_d34_migrations.py', 'tests/test_d35_startup_recovery_api.py', '-q', '-p', 'no:cacheprovider'], plugins=[results])
+            summary = {key: bool(values) and all(values) and int(status) in (0, 1) for key, values in results.results.items()}
+            Path(config['summary_path']).write_bytes(_canonical(summary))
+            return 0
         actions = {'build_index': _build_index, 'legacy_migration': _migration, 'restore': _restore,
                    'all_tools_startup': lambda c: _startup(c, 'all_tools'), 'stateful_startup': lambda c: _startup(c, 'stateful'),
                    'seed_browser': _seed_browser, 'ffmpeg': _ffmpeg}

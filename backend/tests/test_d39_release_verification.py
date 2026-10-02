@@ -57,13 +57,25 @@ def _summary(stage: str) -> dict[str, object]:
 
 
 def _receipt(stage: str = "restore") -> dict[str, object]:
-    return {"schema_version": 1, "stage": stage, "candidate_id": CANDIDATE, "git_commit": COMMIT, "freeze_sha256": SHA, "materialization_sha256": SHA, "runtime_instance_id": SHA, "runtime_source_sha256": SHA, "outcome": "passed", "tools": [_binding()], "artifacts": [_fingerprint()], "summary": _summary(stage)}
+    roles = {
+        "node": ("24.11.1", "node", None), "npx": ("11.6.2", "node", "npx_cli"),
+        "pnpm": ("10.18.3", "node", "pnpm_cjs"), "python": ("3.12.12", "python_sandbox", None),
+        "python_bootstrap": ("3.12.12", "python_bootstrap", None), "uv": ("0.12.15", "python_bootstrap", "uv_module"),
+    }
+    if stage == "browser":
+        roles.update(chrome=("139.0.0.0", "chrome", None), websockets=("16.1.1", "python_sandbox", "websockets_module"))
+    if stage == "ffmpeg":
+        roles.update(ffmpeg=("7.1", "ffmpeg", None), ffprobe=("7.1", "ffprobe", None))
+    tools = [{"role": role, "version": version, "executable": _fingerprint("tools/" + executable),
+              "launcher": _fingerprint("tools/" + launcher) if launcher else None}
+             for role, (version, executable, launcher) in sorted(roles.items())]
+    return {"schema_version": 1, "stage": stage, "candidate_id": CANDIDATE, "git_commit": COMMIT, "freeze_sha256": SHA, "materialization_sha256": SHA, "runtime_instance_id": SHA, "runtime_source_sha256": SHA, "outcome": "passed", "tools": tools, "artifacts": [_fingerprint()], "summary": _summary(stage)}
 
 
 def _command() -> dict[str, object]:
     bootstrap = {"role": "python_bootstrap", "version": "3.12.12", "executable": _fingerprint("tools/python_bootstrap"), "launcher": None}
     uv = {"role": "uv", "version": "0.12.15", "executable": _fingerprint("tools/python_bootstrap"), "launcher": _fingerprint("tools/uv_module")}
-    return {"name": "backend_uv_sync", "argv": ["python", "-m", "uv", "sync", "--locked", "--extra", "dev", "--extra", "retrieval", "--no-python-downloads", "--no-config"], "resolved_argv": ["tools/python_bootstrap", "-m", "uv", "sync", "--locked", "--extra", "dev", "--extra", "retrieval", "--no-python-downloads", "--no-config"], "tool_bindings": [bootstrap, uv], "cwd": "backend", "deadline_seconds": 600, "outcome": "completed", "exit_code": 0, "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:00:01Z", "stdout_size": 0, "stderr_size": 0, "stdout_sha256": hashlib.sha256(b"").hexdigest(), "stderr_sha256": hashlib.sha256(b"").hexdigest()}
+    return {"name": "backend_uv_sync", "argv": ["python", "-m", "uv", "sync", "--locked", "--extra", "dev", "--extra", "retrieval", "--no-python-downloads", "--no-config"], "resolved_argv": ["tools/python_bootstrap", "-m", "uv", "sync", "--locked", "--extra", "dev", "--extra", "retrieval", "--no-python-downloads", "--no-config"], "tool_bindings": [bootstrap, uv], "media_tools": [], "cwd": "backend", "deadline_seconds": 600, "outcome": "completed", "exit_code": 0, "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:00:01Z", "stdout_size": 0, "stderr_size": 0, "stdout_sha256": hashlib.sha256(b"").hexdigest(), "stderr_sha256": hashlib.sha256(b"").hexdigest()}
 
 
 def test_schemas_are_pure_frozen_and_json_tuples() -> None:
@@ -114,7 +126,7 @@ def test_failed_receipt_keeps_nullable_observation_but_no_complete_smoke() -> No
     assert parse_canonical_model(_bytes(payload), contracts.SmokeStageReceipt, maximum=65536).summary.ffmpeg_exit_code is None
     stages = ("legacy_migration", "restore", "all_tools_startup", "stateful_startup", "browser", "ffmpeg")
     receipts = [_receipt(stage) for stage in stages]
-    manifest = {"schema_version": 1, "candidate_id": CANDIDATE, "git_commit": COMMIT, "freeze_sha256": SHA, "materialization_sha256": SHA, "runtime_instance_id": SHA, "runtime_source_sha256": SHA, "stage_receipts": receipts, **{stage + "_sha256": hashlib.sha256(_bytes(receipt)).hexdigest() for stage, receipt in zip(stages, receipts, strict=True)}}
+    manifest = {"schema_version": 1, "producer_tool_sha256": SHA, "candidate_id": CANDIDATE, "git_commit": COMMIT, "freeze_sha256": SHA, "materialization_sha256": SHA, "runtime_instance_id": SHA, "runtime_source_sha256": SHA, "stage_receipts": receipts, **{stage + "_sha256": hashlib.sha256(_bytes(receipt)).hexdigest() for stage, receipt in zip(stages, receipts, strict=True)}}
     parse_canonical_model(_bytes(manifest), contracts.SmokeManifest, maximum=1024 * 1024)
     manifest["stage_receipts"][-1] = payload
     with pytest.raises(ValueError):
@@ -390,7 +402,8 @@ def test_metadata_cap_plus_one_fails_closed(publication: tuple[Path, Path, Path,
 def test_cleanup_interruption_resumes_only_recorded_remaining_subset(publication: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     _, runtime, digest = _materialize(publication)
     output = publication[3]
-    original = os.unlink
+    module = _module('evaluation.runtime_materialization')
+    original = module._delete_owned_path
     count = 0
     def interrupted(path: Any, *args: Any, **kwargs: Any) -> None:
         nonlocal count
@@ -401,7 +414,7 @@ def test_cleanup_interruption_resumes_only_recorded_remaining_subset(publication
             raise OSError("synthetic cleanup interruption")
         original(path, *args, **kwargs)
     with monkeypatch.context() as patch:
-        patch.setattr(os, "unlink", interrupted)
+        patch.setattr(module, "_delete_owned_path", interrupted)
         with pytest.raises((ValueError, OSError)):
             _cleanup(publication, runtime, digest)
     assert json.loads(output.with_name(output.name + ".ownership.json").read_bytes())["state"] == "cleaning"
@@ -415,7 +428,7 @@ def test_published_failure_cleanup_resumes_without_deleting_replacements(publica
     module = _module("evaluation.runtime_materialization")
     candidate, frozen, work, output = publication
     original_update = module._marker_update
-    original_unlink = os.unlink
+    original_unlink = module._delete_owned_path
     deleted: list[Path] = []
     runtime: Path | None = None
     attempts = 0
@@ -439,7 +452,7 @@ def test_published_failure_cleanup_resumes_without_deleting_replacements(publica
 
     with monkeypatch.context() as patch:
         patch.setattr(module, "_marker_update", change_after_activation)
-        patch.setattr(os, "unlink", interrupted_unlink)
+        patch.setattr(module, "_delete_owned_path", interrupted_unlink)
         with pytest.raises(ValueError, match="cleanup_failed"):
             module.materialize_candidate_runtime(candidate_root=candidate, freeze_manifest_path=frozen, work_root=work, output_path=output)
     assert runtime is not None and runtime.exists() and len(deleted) == 1 and attempts == 2
@@ -775,7 +788,7 @@ def test_scope_stops_owned_work_on_memory_or_accounting_loss(tmp_path: Path, mon
         if armed:
             if reason == "accounting":
                 raise ValueError("synthetic accounting loss")
-            return 0, 3 * 1024**3
+            return 0, runtime.OWNED_MEMORY_START_LIMIT_BYTES
         return original(scope)
     monkeypatch.setattr(runtime, "_owned_memory_sample", sample)
     async def exercise() -> None:
@@ -927,7 +940,7 @@ def test_explicit_stop_cannot_clear_an_already_latched_failure(tmp_path: Path, r
 def test_scope_refuses_unsafe_memory_headroom_before_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _module("evaluation.blinded_runtime")
     assert hasattr(runtime, "OwnedProcessScope"), "missing memory-gated scope"
-    monkeypatch.setattr(runtime, "_owned_memory_sample", lambda *args: (0, 3 * 1024**3))
+    monkeypatch.setattr(runtime, "_owned_memory_sample", lambda *args: (0, runtime.OWNED_MEMORY_START_LIMIT_BYTES))
     with pytest.raises(ValueError, match="memory"):
         _run_owned(tmp_path, "open('payload-ran','w').write('unsafe')")
     assert not (tmp_path / "payload-ran").exists()

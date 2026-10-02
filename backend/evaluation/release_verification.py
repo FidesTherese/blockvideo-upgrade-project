@@ -8,17 +8,21 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
-from evaluation import blinded_io, blinded_runtime, evidence_json, runtime_materialization as materialization
+from pydantic import RootModel
+
+from evaluation import blinded_io, blinded_runtime, runtime_materialization as materialization
 from evaluation.evidence_json import parse_canonical_model
 from evaluation.release_candidate import freeze
 from evaluation.release_candidate.contracts import FreezeManifest
@@ -30,6 +34,8 @@ from evaluation.smoke_contracts import (
     SmokeManifest,
     ToolExecutionBinding,
     VerificationManifest,
+    TOOL_RULES,
+    validate_tool_consistency,
 )
 from evaluation.tool_attestation import (
     FileFingerprint,
@@ -89,21 +95,27 @@ def _trusted_tool_root() -> Path:
 
 def _attest_verifier(root: Path) -> ToolAttestation:
     commit = validate_git_repository(root)
-    return attest_tool(repo_root=root, tool_name="d39_release_verifier", git_commit=commit, source_paths=VERIFIER_SOURCE_PATHS)
+    try:
+        return attest_tool(repo_root=root, tool_name="d39_release_verifier", git_commit=commit, source_paths=VERIFIER_SOURCE_PATHS)
+    except ValueError as error:
+        if str(error).startswith('working file does not match committed blob'):
+            raise ValueError('D39 committed bytes mismatch; require exact LF checkout') from None
+        raise
 
 
 def _scan_stream(stream: BinaryIO, counts: dict[str, int], maximum: int) -> int:
     size = 0
     overlap = b""
     counted_before = 0
-    while chunk := stream.read(65536):
+    chunk = stream.read(65536)
+    while chunk:
         size += len(chunk)
         if size > maximum:
             raise ValueError("public scan byte limit exceeded")
         window = overlap + chunk
         offset = size - len(window)
-        final = stream.peek(1) == b"" if hasattr(stream, "peek") else size == maximum
-        stable = size if final else max(0, size - 4096)
+        following = stream.read(65536)
+        stable = size if not following else max(0, size - 4096)
         for rule, pattern in _SCAN_PATTERNS:
             for match in pattern.finditer(window):
                 start = offset + match.start()
@@ -114,17 +126,9 @@ def _scan_stream(stream: BinaryIO, counts: dict[str, int], maximum: int) -> int:
                     continue
                 counts[rule] = min(_MAX_SCAN_COUNT, counts[rule] + 1)
         counted_before = stable
-        overlap = window[-4096:]
-    if counted_before < size:
-        offset = size - len(overlap)
-        for rule, pattern in _SCAN_PATTERNS:
-            for match in pattern.finditer(overlap):
-                if offset + match.start() < counted_before:
-                    continue
-                token = match.group()
-                if rule == "credential_token" and (token == b"AKIAIOSFODNN7EXAMPLE" or _EXAMPLE_PATTERN.fullmatch(token)):
-                    continue
-                counts[rule] = min(_MAX_SCAN_COUNT, counts[rule] + 1)
+        # Include the byte before the next uncounted start for the lookbehind.
+        overlap = window[-4097:]
+        chunk = following
     return size
 
 
@@ -172,6 +176,43 @@ def scan_public_files(root: Path, paths: tuple[str, ...], metadata: tuple[bytes,
     return counts
 
 
+def scan_candidate_commit(root: Path, commit: str, metadata: tuple[bytes, ...]) -> dict[str, int]:
+    """Scan the bound commit's entire tracked inventory, including freeze exclusions."""
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ValueError("public scan commit invalid")
+    process = subprocess.Popen(("git", "-c", "core.longpaths=true", "-C", str(root), "ls-tree", "-r", "-z", "--full-tree", commit),
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    timer = threading.Timer(30, process.kill)
+    timer.daemon = True
+    timer.start()
+    try:
+        assert process.stdout is not None
+        raw = process.stdout.read(_MAX_METADATA_BYTES + 1)
+        if len(raw) > _MAX_METADATA_BYTES:
+            raise ValueError("public scan inventory byte limit exceeded")
+        if process.wait(timeout=30) != 0:
+            raise ValueError("public scan inventory unavailable")
+    finally:
+        timer.cancel()
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+        if process.stdout is not None:
+            process.stdout.close()
+    paths: list[str] = []
+    for entry in raw.split(b"\0"):
+        if not entry:
+            continue
+        fields, name = entry.split(b"\t", 1)
+        mode, kind, _ = fields.split()
+        if mode not in {b"100644", b"100755"} or kind != b"blob":
+            raise ValueError("public tracked file must be regular")
+        paths.append(name.decode("utf-8", errors="strict"))
+        if len(paths) > 8192:
+            raise ValueError("public scan inventory limit exceeded")
+    return scan_public_files(root, tuple(paths), metadata)
+
+
 def build_group_environment(root: Path, *, python_executable: Path, node_executable: Path | None) -> dict[str, str]:
     """Construct a clean, group-contained low-concurrency environment from scratch."""
     root = materialization._directory(root)
@@ -198,7 +239,7 @@ def build_group_environment(root: Path, *, python_executable: Path, node_executa
         "UV_PYTHON": str(python_executable.absolute()), "UV_CONCURRENT_DOWNLOADS": "2", "UV_CONCURRENT_BUILDS": "1", "UV_CONCURRENT_INSTALLS": "1",
         "UV_PYTHON_DOWNLOADS": "never", "UV_NO_CONFIG": "1", "UV_NO_PROGRESS": "1",
         "NODE_OPTIONS": "--max-old-space-size=512", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
-        "PYTEST_ADDOPTS": "-o cache_dir=" + json.dumps((root / "pytest-cache").as_posix()),
+        "PYTEST_ADDOPTS": "-o " + shlex.quote("cache_dir=" + (root / "pytest-cache").as_posix()),
         "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1", "RAYON_NUM_THREADS": "1",
         "NPM_CONFIG_UPDATE_NOTIFIER": "false", "NPM_CONFIG_AUDIT": "false", "NPM_CONFIG_FUND": "false",
         "NPM_CONFIG_PRODUCTION": "false", "NPM_CONFIG_IGNORE_SCRIPTS": "true", "NPM_CONFIG_ENGINE_STRICT": "true",
@@ -224,11 +265,13 @@ class _ExecutionGroup:
         self.anchor: freeze._DirectoryAnchor | None = None
         self.source = self.root / "source"
         self.record = record
+        created: tuple[int, int] | None = None
         try:
             materialization._assert_directory(self.work, self.work_anchor)
-            self.root.mkdir(mode=0o700)
+            materialization._fs_path(self.root).mkdir(mode=0o700)
+            created = materialization._identity(materialization._fs_path(self.root).lstat())
             self.anchor = materialization._open_anchor(self.root)
-            self.source.mkdir(mode=0o700)
+            materialization._fs_path(self.source).mkdir(mode=0o700)
             tree = materialization._OwnedTree(self.source)
             try:
                 tree.guard = self.assert_owned
@@ -241,7 +284,13 @@ class _ExecutionGroup:
             try:
                 if self.anchor is not None:
                     self.cleanup()
+                elif created is not None:
+                    materialization._delete_owned_path(self.root, created, directory=True, parent_descriptor=self.work_anchor.descriptor)
+            except (OSError, ValueError):
+                raise _GroupCleanupFailed("owned group construction cleanup failed") from None
             finally:
+                if self.anchor is not None:
+                    freeze._close_directory_anchor(self.anchor)
                 freeze._close_directory_anchor(self.work_anchor)
             raise
 
@@ -257,7 +306,7 @@ class _ExecutionGroup:
         for expected in self.record.files:
             path = self.source / expected.path
             materialization._directory(path.parent)
-            size, digest = blinded_io.fingerprint_regular(path, maximum=_MAX_SOURCE_BYTES)
+            size, digest = blinded_io.fingerprint_regular(materialization._fs_path(path), maximum=_MAX_SOURCE_BYTES)
             files.append(FileFingerprint(path=expected.path, size=size, sha256=digest))
         return aggregate_fingerprints(files)
 
@@ -272,23 +321,30 @@ class _ExecutionGroup:
         freeze._close_directory_anchor(self.work_anchor)
 
 
-def _remove_group_directory(path: Path, anchor: freeze._DirectoryAnchor) -> None:
-    materialization._assert_directory(path, anchor)
+def _remove_group_directory(path: Path, anchor: freeze._DirectoryAnchor, *, _parents_verified: bool = False) -> None:
+    if not _parents_verified:
+        materialization._assert_directory(path, anchor)
+    def check() -> None:
+        before = materialization._fs_path(path).lstat()
+        if (not stat.S_ISDIR(before.st_mode) or blinded_io.is_reparse(before)
+                or materialization._identity(before) != anchor.identity
+                or materialization._anchor_identity(anchor) != anchor.identity):
+            raise ValueError("group directory identity lost")
+    check()
     inventory: list[tuple[str, os.stat_result]] = []
-    with os.scandir(path) as entries:
+    with os.scandir(materialization._fs_path(path)) as entries:
         for entry in entries:
             if len(inventory) >= 262144:
                 raise ValueError("group cleanup inventory exceeded")
-            materialization._assert_directory(path, anchor)
-            observed = (path / entry.name).lstat()
+            observed = materialization._fs_path(path / entry.name).lstat()
             if observed.st_ino <= 0:
                 raise ValueError("group child identity unavailable")
             inventory.append((entry.name, observed))
     for name, before in inventory:
-        materialization._assert_directory(path, anchor)
+        check()
         child = path / name
         expected = (materialization._identity(before), stat.S_IFMT(before.st_mode), blinded_io.is_reparse(before))
-        named = child.lstat()
+        named = materialization._fs_path(child).lstat()
         if (materialization._identity(named), stat.S_IFMT(named.st_mode), blinded_io.is_reparse(named)) != expected:
             raise ValueError("group child identity or type lost")
         if stat.S_ISDIR(before.st_mode) and not blinded_io.is_reparse(before):
@@ -296,7 +352,7 @@ def _remove_group_directory(path: Path, anchor: freeze._DirectoryAnchor) -> None
             try:
                 if nested.identity != expected[0] or materialization._directory_identity(child) != expected[0]:
                     raise ValueError("group child identity lost")
-                _remove_group_directory(child, nested)
+                _remove_group_directory(child, nested, _parents_verified=True)
             finally:
                 freeze._close_directory_anchor(nested)
         else:
@@ -307,34 +363,25 @@ def _remove_group_directory(path: Path, anchor: freeze._DirectoryAnchor) -> None
                     opened = materialization._descriptor_stat(descriptor)
                     if (materialization._identity(opened), stat.S_IFMT(opened.st_mode), blinded_io.is_reparse(opened)) != expected:
                         raise ValueError("group leaf changed before open")
-                named = child.lstat()
+                named = materialization._fs_path(child).lstat()
                 if (materialization._identity(named), stat.S_IFMT(named.st_mode), blinded_io.is_reparse(named)) != expected:
                     raise ValueError("group leaf identity or type lost")
-                if os.name == "nt" and stat.S_ISREG(before.st_mode) and not blinded_io.is_reparse(before):
-                    os.chmod(child, stat.S_IREAD | stat.S_IWRITE)
-                materialization._assert_directory(path, anchor)
+                if stat.S_ISREG(before.st_mode) and not blinded_io.is_reparse(before) and named.st_nlink != 1:
+                    raise ValueError("group leaf has an unowned hardlink")
+                check()
                 if descriptor >= 0:
                     os.close(descriptor)
                     descriptor = -1
-                named = child.lstat()
-                if (materialization._identity(named), stat.S_IFMT(named.st_mode), blinded_io.is_reparse(named)) != expected:
-                    raise ValueError("group leaf identity or type lost")
-                if anchor.descriptor is not None:
-                    os.unlink(name, dir_fd=anchor.descriptor)
-                elif stat.S_ISDIR(before.st_mode):
-                    child.rmdir()
-                else:
-                    child.unlink()
+                materialization._delete_owned_path(child, expected[0], directory=stat.S_ISDIR(before.st_mode),
+                                                  reparse=blinded_io.is_reparse(before), parent_descriptor=anchor.descriptor)
             finally:
                 if descriptor >= 0:
                     os.close(descriptor)
-    materialization._assert_directory(path, anchor)
-    if os.listdir(path):
+    check()
+    if os.listdir(materialization._fs_path(path)):
         raise ValueError("group cleanup has unexpected entries")
     freeze._close_directory_anchor(anchor)
-    if materialization._directory_identity(path) != anchor.identity:
-        raise ValueError("group directory identity lost")
-    path.rmdir()
+    materialization._delete_owned_path(path, anchor.identity, directory=True)
 
 
 def _read_smoke(path: Path, record: RuntimeMaterialization, digest: str) -> tuple[SmokeManifest, str]:
@@ -350,35 +397,9 @@ def _read_smoke(path: Path, record: RuntimeMaterialization, digest: str) -> tupl
 
 
 def _validate_smoke_tools(smoke: SmokeManifest) -> None:
-    specifications = {
-        "python_bootstrap": ("3.12.12", "tools/python_bootstrap", None),
-        "python": ("3.12.12", "tools/python_sandbox", None),
-        "uv": ("0.12.15", "tools/python_bootstrap", "tools/uv_module"),
-        "node": ("24.11.1", "tools/node", None), "npx": (None, "tools/node", "tools/npx_cli"),
-        "pnpm": ("10.18.3", "tools/node", "tools/pnpm_cjs"),
-        "chrome": (None, "tools/chrome", None), "ffmpeg": (None, "tools/ffmpeg", None), "ffprobe": (None, "tools/ffprobe", None),
-        "websockets": ("16.1.1", "tools/python_sandbox", "tools/websockets_module"),
-    }
-    seen: dict[str, FileFingerprint] = {}
-    for receipt in smoke.stage_receipts:
-        required = {"node", "npx", "pnpm", "python", "python_bootstrap", "uv"}
-        required.update({"chrome", "websockets"} if receipt.stage == "browser" else {"ffmpeg", "ffprobe"} if receipt.stage == "ffmpeg" else set())
-        if {item.role for item in receipt.tools} != required:
-            raise ValueError("smoke native role inventory mismatch")
-        for item in receipt.tools:
-            version, executable, launcher = specifications[item.role]
-            if item.executable.path != executable or (version is not None and item.version != version) or (launcher is None) != (item.launcher is None) or (item.launcher is not None and item.launcher.path != launcher):
-                raise ValueError("smoke native binding mismatch")
-            if item.role == "npx" and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", item.version) is None:
-                raise ValueError("smoke npm version must be observed")
-            for blob in (item.executable, item.launcher):
-                if blob is None:
-                    continue
-                if blob.size > _MAX_TOOL_BYTES or (blob.path in seen and seen[blob.path] != blob):
-                    raise ValueError("smoke tool size or fingerprint mismatch")
-                seen[blob.path] = blob
-    if sum(item.size for item in seen.values()) > 1024 * 1024 * 1024:
-        raise ValueError("smoke tool aggregate limit exceeded")
+    # The public contracts enforce the same rules for the offline D40 reader.
+    smoke.complete_smoke()
+    validate_tool_consistency(tuple(tool for receipt in smoke.stage_receipts for tool in receipt.tools))
 
 
 def _publish_verification(output: Path, manifest_bytes: bytes, attestation_bytes: bytes) -> None:
@@ -539,7 +560,11 @@ def verify_release_candidate(*, candidate_root: Path, freeze_manifest_path: Path
         clean_before = True
         materialization.read_materialized_runtime(runtime_root=runtime, work_root=work, materialization_path=materialization_path, expected_materialization_sha256=expected_materialization_sha256)
         smoke, smoke_digest = _read_smoke(smoke_manifest_path, record, expected_materialization_sha256)
-        counts = scan_public_files(candidate, tuple(item.path for item in record.files), (canonical_json_bytes(record) + b"\n", canonical_json_bytes(smoke) + b"\n", canonical_json_bytes(attestation) + b"\n"))
+        if smoke.producer_tool_sha256 != attestation.aggregate_sha256:
+            smoke = None
+            smoke_digest = None
+            raise ValueError("smoke producer attestation mismatch")
+        counts = scan_candidate_commit(candidate, record.git_commit, (canonical_json_bytes(record) + b"\n", canonical_json_bytes(smoke) + b"\n", canonical_json_bytes(attestation) + b"\n"))
         for rule in SCAN_RULE_IDS:
             print(rule + "=" + str(counts[rule]))
         scan_passed = not any(counts.values())
@@ -556,8 +581,8 @@ def verify_release_candidate(*, candidate_root: Path, freeze_manifest_path: Path
         try:
             after = freeze._snapshot_tree(candidate)
             frozen, freeze_digest, snapshot = materialization._freeze_inputs(candidate, freeze_manifest_path.absolute())
-            clean_after = True
             _candidate_binding(frozen, freeze_digest, snapshot, record)
+            clean_after = True
         except (OSError, ValueError, subprocess.SubprocessError):
             failed = True
         try:
@@ -589,13 +614,16 @@ _BACKEND_IMPORTS: tuple[str, ...] = (
     "pytest", "pytest_asyncio", "mypy", "ruff", "numpy", "onnxruntime", "tokenizers",
 )
 _PYTHON_PROBE = (
-    "import importlib,importlib.metadata,json,sys; "
-    "names=json.loads(sys.argv[1]); modules={n:importlib.import_module(n) for n in names}; "
+    "import importlib,importlib.util,importlib.metadata,json,sys; "
+    "names=json.loads(sys.argv[1]); modules={n:importlib.util.find_spec(n) for n in names}; "
+    "distributions={'PIL':'Pillow','yaml':'PyYAML'}; "
     "data={'version':'.'.join(map(str,sys.version_info[:3])),'executable':sys.executable,"
     "'prefix':sys.prefix,'base_prefix':sys.base_prefix,'base_executable':sys._base_executable,"
-    "'origins':{n:m.__file__ for n,m in modules.items()}}; "
+    "'origins':{n:m.origin if m else None for n,m in modules.items()},"
+    "'locations':{n:list(m.submodule_search_locations or ()) if m else [] for n,m in modules.items()},"
+    "'versions':{n:importlib.metadata.version(distributions.get(n,n)) for n in names}}; "
     "data.update({'uv_version':importlib.metadata.version('uv'),'uv_main':importlib.util.find_spec('uv.__main__').origin,"
-    "'uv_binary':modules['uv'].find_uv_bin()}) if 'uv' in modules else None; print(json.dumps(data))"
+    "'uv_binary':importlib.import_module('uv').find_uv_bin()}) if 'uv' in modules else None; print(json.dumps(data))"
 )
 
 
@@ -610,6 +638,7 @@ class _ToolSet:
     bindings: tuple[ToolExecutionBinding, ...]
     files: tuple[tuple[Path, FileFingerprint], ...]
     base_prefix: Path | None = None
+    media_bindings: tuple[ToolExecutionBinding, ...] = ()
 
     def verify(self) -> None:
         if not self.files or not self.bindings or self.executable.suffix.lower() in {".cmd", ".bat", ".py", ".ps1", ".sh"}:
@@ -639,7 +668,7 @@ def _native_path(path: Path) -> Path:
 
 def _tool_file(path: Path, alias: str) -> FileFingerprint:
     materialization._directory(path.absolute().parent)
-    size, digest = blinded_io.fingerprint_regular(path.absolute(), maximum=_MAX_TOOL_BYTES)
+    size, digest = blinded_io.fingerprint_regular(materialization._fs_path(path.absolute()), maximum=_MAX_TOOL_BYTES)
     return FileFingerprint(path=alias, size=size, sha256=digest)
 
 
@@ -674,10 +703,18 @@ async def _probe(scope: blinded_runtime.OwnedProcessScope, group: _ExecutionGrou
 def _probe_json(raw: bytes) -> dict[str, object]:
     if type(raw) is not bytes or len(raw) > 65536:
         raise ValueError("native probe byte limit exceeded")
-    evidence_json._check_lexical_limits(raw)
     try:
-        result = json.loads(raw, object_pairs_hook=evidence_json._unique_object, parse_constant=evidence_json._reject_constant)
-        evidence_json._check_values(result)
+        text = raw.decode("utf-8", errors="strict")
+        try:
+            parsed = parse_canonical_model(raw, RootModel[dict[str, object]], maximum=65536)
+        except ValueError as error:
+            # This public-parser error is emitted only after lexical, duplicate,
+            # finite-value and UTF-8 validation. Other refusals stay terminal.
+            if str(error) != "evidence is not canonical":
+                raise
+            normalized = canonical_json_bytes(json.loads(text)) + b"\n"
+            parsed = parse_canonical_model(normalized, RootModel[dict[str, object]], maximum=65536)
+        result = parsed.root
     except (ValueError, TypeError, UnicodeError, OverflowError, RecursionError):
         raise ValueError("native probe malformed output") from None
     if type(result) is not dict:
@@ -686,7 +723,7 @@ def _probe_json(raw: bytes) -> dict[str, object]:
 
 
 def _validate_python_probe(data: dict[str, object], *, executable: Path, base_executable: Path, environment: Path | None, required: tuple[str, ...]) -> None:
-    if data.get("version") != "3.12.12":
+    if data.get("version") != TOOL_RULES["python"][0]:
         raise ValueError("Python version mismatch")
     for key, expected in (("executable", executable), ("base_executable", base_executable)):
         value = data.get(key)
@@ -709,10 +746,25 @@ def _validate_python_probe(data: dict[str, object], *, executable: Path, base_ex
     allowed = Path(prefix).absolute()
     if environment is not None:
         allowed = environment.absolute() / ("Lib/site-packages" if os.name == "nt" else "lib/python3.12/site-packages")
+    locations = data.get("locations")
+    versions = data.get("versions")
+    if type(locations) is not dict or set(locations) != set(required) or type(versions) is not dict or set(versions) != set(required) or any(type(value) is not str or not value or len(value) > 128 for value in versions.values()):
+        raise ValueError("Python package metadata missing")
     for name in required:
         origin = origins[name]
-        if type(origin) is not str or not Path(origin).absolute().is_relative_to(allowed):
+        search = locations.get(name, [])
+        if type(search) is not list or any(type(value) is not str or not Path(value).absolute().is_relative_to(allowed) for value in search):
             raise ValueError("Python package outside verified environment")
+        if (origin is None and not search) or (origin is not None and (type(origin) is not str or not Path(origin).absolute().is_relative_to(allowed))):
+            raise ValueError("Python package outside verified environment")
+
+
+def _parse_uv_version(raw: bytes) -> str:
+    triple = rb"[A-Za-z0-9_]{1,24}(?:-[A-Za-z0-9_.]{1,24}){2,4}"
+    revision = rb"[a-f0-9]{7,40} [0-9]{4}-[0-9]{2}-[0-9]{2}"
+    if len(raw) > 256 or re.fullmatch(rb"uv " + re.escape(TOOL_RULES['uv'][0].encode('ascii')) + rb"(?: \((?:" + revision + rb"(?: " + triple + rb")?|" + triple + rb")\))?", raw.strip()) is None:
+        raise ValueError("uv native version mismatch")
+    return TOOL_RULES["uv"][0]
 
 
 async def _bootstrap_python(scope: blinded_runtime.OwnedProcessScope, group: _ExecutionGroup, env: dict[str, str]) -> _ToolSet:
@@ -720,7 +772,7 @@ async def _bootstrap_python(scope: blinded_runtime.OwnedProcessScope, group: _Ex
     fingerprint = await asyncio.to_thread(_native_file, executable, "tools/python_bootstrap")
     data = _probe_json(await _probe(scope, group, (str(executable), "-I", "-B", "-c", _PYTHON_PROBE, '["uv"]'), env))
     _validate_python_probe(data, executable=executable, base_executable=executable, environment=None, required=("uv",))
-    if data.get("uv_version") != "0.12.15":
+    if data.get("uv_version") != TOOL_RULES["uv"][0]:
         raise ValueError("uv version mismatch")
     files: list[tuple[Path, FileFingerprint]] = [(executable, fingerprint)]
     origins = data["origins"]
@@ -736,11 +788,10 @@ async def _bootstrap_python(scope: blinded_runtime.OwnedProcessScope, group: _Ex
     init = Path(str(origins["uv"]))
     files.extend(((main, module), (init, await asyncio.to_thread(_tool_file, init, "tools/uv_init")), (binary, await asyncio.to_thread(_native_file, binary, "tools/uv_binary"))))
     version = await _probe(scope, group, (str(binary), "--version"), env)
-    if re.fullmatch(rb"uv 0\.12\.15(?: \([A-Za-z0-9 .-]{1,128}\))?", version.strip()) is None:
-        raise ValueError("uv native version mismatch")
+    _parse_uv_version(version)
     bindings = (
-        ToolExecutionBinding(role="python_bootstrap", version="3.12.12", executable=fingerprint, launcher=None),
-        ToolExecutionBinding(role="uv", version="0.12.15", executable=fingerprint, launcher=module),
+        ToolExecutionBinding(role="python_bootstrap", version=TOOL_RULES["python"][0], executable=fingerprint, launcher=None),
+        ToolExecutionBinding(role="uv", version=TOOL_RULES["uv"][0], executable=fingerprint, launcher=module),
     )
     result = _ToolSet(executable, None, bindings, tuple(files), Path(str(data["base_prefix"])))
     await asyncio.to_thread(result.verify)
@@ -749,7 +800,11 @@ async def _bootstrap_python(scope: blinded_runtime.OwnedProcessScope, group: _Ex
 
 async def _sandbox_python(scope: blinded_runtime.OwnedProcessScope, group: _ExecutionGroup, env: dict[str, str], bootstrap: _ToolSet) -> _ToolSet:
     environment = group.root / "env"
+    config_fp = await asyncio.to_thread(_tool_file, environment / "pyvenv.cfg", "tools/python_environment_config")
+    base_fp = await asyncio.to_thread(_native_file, bootstrap.executable, "tools/python_base")
     config = blinded_io.read_regular(environment / "pyvenv.cfg", maximum=4096)
+    if (len(config), hashlib.sha256(config).hexdigest()) != (config_fp.size, config_fp.sha256):
+        raise ValueError("sandbox configuration changed before probe")
     if re.search(rb"(?m)^include-system-site-packages\s*=\s*false\s*$", config) is None:
         raise ValueError("sandbox Python must exclude global site packages")
     executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -767,10 +822,13 @@ async def _sandbox_python(scope: blinded_runtime.OwnedProcessScope, group: _Exec
     origins = data["origins"]
     assert isinstance(origins, dict)
     for origin in origins.values():
+        if origin is None:
+            continue  # Namespace search locations were checked by the probe validator.
         materialization._directory(Path(str(origin)).parent)
         await asyncio.to_thread(blinded_io.fingerprint_regular, Path(str(origin)), maximum=_MAX_TOOL_BYTES)
     native_target = executable.resolve(strict=True) if os.name != "nt" else executable
-    result = _ToolSet(executable, None, (ToolExecutionBinding(role="python", version="3.12.12", executable=fingerprint, launcher=None),), ((native_target, fingerprint),))
+    result = _ToolSet(executable, None, (ToolExecutionBinding(role="python", version=TOOL_RULES["python"][0], executable=fingerprint, launcher=None),),
+                      ((native_target, fingerprint), (environment / "pyvenv.cfg", config_fp), (bootstrap.executable, base_fp)))
     await asyncio.to_thread(result.verify)
     await asyncio.to_thread(bootstrap.verify)
     return result
@@ -798,7 +856,7 @@ def _pnpm_package(group: _ExecutionGroup) -> tuple[Path, Path]:
                 continue
             materialization._directory(package.parent)
             data = _probe_json(blinded_io.read_regular(package, maximum=65536))
-            if data.get("name") == "pnpm" and data.get("version") == "10.18.3":
+            if data.get("name") == "pnpm" and data.get("version") == TOOL_RULES["pnpm"][0]:
                 selected.append((package, package.parent / "bin" / "pnpm.cjs"))
     if len(selected) != 1:
         raise ValueError("pinned pnpm launcher origin ambiguous or absent")
@@ -816,7 +874,7 @@ async def _frontend_tools(scope: blinded_runtime.OwnedProcessScope, group: _Exec
     launcher = await asyncio.to_thread(_tool_file, npx, "tools/npx_cli")
     initial = ((executable, node), (npx, launcher), (package, await asyncio.to_thread(_tool_file, package, "tools/npm_package")))
     data = _probe_json(await _probe(scope, group, (str(executable), "-e", "console.log(JSON.stringify({version:process.versions.node,executable:process.execPath}))"), env))
-    if data.get("version") != "24.11.1" or type(data.get("executable")) is not str or Path(str(data["executable"])) != executable:
+    if data.get("version") != TOOL_RULES["node"][0] or type(data.get("executable")) is not str or Path(str(data["executable"])) != executable:
         raise ValueError("Node native origin or version mismatch")
     if (await _probe(scope, group, (str(executable), str(npx), "--version"), env)).strip().decode("ascii") != npm["version"]:
         raise ValueError("npx version mismatch")
@@ -827,17 +885,19 @@ async def _frontend_tools(scope: blinded_runtime.OwnedProcessScope, group: _Exec
         "child-concurrency=1\nnetwork-concurrency=2\nengine-strict=true\nignore-scripts=true\n"
     ).encode("utf-8")
     blinded_io.write_exclusive(group.source / "frontend" / ".npmrc", npmrc)
-    if (await _probe(scope, group, (str(executable), str(npx), "-y", "pnpm@10.18.3", "--version"), env)).strip() != b"10.18.3":
+    if (await _probe(scope, group, (str(executable), str(npx), "-y", "pnpm@" + TOOL_RULES["pnpm"][0], "--version"), env)).strip() != TOOL_RULES["pnpm"][0].encode("ascii"):
         raise ValueError("pinned pnpm bootstrap version mismatch")
     pnpm_package, pnpm = await asyncio.to_thread(_pnpm_package, group)
     pnpm_launcher = await asyncio.to_thread(_tool_file, pnpm, "tools/pnpm_cjs")
-    if (await _probe(scope, group, (str(executable), str(pnpm), "--version"), env)).strip() != b"10.18.3":
+    implementation = pnpm_package.parent / "dist" / "pnpm.cjs"
+    implementation_fp = await asyncio.to_thread(_tool_file, implementation, "tools/pnpm_implementation")
+    if (await _probe(scope, group, (str(executable), str(pnpm), "--version"), env)).strip() != TOOL_RULES["pnpm"][0].encode("ascii"):
         raise ValueError("pinned pnpm native launcher failed")
     result = _ToolSet(executable, npx, (
-        ToolExecutionBinding(role="node", version="24.11.1", executable=node, launcher=None),
+        ToolExecutionBinding(role="node", version=TOOL_RULES["node"][0], executable=node, launcher=None),
         ToolExecutionBinding(role="npx", version=str(npm["version"]), executable=node, launcher=launcher),
-        ToolExecutionBinding(role="pnpm", version="10.18.3", executable=node, launcher=pnpm_launcher),
-    ), (*initial, (pnpm, pnpm_launcher), (pnpm_package, await asyncio.to_thread(_tool_file, pnpm_package, "tools/pnpm_package"))))
+        ToolExecutionBinding(role="pnpm", version=TOOL_RULES["pnpm"][0], executable=node, launcher=pnpm_launcher),
+    ), (*initial, (pnpm, pnpm_launcher), (implementation, implementation_fp), (pnpm_package, await asyncio.to_thread(_tool_file, pnpm_package, "tools/pnpm_package"))))
     await asyncio.to_thread(result.verify)
     return result
 
@@ -847,10 +907,74 @@ async def _esbuild_preflight(scope: blinded_runtime.OwnedProcessScope, group: _E
     versions = set(re.findall(rb"(?m)^  esbuild@([0-9]+\.[0-9]+\.[0-9]+):", lock))
     if len(versions) != 1:
         raise ValueError("locked esbuild version ambiguous or absent")
-    script = "const p=require('node:path');const e=require(p.join(process.argv[1],'node_modules/esbuild'));const r=e.transformSync('const d39 = 1;', {loader:'js'});if(!r.code.includes('d39'))process.exit(2);console.log(e.version)"
+    script = (
+        "const p=require('node:path'),fs=require('node:fs'),{createRequire}=require('node:module');"
+        "const root=fs.realpathSync(p.join(process.argv[1],'node_modules'));"
+        "const inside=x=>{const r=p.relative(root,fs.realpathSync(x));if(r==='..'||r.startsWith('..'+p.sep)||p.isAbsolute(r))throw Error('origin');};"
+        "const vite=require.resolve('vite/package.json',{paths:[process.argv[1]]});inside(vite);"
+        "const req=createRequire(vite);inside(req.resolve('esbuild'));"
+        "const e=req('esbuild');const r=e.transformSync('const d39 = 1;', {loader:'js'});"
+        "if(!r.code.includes('d39'))process.exit(2);console.log(e.version)"
+    )
     raw = await _probe(scope, group, (str(tools.executable), "-e", script, str(group.source / "frontend")), env)
     if raw.strip() != next(iter(versions)):
         raise ValueError("native esbuild does not match frozen lock")
+
+
+async def _frontend_preflight(scope: blinded_runtime.OwnedProcessScope, group: _ExecutionGroup, tools: _ToolSet, env: dict[str, str]) -> None:
+    for name in ('pnpm', 'pnpm.cmd', 'pnpm.exe'):
+        if os.path.lexists(materialization._fs_path(group.source / 'frontend/node_modules/.bin' / name)):
+            raise ValueError('local pnpm could shadow pinned launcher')
+    await _esbuild_preflight(scope, group, tools, env)
+
+
+async def _close_group(group: _ExecutionGroup, scope: blinded_runtime.OwnedProcessScope, entered: bool) -> None:
+    failed = False
+    source_error: Exception | None = None
+    try:
+        try:
+            if entered:
+                await asyncio.shield(scope.close())
+        except (OSError, ValueError):
+            failed = True
+        try:
+            await asyncio.to_thread(group.assert_source)
+        except (OSError, ValueError) as error:
+            source_error = error
+        finally:
+            await asyncio.to_thread(group.cleanup)
+        if failed:
+            raise ValueError('owned scope cleanup failed')
+    except (OSError, ValueError):
+        raise _GroupCleanupFailed('owned group cleanup failed') from None
+    finally:
+        if group.anchor is not None:
+            freeze._close_directory_anchor(group.anchor)
+        freeze._close_directory_anchor(group.work_anchor)
+    if source_error is not None:
+        raise source_error
+
+
+async def _backend_media(scope: blinded_runtime.OwnedProcessScope, group: _ExecutionGroup, tools: _ToolSet, env: dict[str, str]) -> _ToolSet:
+    files = list(tools.files)
+    bindings = []
+    directories = []
+    for role in ('ffmpeg', 'ffprobe'):
+        found = shutil.which(role)
+        if found is None:
+            raise ValueError('backend media coverage prerequisite missing')
+        executable = await asyncio.to_thread(_native_path, Path(found))
+        fingerprint = await asyncio.to_thread(_native_file, executable, 'tools/' + role)
+        version = (await _probe(scope, group, (str(executable), '-version'), env)).decode('utf-8').splitlines()[0]
+        bindings.append(ToolExecutionBinding(role=role, version=version, executable=fingerprint, launcher=None))
+        files.append((executable, fingerprint))
+        directories.append(str(executable.parent))
+    env['PATH'] = os.pathsep.join((*dict.fromkeys(directories), env['PATH']))
+    for role, (executable, _) in zip(('ffmpeg', 'ffprobe'), files[-2:], strict=True):
+        selected = shutil.which(role, path=env['PATH'])
+        if selected is None or _native_path(Path(selected)) != executable:
+            raise ValueError('backend media PATH binding mismatch')
+    return replace(tools, files=tuple(files), media_bindings=tuple(bindings))
 
 
 def _command_target(index: int, tools: _ToolSet) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -876,7 +1000,9 @@ async def _execute_command(*, index: int, group: _ExecutionGroup, scope: blinded
     CommandEvidence(name=name, argv=canonical, resolved_argv=aliases, tool_bindings=tools.bindings, cwd=cwd, deadline_seconds=D39_COMMAND_DEADLINES[index], outcome="launch_failed", exit_code=None, started_at=timestamp, finished_at=timestamp, stdout_size=0, stderr_size=0, stdout_sha256=hashlib.sha256(b"").hexdigest(), stderr_sha256=hashlib.sha256(b"").hexdigest())
     environment = {**env, "PYTHONSAFEPATH": "1"} if index == 0 else env
     observed = await blinded_runtime.run_owned_command(scope=scope, argv=argv, cwd=group.source / cwd, env=environment, stdout_path=group.root / (name + ".out"), stderr_path=group.root / (name + ".err"), deadline_seconds=D39_COMMAND_DEADLINES[index])
-    result = CommandEvidence(name=name, argv=canonical, resolved_argv=aliases, tool_bindings=tools.bindings, cwd=cwd, deadline_seconds=D39_COMMAND_DEADLINES[index], **observed.__dict__)
+    fields = dict(observed.__dict__)
+    fields['finished_at'] = max(fields['started_at'], fields['finished_at'])
+    result = CommandEvidence(name=name, argv=canonical, resolved_argv=aliases, tool_bindings=tools.bindings, media_tools=tools.media_bindings if index == 2 else (), cwd=cwd, deadline_seconds=D39_COMMAND_DEADLINES[index], **fields)
     commands.append(result)
     await asyncio.to_thread(group.assert_source)
     await asyncio.to_thread(tools.verify)
@@ -919,29 +1045,17 @@ async def _run_inventory(*, candidate: Path, runtime: Path, work: Path, path: Pa
                 assert node is not None
                 tools = await _frontend_tools(scope, group, env, node)
             for index in indices:
-                await boundary()
-                result = await _execute_command(index=index, group=group, scope=scope, tools=tools, env=env, commands=commands)
-                await boundary()
+                selected = await _backend_media(scope, group, tools, env) if index == 2 else tools
+                result = await _execute_command(index=index, group=group, scope=scope, tools=selected, env=env, commands=commands)
                 if result.outcome != "completed" or result.exit_code != 0:
                     raise ValueError("verification command failed")
                 if index == 0:
                     tools = await _sandbox_python(scope, group, env, tools)
                 elif index == 5:
-                    if (group.source / "frontend" / "node_modules" / ".bin" / ("pnpm.cmd" if os.name == "nt" else "pnpm")).exists():
-                        raise ValueError("local pnpm could shadow pinned launcher")
-                    await _esbuild_preflight(scope, group, tools, env)
+                    await _frontend_preflight(scope, group, tools, env)
             await asyncio.to_thread(group.assert_source)
         finally:
-            try:
-                if entered:
-                    await asyncio.shield(scope.close())
-                await asyncio.to_thread(group.cleanup)
-            except (OSError, ValueError):
-                raise _GroupCleanupFailed("owned group cleanup failed") from None
-            finally:
-                if group.anchor is not None:
-                    freeze._close_directory_anchor(group.anchor)
-                freeze._close_directory_anchor(group.work_anchor)
+            await _close_group(group, scope, entered)
         await boundary()
 
 

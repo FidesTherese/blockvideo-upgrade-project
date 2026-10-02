@@ -4,16 +4,16 @@
 
 ### Document control
 
-- **Status:** D38 tooling independently approved; D39–D40 contracts implementation-ready after scoped DTD preflight
+- **Status:** D38 tooling independently approved; D39 implemented with review corrections; D40 pending
 - **Delivery mode:** High-Risk for D31 security, D32 concurrency, D34 migration,
   and D37–D40 tooling integrity, privacy, and resource ownership
 - **Specification:** `specification.md`, `docs/plan-c/work-unit-31.md` through
   `docs/plan-c/work-unit-40.md`
 - **DTD:** `docs/DTD.md`
-- **Updated:** 2026-10-01 (host time; audit began 2026-09-30)
+- **Updated:** 2026-10-02 (D39 review corrections)
 - **Scope:** sequential hardening, blinded evaluation, and release-readiness decision.
-  D38 aggregate import is implemented and synthetically verified only; D39–D40
-  remain design-only. No real aggregate acceptance or readiness approval is inferred.
+  D38 aggregate import and D39 verification/smoke tooling are implemented with
+  synthetic verification; D40 remains pending. No real aggregate acceptance or readiness approval is inferred.
 - **Blocked facts:** D39 clean extras installation and its native launcher/browser
   roundtrip remain unverified. D37 already proved pinned-D35 synthetic stateful/worker
   behavior; that historical proof is not D39 fresh-sandbox or 4 GiB acceptance.
@@ -366,14 +366,16 @@ regression bounds actual equality operations without a wall-clock threshold; nam
 fields, equations, and thresholds stay unchanged. Maximum-size model parsing is not
 yet an operational acceptance claim.
 
-The user's revised project budget is hard aggregate RAM <=4 GiB, including the
-agent/controller runtime and every owned descendant. Follow `AGENTS.md`'s 3 GiB
-target and 3.5 GiB no-start threshold; reserve headroom and measure working sets
+At this historical D37 checkpoint the budget was aggregate RAM <=4 GiB, with a
+3 GiB target and 3.5 GiB no-start threshold. The user's 2026-10-02 instruction
+supersedes that project/D39 budget with 16 GiB / 12 GiB / 14 GiB respectively; it does
+not alter D37 public APIs or recertify historical results. Include the
+agent/controller runtime and every owned descendant; measure working sets
 before and during execution. Run one command/smoke group, pytest/Vitest worker or
 compiler child at a time, with NumPy/ONNX thread limits of one. Bound input/output
 and stop only owned jobs before the hard cap; every child has an owner and teardown
-deadline. Earlier 16 GiB verification is historical, not evidence of compliance
-with this stricter budget. Do not reload a whole tree or repeat maximum-size probes
+deadline. Earlier 16 GiB verification is historical, not evidence that the
+current run meets these accounting and ownership requirements. Do not reload a whole tree or repeat maximum-size probes
 when a targeted check suffices.
 
 #### Executable-probe blueprint and acceptance checklist (D37 orders 1–2 and 5 implemented)
@@ -2123,13 +2125,81 @@ replace per-command argv, cwd alias, exit code, timestamps, or bounded stdout/st
 hashes. The verifier also proves the original candidate and immutable runtime remain
 unchanged.
 
-#### D39 implementation precision and 4 GiB ownership envelope
+#### D39 implementation precision and 16 GiB ownership envelope
 
-Task 1 implementation checkpoint: the pure contracts, separate materializer/cleanup
-CLI and additive owned-process APIs are independently approved. Task 2 adds the fixed
+#### D39 review amendments (2026-10-02)
+
+These narrow amendments correct the reviewed mechanisms. They do not approve D35,
+change the pinned lane or waive an acceptance gate. The later explicit user instruction
+raises the resource budget below; that authorization supersedes the original 4 GiB constraint.
+
+- **B1 — owned memory:** identify the agent through the controller's ancestry.
+  An optional `agent_pid` must identify an ancestor in the fixed image set
+  `codex/claude/node/chatgpt`; otherwise select the top contiguous agent ancestor
+  and count its descendant tree, the controller tree and owned Jobs/sessions.
+  Do not count explorer, unrelated applications or system services. Reserve 1 GiB
+  only for missing/unreadable agent accounting; unreadable owned accounting fails.
+  Cache Win32 functions and sample off the event loop at <=250 ms. The user
+  subsequently authorized 16 GiB / 14 GiB / 12 GiB thresholds. Keep the per-group Job cap at 1536 MiB, minimum at 768 MiB, and safety reserve at 512 MiB;
+  only aggregate headroom changes in the formula below.
+- **B5 — owned browser version:** hash the installed native executable before and
+  after use; obtain `Browser.getVersion.product` from the owned profile/CDP session.
+  Never launch Chrome with bare `--version`. Missing browser remains a prerequisite failure.
+- **B7 — keyboard evidence:** permit Enter keyDown `text="\r"` and
+  `windowsVirtualKeyCode=13`, with keyUp. Tab from the preceding visible focusable
+  element must reach the retry control. Run duplicate Enter independently at both
+  measured widths using distinct seeded retry projects. `duplicate_post_count` is
+  the maximum of the two actual backend counter deltas; `keyboard_ok` also requires
+  each delta to equal one. Every required journey runs at both widths, with settled
+  history controls and overflow measured against `documentElement.clientWidth`.
+- **I3 — media observations:** the external candidate bootstrap wraps native FFmpeg
+  subprocess waits without editing candidate files. Require at least one observed
+  FFmpeg invocation, all zero for pass; otherwise record the first nonzero code or
+  null when none completed. Read fake-provider selection from the persisted project.
+  Test FFprobe return code before duration parsing. `duration_ms` permits null only
+  when unavailable in failed evidence; passing still requires 1–60,000 ms and both
+  exits zero. Missing media never creates invented media fingerprints.
+- **I6 — shared contracts:** one immutable role/version/alias table in
+  `smoke_contracts` governs both drivers and all command/receipt/manifest validators,
+  including observed semver npx and cross-receipt identities. Documentation checks
+  are a strict frozen six-boolean model retaining the JSON object shape. Failed
+  browser receipts may retain measured widths 1–7680; passed receipts still require
+  exactly 390 and 1440. Existing valid observations retain their canonical shape
+  except the explicit M7/M11 additions; new evidence must be regenerated.
+- **M7 — backend media coverage:** before backend_pytest, resolve/hash/version the
+  installed native FFmpeg and FFprobe, prepend only their verified directories to
+  the rebuilt PATH, and verify discovery selects those exact files. Rehash around
+  the command. `CommandEvidence.media_tools` is the exact sorted ffmpeg/ffprobe
+  tuple for completed backend_pytest and empty for other commands. Missing tools
+  stop the attempted prefix; completed/0 cannot conceal absent media coverage.
+- **M11 — producer binding:** `SmokeManifest.producer_tool_sha256` is required and
+  equals the producing D39 attestation aggregate. Both the verifier and pure
+  `VerificationManifest` validation require equality with `verifier_tool_sha256`.
+  Earlier smoke evidence cannot be promoted under different tooling.
+
+Operator-created candidate checkouts must preserve committed LF bytes, for example
+`git -c core.autocrlf=false clone ...`, with local `core.autocrlf=false` before
+checkout. Tools do not normalize bytes or create candidate checkouts. A byte
+mismatch is a fixed redacted refusal; detached hashes and raw fingerprints remain
+exact. The repository `.gitattributes` controls new tooling checkouts only, and
+does not modify the frozen D35 tree.
+
+The user initially authorized an 8 GiB development exception, then explicitly
+requested 8 GiB for D39 operations, then raised the shared ceiling to **16 GiB**
+on 2026-10-02 to include Codex and the test controller. Both development and
+operations now use a 16 GiB aggregate ceiling, 14 GiB no-start/owned-stop threshold
+and 12 GiB target. This is an authorized policy amendment, not evidence that the old
+4 GiB lane passed. Earlier measurements and incomplete synthetic-agent runs remain
+historical; the work report distinguishes them from actual-host 16 GiB reruns.
+
+#### D39 implementation checkpoint after review amendments
+
+At the earlier Task 1 checkpoint, the pure contracts, separate materializer/cleanup
+CLI and additive owned-process APIs were independently approved. The current review
+corrections require fresh independent review. Task 2 adds the fixed
 nine-command driver, native origins/environment/scanner and verifier CLI; it imports
-these contracts/constants unchanged. Smoke/browser entry points remain deferred to
-Task 3, and live full-closure attestation/operational acceptance remain blocked. Windows native gate, Job, filesystem and failure
+these shared contracts/constants. Task 3 smoke/browser entry points are implemented;
+fresh full-closure attestation/operational acceptance remain blocked. Windows native gate, Job, filesystem and failure
 checks use synthetic fixtures, not the actual D35 acceptance lane. The trusted gate
 uses native base Python before assignment; a Windows venv redirector may spawn its
 interpreter before it can be assigned. File/directory ownership uses full native
@@ -2194,10 +2264,10 @@ session/group absence. Keep existing D37 host API behavior compatible.
 
 Include the agent/controller and all out-of-group owned resident memory B. Reserve
 1 GiB if agent runtime cannot be sampled. Group committed-memory limit is
-`min(1536 MiB, 3072 MiB - B - 512 MiB)`; refuse a full execution group below
-768 MiB or projected aggregate above 3 GiB. Measure group and outside resident memory
-at intervals <=250 ms; lost owned accounting or aggregate >=3 GiB stops owned work.
-Never start at >=3.5 GiB, and never exceed the user's 4 GiB ceiling. Windows Job
+`min(1536 MiB, 14336 MiB - B - 512 MiB)`; refuse a full execution group below
+768 MiB or projected aggregate above 14 GiB. Measure group and outside resident memory
+at intervals <=250 ms; lost owned accounting or aggregate >=14 GiB stops owned work.
+Never start at >=14 GiB, and never exceed the user's 16 GiB ceiling. Windows Job
 memory is a committed-memory cap, not a resident-memory proof: both are required.
 Pure focused unit checks may use smaller externally supervised groups with known
 peaks. Native browser flags bound caches/renderers and disable background networking;
@@ -2311,6 +2381,7 @@ class CommandEvidence(BaseModel):
     argv: tuple[str, ...]  # canonical logical inventory, not a claim of native argv
     resolved_argv: tuple[str, ...]  # actual native argv with owned path aliases
     tool_bindings: tuple[ToolExecutionBinding, ...]
+    media_tools: tuple[ToolExecutionBinding, ...]  # backend_pytest: bound ffmpeg/ffprobe; otherwise empty
     cwd: str
     deadline_seconds: int
     outcome: Literal["completed", "launch_failed", "timeout", "output_limit", "memory_limit", "teardown_failed"]
@@ -2324,6 +2395,7 @@ class CommandEvidence(BaseModel):
 
 class SmokeManifest(BaseModel):
     schema_version: Literal[1]
+    producer_tool_sha256: str  # exact producer source attestation aggregate
     candidate_id: str
     git_commit: str
     freeze_sha256: str
@@ -2627,7 +2699,7 @@ copy first, then serve that group's dist path. This bootstrapping seam is synthe
 configuration evidence, not a claim that the unmodified interactive demo CLI accepts
 new flags or that production ONNX weights were exercised. Media smoke additionally
 sets synthetic output to 320x240 at 12 fps with a 48 px subtitle band before app
-creation, keeping the owned 4 GiB lane bounded; it verifies publication/playback,
+creation, keeping the owned 16 GiB lane bounded; it verifies publication/playback,
 not full-HD throughput. Import modules that capture settings only after this demo
 configuration is bound. The browser's fake-provider playback media uses the same
 bounded configuration, and the later FFmpeg stage remains separately performed.
@@ -2668,7 +2740,7 @@ Recheck its installed `/json/protocol` before driving it. Official CDP master
 browser/js JSON schemas were retrieved in that audit session; they describe required fields,
 not proof of the installed browser version. Use only `Browser.getVersion`,
 `Page.navigate(url)`, `Runtime.evaluate(expression, returnByValue=True,
-awaitPromise=True, timeout=5000)`, `Input.dispatchKeyEvent(type,key,code)`,
+awaitPromise=True, timeout=5000)`, `Input.dispatchKeyEvent(type,key,code,text,windowsVirtualKeyCode)`,
 `Emulation.setDeviceMetricsOverride(width,height,deviceScaleFactor=1,mobile=False)`,
 and `Page.captureScreenshot(format="png",captureBeyondViewport=False)`. Reject CDP
 errors, `exceptionDetails`, unexpected IDs, oversized frames/screenshots, and missing

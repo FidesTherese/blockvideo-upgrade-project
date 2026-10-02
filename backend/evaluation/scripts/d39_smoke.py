@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -19,6 +23,9 @@ from pathlib import Path
 from typing import Any, Iterator, NoReturn
 
 import httpx
+import yaml
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from pydantic import TypeAdapter, ValidationError
 
 from evaluation import blinded_io, blinded_runtime, browser_smoke, release_verification as verification
@@ -27,12 +34,13 @@ from evaluation.evidence_json import parse_canonical_model
 from evaluation.smoke_contracts import (
     AllToolsStartupSummary, BrowserSummary, FFmpegSummary, MigrationSummary, RestoreSummary,
     SMOKE_STAGES, SmokeManifest, SmokeStageReceipt, StatefulStartupSummary, ToolExecutionBinding,
+    TOOL_RULES,
 )
 from evaluation.tool_attestation import FileFingerprint, canonical_json_bytes
 
 _DEADLINES = (120, 120, 180, 180, 300, 300)
 _SUMMARIES = (MigrationSummary, RestoreSummary, AllToolsStartupSummary, StatefulStartupSummary, BrowserSummary, FFmpegSummary)
-DOC_KEYS = ('setup_paths', 'locked_versions', 'mode_commands', 'recovery_codes', 'migration_restore', 'limitation_boundary')
+DOC_KEYS: tuple[str, ...] = ('setup_paths', 'locked_versions', 'mode_commands', 'recovery_codes', 'migration_restore', 'limitation_boundary')
 _BOOTSTRAP = "import runpy,sys; p=sys.argv.pop(1); runpy.run_path(p,run_name='__main__')"
 
 
@@ -104,12 +112,83 @@ def fake_providers() -> Iterator[tuple[str, dict[str, int]]]:
             raise ValueError('fake provider teardown unconfirmed')
 
 
-def documentation_checks(source: Path, *, contracts_passed: bool) -> dict[str, bool]:
+def _node_range(version: str, expression: str) -> bool:
+    """Bounded npm numeric ranges; unsupported spellings fail the document gate."""
+    actual = tuple(int(item) for item in version.split('.'))
+    if len(actual) != 3 or len(expression) > 256:
+        return False
+    for alternative in expression.split('||'):
+        tokens = alternative.strip().split()
+        accepted = bool(tokens)
+        for token in tokens:
+            match = re.fullmatch(r'(>=|<=|>|<|=|\^|~)?(\d+)(?:\.(\d+))?(?:\.(\d+))?', token)
+            if match is None:
+                accepted = False
+                break
+            operator = match[1] or '='
+            target = tuple(int(match[i] or 0) for i in (2, 3, 4))
+            if operator == '^':
+                position = next((i for i, n in enumerate(target) if n), 2)
+                ceiling = tuple(target[i] + 1 if i == position else target[i] if i < position else 0 for i in range(3))
+                accepted &= target <= actual < ceiling
+            elif operator == '~':
+                ceiling = (target[0], target[1] + 1, 0) if match[3] else (target[0] + 1, 0, 0)
+                accepted &= target <= actual < ceiling
+            elif operator == '=':
+                count = 3 if match[4] else 2 if match[3] else 1
+                accepted &= actual[:count] == target[:count]
+            else:
+                accepted &= {'>=': actual >= target, '<=': actual <= target, '>': actual > target, '<': actual < target}[operator]
+        if accepted:
+            return True
+    return False
+
+
+def _locked_documentation(values: dict[str, str]) -> bool:
+    try:
+        project = tomllib.loads(values['backend/pyproject.toml'])['project']
+        uv = tomllib.loads(values['backend/uv.lock'])
+        package = json.loads(values['frontend/package.json'])
+        lock = yaml.safe_load(values['frontend/pnpm-lock.yaml'])
+        python = TOOL_RULES['python'][0]
+        node = TOOL_RULES['node'][0]
+        pnpm = TOOL_RULES['pnpm'][0]
+        if project['requires-python'] != uv['requires-python'] or python not in SpecifierSet(project['requires-python']):
+            return False
+        if package['packageManager'] != 'pnpm@' + pnpm or not _node_range(node, package['engines']['node']):
+            return False
+        readme = values['README.md']
+        for label, pattern, expected in (('python', r'Python\s+(\d+\.\d+(?:\.\d+)?)\+?', python), ('node', r'Node(?:\.js)?\s+(\d+(?:\.\d+){0,2})\+?', node), ('pnpm', r'pnpm\s+(\d+\.\d+\.\d+)', pnpm)):
+            stated = re.findall(pattern, readme, re.IGNORECASE)
+            if not stated or any(not (expected == value or expected.startswith(value + '.')) for value in stated):
+                return False
+        locked = {item['name'].lower().replace('_', '-'): item['version'] for item in uv.get('package', [])}
+        for dependency in project.get('dependencies', []):
+            item = Requirement(dependency)
+            if item.marker is None or item.marker.evaluate({'python_version': '3.12', 'python_full_version': python}):
+                if locked.get(item.name.lower().replace('_', '-')) not in item.specifier:
+                    return False
+        importer = lock['importers']['.']
+        for category in ('dependencies', 'devDependencies', 'optionalDependencies'):
+            specified = package.get(category, {})
+            resolved = importer.get(category, {})
+            if set(specified) != set(resolved):
+                return False
+            for name, expression in specified.items():
+                entry = resolved[name]
+                if entry['specifier'] != expression or not _node_range(entry['version'].split('(')[0], expression):
+                    return False
+        return all(_node_range(node, entry['engines']['node']) for entry in lock.get('packages', {}).values() if 'node' in entry.get('engines', {}))
+    except (ValueError, TypeError, KeyError, AttributeError, yaml.YAMLError):
+        return False
+
+
+def documentation_checks(source: Path, *, contracts_passed: bool | dict[str, bool]) -> dict[str, bool]:
     checks = dict.fromkeys(DOC_KEYS, False)
     required = ('README.md', 'Makefile', 'backend/.env.example', 'backend/pyproject.toml',
                 'backend/uv.lock', 'frontend/package.json', 'frontend/pnpm-lock.yaml',
                 'backend/scripts/plan_c_demo.py', 'backend/tests/test_d34_migrations.py',
-                'backend/tests/test_d35_startup_recovery_api.py', 'specification.md')
+                'backend/tests/test_d35_startup_recovery_api.py', 'frontend/src/test/recovery-status.test.tsx', 'specification.md')
     values = {}
     for name in required:
         try:
@@ -117,22 +196,45 @@ def documentation_checks(source: Path, *, contracts_passed: bool) -> dict[str, b
             values[name] = blinded_io.read_regular(source / name, maximum=8 * 1024 * 1024).decode('utf-8')
         except (OSError, ValueError, UnicodeError):
             return checks
-    checks['setup_paths'] = True
     readme = values['README.md']
-    # Exact audited lane; a vague lower minimum is not this promised setup contract.
-    checks['locked_versions'] = '3.12' in readme and ('Node.js 24' in readme or 'Node 24' in readme) and '10.18.3' in values['frontend/package.json']
+    links = re.findall(r'\]\(([^\s)]+)(?:\s+"[^"\n]*")?\)|(?:src|href)=["\']([^"\']+)["\']', readme)
+    checks['setup_paths'] = True
+    for target in (first or second for first, second in links):
+        if target.startswith(('https://', 'http://', '#', 'mailto:')):
+            continue
+        relative = Path(target.split('#', 1)[0])
+        try:
+            if relative.is_absolute() or '..' in relative.parts or any(part in {'node_modules', '.venv', 'dist', '.git'} for part in relative.parts):
+                raise ValueError('setup reference not inventoried')
+            materialization._directory((source / relative).parent)
+            blinded_io.fingerprint_regular(source / relative, maximum=8 * 1024 * 1024)
+        except (OSError, ValueError):
+            checks['setup_paths'] = False
+    checks['locked_versions'] = _locked_documentation(values)
     demo = values['backend/scripts/plan_c_demo.py']
-    checks['mode_commands'] = all(name in demo for name in ('all_tools', 'stateful', 'prepare_storage', 'exclusive_demo', 'demo_settings', 'create_demo_app'))
-    api_tests = values['backend/tests/test_d35_startup_recovery_api.py']
-    checks['recovery_codes'] = contracts_passed and all(name in api_tests for name in ('safe_retry', 'external_outcome_unknown', 'migration_failed'))
-    checks['migration_restore'] = contracts_passed and all(name in values['backend/tests/test_d34_migrations.py'] for name in ('restore_database_backup', 'database_lease_unavailable'))
-    specification = values['specification.md'].lower()
-    checks['limitation_boundary'] = all(name in specification for name in ('held-out', 'human', 'external'))
+    try:
+        tree = ast.parse(demo)
+        functions = {item.name for item in tree.body if isinstance(item, ast.FunctionDef)}
+        modes = [ast.literal_eval(keyword.value) for item in ast.walk(tree) if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr == 'add_argument' and item.args and isinstance(item.args[0], ast.Constant) and item.args[0].value == '--mode' for keyword in item.keywords if keyword.arg == 'choices']
+        checks['mode_commands'] = {'prepare_storage', 'exclusive_demo', 'demo_settings', 'create_demo_app', 'main'} <= functions and len(modes) == 1 and set(modes[0]) == {'all_tools', 'stateful'}
+    except (SyntaxError, ValueError, TypeError):
+        pass
+    results = dict.fromkeys(('recovery_codes', 'migration_restore', 'ui_recovery'), contracts_passed) if type(contracts_passed) is bool else contracts_passed
+    checks['recovery_codes'] = results.get('recovery_codes') is True and results.get('ui_recovery') is True
+    checks['migration_restore'] = results.get('migration_restore') is True
+    # Deliberately bounded grammatical claims; keyword co-occurrence and a
+    # contradictory affirmative sentence cannot satisfy either proposition.
+    specification = re.sub(r'\s+', ' ', values['specification.md'].lower())
+    automated = re.search(r'automated (?:technical )?evidence (?:is|are)[, ]+(?:not human acceptance|not (?:a substitute for|equivalent to) human acceptance)', specification)
+    external = re.search(r'(?:real )?held-out (?:execution|evaluation) (?:is|remains|must remain) external', specification)
+    contradiction = re.search(r'automated (?:technical )?evidence (?:is|are) human acceptance|held-out (?:execution|evaluation) (?:is|remains) internal', specification)
+    checks['limitation_boundary'] = bool(automated and external and not contradiction)
     return checks
 
 
 def _installed_browser(value: Path | None) -> Path:
     if value is not None:
+        materialization._directory(value.absolute().parent)
         before = value.absolute().lstat()
         if value.is_symlink() or blinded_io.is_reparse(before):
             raise ValueError('browser executable link refused')
@@ -141,6 +243,9 @@ def _installed_browser(value: Path | None) -> Path:
                Path(os.environ.get('PROGRAMFILES(X86)', 'C:/Program Files (x86)')) / 'Google/Chrome/Application/chrome.exe'] if os.name == 'nt' else [Path(p) for name in ('google-chrome', 'chromium', 'chromium-browser') if (p := shutil.which(name))]
     for path in choices:
         if path.is_file():
+            materialization._directory(path.absolute().parent)
+            if blinded_io.is_reparse(path.lstat()) or path.is_symlink():
+                raise ValueError('browser executable link refused')
             return verification._native_path(path)
     raise ValueError('installed native browser unavailable')
 
@@ -178,8 +283,6 @@ async def _candidate_action(scope: blinded_runtime.OwnedProcessScope, group: ver
         raise ValueError('candidate smoke action failed')
     await asyncio.to_thread(group.assert_source)
     await asyncio.to_thread(python.verify)
-    if action == 'contract_tests':
-        return None
     return verification._probe_json(await asyncio.to_thread(blinded_io.read_regular, Path(configuration['summary_path']), maximum=65536))
 
 
@@ -197,18 +300,39 @@ async def _http_health(port: int, *, owner_token: str, child: blinded_runtime.Ow
                         raise ValueError('owned health size exceeded')
                 return verification._probe_json(bytes(raw))
         while time.monotonic() < deadline:
-            if child.outcome is not None or child.pid < 1:
-                raise ValueError('owned server terminated before readiness')
+            if not await asyncio.to_thread(child.is_running):
+                if child.outcome is not None or child._observation()[0] in {'exited', 'launch_failed'}:
+                    raise ValueError('owned server terminated before readiness')
+                await asyncio.sleep(0.05)
+                continue  # Gate assigned, target not yet launched; no health trusted.
             try:
                 owner = await read('/__d39-owned')
                 if owner == {'owner': owner_token}:
                     health = await read('/api/health')
-                    if health is not None and health.get('status') == expected:
+                    if health is not None and health.get('status') == expected and await asyncio.to_thread(child.is_running):
                         return
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0.05)
     raise ValueError('owned server startup deadline exceeded')
+
+
+async def _startup_stage(scope: blinded_runtime.OwnedProcessScope, group: verification._ExecutionGroup,
+                         python: verification._ToolSet, env: dict[str, str], config: dict[str, Any], stage: str) -> dict[str, Any]:
+    configuration = config | {'port': _port(), 'owner_token': secrets.token_hex(32),
+                              'scenario': 'stateful' if stage == 'stateful_startup' else 'normal'}
+    server = await _candidate_action(scope, group, python, env, configuration | {'summary_path': str(group.root / (stage + '.server.json'))}, 'serve', deadline=180, serving=True)
+    try:
+        await _http_health(configuration['port'], owner_token=configuration['owner_token'], child=server, deadline=time.monotonic() + 30)
+        result = await _candidate_action(scope, group, python, env, configuration, stage, deadline=120)
+        if not await asyncio.to_thread(server.is_running):
+            raise ValueError('startup server terminated during observation')
+        return result
+    finally:
+        await server.stop()
+        await server.wait()
+        if scope._failed or not server._tree_confirmed:
+            raise ValueError('startup server teardown failed')
 
 
 def _make_receipt(*, summary: Any, **fields: Any) -> SmokeStageReceipt:
@@ -221,17 +345,14 @@ def _make_receipt(*, summary: Any, **fields: Any) -> SmokeStageReceipt:
 
 async def _browser_stage(scope: blinded_runtime.OwnedProcessScope, group: verification._ExecutionGroup,
                          python: verification._ToolSet, env: dict[str, str], config: dict[str, Any],
-                         browser_executable: Path | None, base_tools: tuple[ToolExecutionBinding, ...]) -> tuple[dict[str, Any], tuple[ToolExecutionBinding, ...], tuple[FileFingerprint, ...]]:
+                         browser_executable: Path | None, base_tools: tuple[ToolExecutionBinding, ...], frontend: verification._ToolSet) -> tuple[dict[str, Any], tuple[ToolExecutionBinding, ...], tuple[FileFingerprint, ...]]:
     chrome = await asyncio.to_thread(_installed_browser, browser_executable)
     chrome_fp = await asyncio.to_thread(verification._native_file, chrome, 'tools/chrome')
     # The sandbox owns browser transport packages too; prove its installed origin/version.
     probe = verification._probe_json(await verification._probe(scope, group, (str(python.executable), '-I', '-B', '-c', "import importlib.metadata,websockets.sync.client,json; print(json.dumps({'version':importlib.metadata.version('websockets'),'origin':websockets.sync.client.__file__}))"), env))
-    if probe.get('version') != '16.1.1' or not Path(str(probe.get('origin'))).is_relative_to(group.root / 'env'):
+    if probe.get('version') != TOOL_RULES['websockets'][0] or not Path(str(probe.get('origin'))).is_relative_to(group.root / 'env'):
         raise ValueError('websockets sandbox origin/version mismatch')
     sockets_fp = await asyncio.to_thread(verification._tool_file, Path(str(probe['origin'])), 'tools/websockets_module')
-    version = (await verification._probe(scope, group, (str(chrome), '--version'), env)).decode('utf-8').strip()
-    tools = tuple(sorted((*base_tools, ToolExecutionBinding(role='chrome', version=version, executable=chrome_fp, launcher=None),
-                          ToolExecutionBinding(role='websockets', version='16.1.1', executable=python.bindings[0].executable, launcher=sockets_fp)), key=lambda item: item.role))
     normal = config | {'storage': str(group.root / 'media-storage'), 'port': _port(), 'summary_path': str(group.root / 'post-count.json'), 'owner_token': secrets.token_hex(32)}
     failed = config | {'storage': str(group.root / 'failed-storage'), 'port': _port(), 'scenario': 'migration_failed', 'summary_path': str(group.root / 'failed-post-count.json'), 'owner_token': secrets.token_hex(32)}
     server = None
@@ -261,22 +382,31 @@ async def _browser_stage(scope: blinded_runtime.OwnedProcessScope, group: verifi
         screenshots.mkdir()
         browser_config = group.root / 'browser.config.json'
         browser_summary = group.root / 'browser-cdp.summary.json'
-        await asyncio.to_thread(blinded_io.write_exclusive, browser_config, canonical_json_bytes(dict(profile=str(profile), base_url=f"http://127.0.0.1:{normal['port']}", migration_url=f"http://127.0.0.1:{failed['port']}/", projects=projects, screenshots=str(screenshots), summary_path=str(browser_summary))) + b'\n')
+        await asyncio.to_thread(blinded_io.write_exclusive, browser_config, canonical_json_bytes(dict(profile=str(profile), base_url=f"http://127.0.0.1:{normal['port']}", migration_url=f"http://127.0.0.1:{failed['port']}/", projects=projects, screenshots=str(screenshots), summary_path=str(browser_summary), counter_path=normal['summary_path'])) + b'\n')
         # Actual CDP transport uses the attested sandbox module, not the controller's.
         browser_result = await blinded_runtime.run_owned_command(scope=scope, argv=(str(python.executable), '-I', '-B', '-c', _BOOTSTRAP, str(Path(browser_smoke.__file__)), '--configuration', str(browser_config)), cwd=group.root, env=env, stdout_path=group.root / 'browser-cdp.out', stderr_path=group.root / 'browser-cdp.err', deadline_seconds=180)
         if browser_result.outcome != 'completed' or browser_result.exit_code != 0:
             raise ValueError('owned browser observations failed')
         observations = verification._probe_json(await asyncio.to_thread(blinded_io.read_regular, browser_summary, maximum=65536))
-        # Backend observer counts actual fixed operation POSTs, not JS click attempts.
-        counter_path = Path(normal['summary_path'])
-        observations['duplicate_post_count'] = verification._probe_json(blinded_io.read_regular(counter_path, maximum=4096))['operation_posts']
-        await _candidate_action(scope, group, python, env, config | {'summary_path': str(group.root / 'contract-test-summary.json')}, 'contract_tests', deadline=180)
-        observations.update(stage='browser', narrow_width=390, wide_width=1440,
-                            documentation_checks=await asyncio.to_thread(documentation_checks, group.source, contracts_passed=True))
+        version = observations.pop('browser_version')
+        tools = tuple(sorted((*base_tools, ToolExecutionBinding(role='chrome', version=version, executable=chrome_fp, launcher=None),
+                              ToolExecutionBinding(role='websockets', version=TOOL_RULES['websockets'][0], executable=python.bindings[0].executable, launcher=sockets_fp)), key=lambda item: item.role))
+        # Release browser/server memory before running independent contract tests.
+        for child in (owned_browser, broken, server):
+            await child.stop()
+            await child.wait()
+        if scope._failed:
+            raise ValueError('browser/server teardown failed')
+        contracts = await _candidate_action(scope, group, python, env, config | {'summary_path': str(group.root / 'contract-test-summary.json')}, 'contract_tests', deadline=180)
+        await asyncio.to_thread(frontend.verify)
+        ui = await blinded_runtime.run_owned_command(scope=scope, argv=(str(frontend.executable), str(frontend.launcher), '-y', 'pnpm@' + TOOL_RULES['pnpm'][0], 'test', 'src/test/recovery-status.test.tsx', '--maxWorkers=1', '--minWorkers=1', '--no-file-parallelism'), cwd=group.source / 'frontend', env=env,
+                                                    stdout_path=group.root / 'ui-contract.out', stderr_path=group.root / 'ui-contract.err', deadline_seconds=120)
+        await asyncio.to_thread(frontend.verify)
+        contracts['ui_recovery'] = ui.outcome == 'completed' and ui.exit_code == 0
+        observations.update(stage='browser', documentation_checks=await asyncio.to_thread(documentation_checks, group.source, contracts_passed=contracts))
         artifacts = []
         for path in sorted(screenshots.iterdir()):
-            size, digest = await asyncio.to_thread(blinded_io.fingerprint_regular, path, maximum=4 * 1024 * 1024)
-            artifacts.append(FileFingerprint(path='screenshots/' + path.name, size=size, sha256=digest))
+            artifacts.append(await asyncio.to_thread(_screenshot_fingerprint, path))
         if await asyncio.to_thread(verification._native_file, chrome, 'tools/chrome') != chrome_fp or await asyncio.to_thread(verification._tool_file, Path(probe['origin']), 'tools/websockets_module') != sockets_fp:
             raise ValueError('browser transport/tool source changed')
         return observations, tools, tuple(artifacts)
@@ -285,6 +415,12 @@ async def _browser_stage(scope: blinded_runtime.OwnedProcessScope, group: verifi
             if child is not None:
                 await child.stop()
                 await child.wait()
+
+
+def _screenshot_fingerprint(path: Path) -> FileFingerprint:
+    materialization._directory(path.parent)
+    size, digest = blinded_io.fingerprint_regular(path, maximum=4 * 1024 * 1024)
+    return FileFingerprint(path='screenshots/' + path.name, size=size, sha256=digest)
 
 
 def _media_fingerprint(storage: Path, media: dict[str, Any], name: str) -> FileFingerprint:
@@ -335,7 +471,7 @@ async def _run(*, candidate: Path, frozen_path: Path, runtime: Path, path: Path,
             if command.outcome != 'completed' or command.exit_code != 0:
                 raise ValueError('smoke frontend bootstrap failed')
             if index == 5:
-                await verification._esbuild_preflight(scope, group, frontend, env)
+                await verification._frontend_preflight(scope, group, frontend, env)
         base_tools = tuple(sorted((*bootstrap.bindings, *python.bindings, *frontend.bindings), key=lambda item: item.role))
         profile = group.root / 'embedding-profile.json'
         await asyncio.to_thread(blinded_io.write_exclusive, profile, canonical_json_bytes(_profile()) + b'\n')
@@ -357,7 +493,6 @@ async def _run(*, candidate: Path, frozen_path: Path, runtime: Path, path: Path,
                           model='synthetic-d39-chat', port=_port(), summary_path=str(group.root / 'index-summary.json'), scenario='normal', owner_token=secrets.token_hex(32), **media_paths)
             await _candidate_action(scope, group, python, env, config, 'build_index', deadline=60)
             for position, stage in enumerate(SMOKE_STAGES):
-                await boundary()
                 await asyncio.to_thread(group.assert_source)
                 summary_path = group.root / (stage + '.summary.json')
                 stage_config = config | {'summary_path': str(summary_path)}
@@ -370,11 +505,18 @@ async def _run(*, candidate: Path, frozen_path: Path, runtime: Path, path: Path,
                 tools = base_tools
                 artifacts: tuple[FileFingerprint, ...] = ()
                 started = time.monotonic()
+                if stage in ('browser', 'ffmpeg'):
+                    for media_tool in media_tools:
+                        if await asyncio.to_thread(verification._native_file, Path(media_paths[media_tool.role]), media_tool.executable.path) != media_tool.executable:
+                            raise ValueError('media tool changed before use')
                 if stage == 'browser':
-                    observations, tools, artifacts = await asyncio.wait_for(_browser_stage(scope, group, python, env, stage_config, browser_executable, base_tools), timeout=_DEADLINES[position])
+                    observations, tools, artifacts = await asyncio.wait_for(_browser_stage(scope, group, python, env, stage_config, browser_executable, base_tools, frontend), timeout=_DEADLINES[position])
                 else:
                     calls = dict(provider_counts)
-                    observations = await _candidate_action(scope, group, python, env, stage_config, stage, deadline=_DEADLINES[position])
+                    if stage.endswith('_startup'):
+                        observations = await _startup_stage(scope, group, python, env, stage_config, stage)
+                    else:
+                        observations = await _candidate_action(scope, group, python, env, stage_config, stage, deadline=_DEADLINES[position])
                     if stage.endswith('_startup'):
                         if observations['model_calls'] != provider_counts['chat'] - calls['chat']:
                             raise ValueError('startup model counter mismatch')
@@ -382,10 +524,11 @@ async def _run(*, candidate: Path, frozen_path: Path, runtime: Path, path: Path,
                             raise ValueError('startup embedding counter mismatch')
                     if stage == 'ffmpeg':
                         tools = tuple(sorted((*base_tools, *media_tools), key=lambda item: item.role))
-                        media = verification._probe_json(blinded_io.read_regular(summary_path.with_suffix('.media.json'), maximum=65536))
                         items = []
-                        for name in ('video', 'subtitle'):
-                            items.append(await asyncio.to_thread(_media_fingerprint, Path(stage_config['storage']), media, name))
+                        if observations['video_present'] and observations['subtitle_present']:
+                            media = verification._probe_json(blinded_io.read_regular(summary_path.with_suffix('.media.json'), maximum=65536))
+                            for name in ('video', 'subtitle'):
+                                items.append(await asyncio.to_thread(_media_fingerprint, Path(stage_config['storage']), media, name))
                         artifacts = tuple(items)
                 if time.monotonic() - started > _DEADLINES[position]:
                     raise ValueError('smoke stage deadline exceeded')
@@ -395,10 +538,10 @@ async def _run(*, candidate: Path, frozen_path: Path, runtime: Path, path: Path,
                 await asyncio.to_thread(group.assert_source)
                 for tool in (bootstrap, python, frontend):
                     await asyncio.to_thread(tool.verify)
-                for media_tool in media_tools:
-                    if await asyncio.to_thread(verification._native_file, Path(media_paths[media_tool.role]), media_tool.executable.path) != media_tool.executable:
-                        raise ValueError('media tool source changed')
-                await boundary()
+                if stage in ('browser', 'ffmpeg'):
+                    for media_tool in media_tools:
+                        if await asyncio.to_thread(verification._native_file, Path(media_paths[media_tool.role]), media_tool.executable.path) != media_tool.executable:
+                            raise ValueError('media tool source changed')
                 # Child summary output is disposable; persist only the validated model.
                 materialization._assert_directory(output, output_anchor)
                 blinded_io.publish_immutable(output / (stage + '.summary.json'), raw_summary, 'smoke_summary', maximum=65536)
@@ -414,25 +557,15 @@ async def _run(*, candidate: Path, frozen_path: Path, runtime: Path, path: Path,
                 receipts.append(receipt)
                 if receipt.outcome != 'passed':
                     raise ValueError('required smoke observation failed')
-        smoke = SmokeManifest(schema_version=1, stage_receipts=tuple(receipts), **binding,
+        smoke = SmokeManifest(schema_version=1, producer_tool_sha256=attestation.aggregate_sha256, stage_receipts=tuple(receipts), **binding,
                               **{r.stage + '_sha256': hashlib.sha256(canonical_json_bytes(r) + b'\n').hexdigest() for r in receipts})
     finally:
         try:
-            if entered:
-                await asyncio.shield(scope.close())
             if group is not None:
-                try:
-                    await asyncio.to_thread(group.assert_source)
-                finally:
-                    await asyncio.to_thread(group.cleanup)
+                await verification._close_group(group, scope, entered)
         finally:
-            if group is not None:
-                if group.anchor is not None:
-                    verification.freeze._close_directory_anchor(group.anchor)
-                verification.freeze._close_directory_anchor(group.work_anchor)
             verification.freeze._close_directory_anchor(output_anchor)
             await asyncio.to_thread(verification._inventory_boundary, candidate, runtime, work, path, digest, record, root, attestation, frozen_path)
-    await asyncio.to_thread(verification._inventory_boundary, candidate, runtime, work, path, digest, record, root, attestation, frozen_path)
     # No completed publication until owned group teardown/source checks succeed.
     final_anchor = materialization._open_anchor(output)
     try:
@@ -452,7 +585,7 @@ def run_candidate_smokes(*, candidate_root: Path, freeze_manifest_path: Path, ru
         return asyncio.run(_run(candidate=candidate_root.absolute(), frozen_path=freeze_manifest_path.absolute(), runtime=runtime_root.absolute(),
                                 path=materialization_path.absolute(), digest=expected_materialization_sha256, work=work_root.absolute(),
                                 output=output_dir.absolute(), browser_executable=browser_executable))
-    except (OSError, ValueError, TimeoutError, RuntimeError):
+    except (OSError, ValueError, TimeoutError, RuntimeError, subprocess.SubprocessError):
         raise ValueError('D39 smoke refused; no complete smoke evidence') from None
 
 
@@ -475,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
                              work_root=values.work_root, output_dir=values.output, browser_executable=values.browser_executable)
         print('{"status":"completed"}')
         return 0
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         print('D39 smoke refused', file=sys.stderr)
         return 2
 

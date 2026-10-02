@@ -1,5 +1,22 @@
 # BlockVideo Plan C Specification — Work Units 01–40
 
+## D39 review correction checkpoint — 2026-10-02
+
+D39 materialization, verification and all six smoke entry points are implemented.
+The independent review corrections and their exact regression/host outcomes are
+recorded in `docs/plan-c/work-report-39.md`; canonical contract amendments are under
+`D39 review amendments (2026-10-02)` in `docs/DTD.md`. They bind real owned process
+exits, HTTP startup, both browser widths, native media coverage and producer source
+identity. Shared schemas enforce the same gates for future consumers.
+
+The user explicitly authorized **16 GiB aggregate for development and operational
+D39**, with a 12 GiB target and 14 GiB no-start threshold. The per-group Job cap stays
+1536 MiB. Synthetic agent accounting tests do not prove actual-host headroom.
+The immutable D35 commit, manifests, dependencies and application/UI code are
+unchanged. LF checkout, pinned lane, D36 controls, prerequisite documentation,
+secret scan and independent review remain required. Readiness is **Not ready**.
+Automated evidence is not human acceptance. Real held-out execution is external.
+
 ## D31–D40 hardening, blinded evaluation, and release-readiness design
 
 The user selected sequential gated delivery and approved
@@ -240,7 +257,7 @@ is not inferred from previous synthetic reports.
 Final real evaluation follows the final committed/pinned tooling checkout and refreshed
 D36 freeze/trial-tool attestation. Later source mismatch requires a new run/evidence
 ID, never in-place normalization/regeneration. All probes are sequential and share
-hard aggregate RAM <=4 GiB under the user's revised project budget (target <=3);
+hard aggregate RAM <=16 GiB under the user's 2026-10-02 revised budget (target <=12);
 prior larger-budget checks remain historical. Directory handles protect root identity,
 not contents/ancestors or malicious same-user mutation.
 

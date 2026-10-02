@@ -1,0 +1,315 @@
+"""Regression seams for the 2026-10-02 independent D39 review."""
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from evaluation import blinded_runtime as runtime, release_verification as release
+from evaluation.smoke_contracts import BrowserSummary, SmokeStageReceipt
+from tests.test_d39_release_verification import _binding, _bytes, _receipt, _summary
+
+
+def test_l6_command_evidence_survives_backwards_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = runtime.OwnedCommandOutcome(
+        outcome='completed', exit_code=0, started_at='2026-10-02T00:00:02Z',
+        finished_at='2026-10-02T00:00:01Z', stdout_size=0, stderr_size=0,
+        stdout_sha256='0' * 64, stderr_sha256='0' * 64,
+    )
+    async def run(**kwargs: Any) -> runtime.OwnedCommandOutcome:
+        return observed
+    monkeypatch.setattr(runtime, 'run_owned_command', run)
+    group = SimpleNamespace(source=tmp_path, root=tmp_path, assert_source=lambda: None)
+    tools = SimpleNamespace(executable=Path(sys.executable), bindings=(release.ToolExecutionBinding.model_validate(_binding('python')),), verify=lambda: None)
+    commands = []
+    result = asyncio.run(release._execute_command(index=1, group=group, scope=None, tools=tools, env={}, commands=commands))
+    assert commands == [result] and result.exit_code == 0
+    assert result.finished_at == result.started_at
+
+
+def test_m9_shared_frontend_preflight_refuses_local_pnpm(tmp_path: Path) -> None:
+    bin_path = tmp_path / 'frontend/node_modules/.bin'
+    bin_path.mkdir(parents=True)
+    (bin_path / ('pnpm.cmd' if os.name == 'nt' else 'pnpm')).write_bytes(b'shadow')
+    with pytest.raises(ValueError, match='shadow'):
+        asyncio.run(release._frontend_preflight(None, SimpleNamespace(source=tmp_path), None, {}))
+
+
+def test_m7_backend_pytest_cannot_hide_unbound_media_coverage() -> None:
+    from evaluation.smoke_contracts import CommandEvidence, D39_COMMAND_DEADLINES, D39_REQUIRED_COMMANDS
+    from pydantic import ValidationError
+    name, argv = D39_REQUIRED_COMMANDS[2]
+    with pytest.raises(ValidationError, match='media'):
+        CommandEvidence(name=name, argv=argv, resolved_argv=('tools/python_sandbox', *argv[1:]),
+                        tool_bindings=(_binding('python'),), cwd='backend', deadline_seconds=D39_COMMAND_DEADLINES[2],
+                        outcome='completed', exit_code=0, started_at='2026-10-02T00:00:00Z', finished_at='2026-10-02T00:00:00Z',
+                        stdout_size=0, stderr_size=0, stdout_sha256='0'*64, stderr_sha256='0'*64)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows process table seam')
+@pytest.mark.parametrize('agent', ['codex', 'claude', 'node', 'chatgpt', None])
+def test_b1_only_controller_agent_and_owned_memory(monkeypatch: pytest.MonkeyPatch, agent: str | None) -> None:
+    table = {1: (0, 'explorer'), 10: (1, agent or 'unrecognized'), 11: (10, 'renderer'),
+             20: (10, 'pwsh'), 30: (20, 'python'), 40: (1, 'node'),
+             41: (1, 'git'), 42: (1, 'powershell'), 43: (0, 'wslservice')}
+    monkeypatch.setattr(runtime, '_windows_process_table', lambda: table)
+    monkeypatch.setattr(runtime.os, 'getpid', lambda: 30)
+    sampled = []
+    def resident(pid: int) -> int:
+        sampled.append(pid)
+        if pid == 43:
+            raise OSError('SYSTEM access denied')
+        return 10
+    monkeypatch.setattr(runtime, '_windows_resident', resident)
+    group, outside = runtime._owned_memory_sample()
+    assert group == 0
+    assert outside == (40 if agent else 10 + 1024 ** 3)
+    assert not {1, 40, 41, 42, 43}.intersection(sampled)
+
+
+@pytest.mark.parametrize('text', [
+    b'uv 0.12.15\n', b'uv 0.12.15 (x86_64-pc-windows-msvc)\n',
+    b'uv 0.12.15 (abcdef012 2026-09-30 x86_64-unknown-linux-gnu)\n',
+    b'uv 0.12.15 (abcdef0 2026-09-30 aarch64-apple-darwin)\n',
+])
+def test_b2_real_uv_version_formats(text: bytes) -> None:
+    assert release._parse_uv_version(text) == '0.12.15'
+
+
+@pytest.mark.parametrize('text', [b'uv 0.12.14', b'uv 0.12.15 (arbitrary words)',
+                                     b'uv 0.12.15\nextra', b'uv 0.12.15 (' + b'x' * 200 + b')'])
+def test_b2_uv_version_is_strict(text: bytes) -> None:
+    with pytest.raises(ValueError):
+        release._parse_uv_version(text)
+
+
+def test_b3_isolated_vite_resolves_sibling_esbuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    frontend = tmp_path / 'source' / 'frontend'
+    packages = frontend / 'node_modules' / '.pnpm' / 'fixture' / 'node_modules'
+    vite = packages / 'vite'
+    esbuild = packages / 'esbuild'
+    for package in (vite, esbuild):
+        package.mkdir(parents=True)
+    (vite / 'package.json').write_text('{"name":"vite","version":"5.4.21"}')
+    (esbuild / 'package.json').write_text('{"name":"esbuild","version":"0.21.5","main":"index.js"}')
+    (esbuild / 'index.js').write_text("exports.version='0.21.5';exports.transformSync=s=>({code:s});")
+    # A directory junction needs no elevated symlink privilege on Windows.
+    link = frontend / 'node_modules' / 'vite'
+    if os.name == 'nt':
+        subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(vite)], check=True, capture_output=True)
+    else:
+        link.symlink_to(vite, target_is_directory=True)
+    (frontend / 'pnpm-lock.yaml').write_text('packages:\n  esbuild@0.21.5:\n')
+    async def probe(scope: object, group: object, argv: tuple[str, ...], env: dict[str, str]) -> bytes:
+        return subprocess.check_output(argv, cwd=tmp_path, timeout=10)
+    monkeypatch.setattr(release, '_probe', probe)
+    node = shutil.which('node')
+    assert node is not None
+    asyncio.run(release._esbuild_preflight(None, SimpleNamespace(source=tmp_path / 'source'), SimpleNamespace(executable=Path(node)), {}))
+
+
+def test_b4_origin_probe_does_not_execute_packages(tmp_path: Path) -> None:
+    (tmp_path / 'explosive.py').write_text("raise RuntimeError('must not import')\n")
+    metadata = tmp_path / 'explosive-1.0.dist-info'
+    metadata.mkdir()
+    (metadata / 'METADATA').write_text('Name: explosive\nVersion: 1.0\n')
+    result = subprocess.run([sys.executable, '-B', '-c', release._PYTHON_PROBE, '["explosive"]'],
+                            cwd=tmp_path, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    data = release._probe_json(result.stdout)
+    assert data['origins']['explosive'] == str(tmp_path / 'explosive.py')
+    assert data['versions']['explosive'] == '1.0'
+
+
+@pytest.mark.parametrize('offset', [61440, 126976, 61439, 61441])
+def test_i1_stream_preserves_left_boundary(offset: int) -> None:
+    raw = b'.' * (offset - 1) + b'xsk-' + b'a' * 24 + b'.' * 65536
+    counts = dict.fromkeys(release.SCAN_RULE_IDS, 0)
+    release._scan_stream(io.BufferedReader(io.BytesIO(raw)), counts, len(raw) + 1)
+    assert counts['credential_token'] == 0
+
+
+def test_i6_shared_receipt_rejects_incomplete_tools() -> None:
+    with pytest.raises(ValueError):
+        SmokeStageReceipt.model_validate_json(_bytes(_receipt() | {'tools': [_binding()]}))
+
+
+def test_i6_documentation_is_immutable_and_hashable() -> None:
+    summary = BrowserSummary.model_validate_json(_bytes(_summary('browser')))
+    hash(summary)
+    with pytest.raises((ValueError, TypeError)):
+        summary.documentation_checks['setup_paths'] = False
+
+
+def test_l7_pytest_cache_path_preserves_japanese(tmp_path: Path) -> None:
+    root = tmp_path / '日本語 workspace'
+    root.mkdir()
+    env = release.build_group_environment(root, python_executable=Path(sys._base_executable), node_executable=None)
+    assert shlex.split(env['PYTEST_ADDOPTS']) == ['-o', 'cache_dir=' + (root / 'pytest-cache').as_posix()]
+
+
+@pytest.mark.parametrize('encoding', ['utf-16', 'utf-32'])
+def test_l8_probe_requires_utf8(encoding: str) -> None:
+    with pytest.raises(ValueError):
+        release._probe_json(json.dumps({'a': 1}).encode(encoding))
+
+
+def test_step0_archive_ignores_local_eol_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests import d37_pinned_support as support
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    def git(*args: str) -> bytes:
+        return subprocess.check_output(['git', '-C', str(repo), *args], stderr=subprocess.DEVNULL)
+    git('init', '-q')
+    git('config', 'user.name', 'Synthetic')
+    git('config', 'user.email', 'synthetic@example.invalid')
+    git('config', 'core.autocrlf', 'false')
+    (repo / 'source.txt').write_bytes(b'first\nsecond\n')
+    git('add', '.')
+    git('commit', '-qm', 'Synthetic archive')
+    monkeypatch.setattr(support, 'PINNED_D35', git('rev-parse', 'HEAD').decode().strip())
+    git('config', 'core.autocrlf', 'true')
+    support.verified_archive(repo, tmp_path / 'unpacked')
+    assert (tmp_path / 'unpacked/source.txt').read_bytes() == b'first\nsecond\n'
+
+
+@pytest.mark.parametrize('entrypoint', ['materialize_candidate_runtime', 'd39_smoke'])
+def test_m5_cli_redacts_git_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                 capsys: pytest.CaptureFixture[str], entrypoint: str) -> None:
+    import importlib
+    cli = importlib.import_module('evaluation.scripts.' + entrypoint)
+    def non_git(**kwargs: object) -> None:
+        subprocess.run(['git', '-C', str(tmp_path), 'rev-parse', '--show-toplevel'],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       env={**os.environ, 'GIT_CEILING_DIRECTORIES': str(tmp_path.parent)})
+    function = 'run_candidate_smokes' if entrypoint == 'd39_smoke' else 'materialize_candidate_runtime'
+    monkeypatch.setattr(cli, function, non_git)
+    args = [item for flag in ('candidate-root', 'freeze-manifest', 'work-root', 'output')
+            for item in ('--' + flag, str(tmp_path / flag))]
+    if entrypoint == 'd39_smoke':
+        args += ['--runtime-root', str(tmp_path / 'runtime'), '--materialization', str(tmp_path / 'record'),
+                 '--expected-materialization-sha256', 'a' * 64]
+    assert cli.main(args) == 2
+    output = capsys.readouterr()
+    assert str(tmp_path) not in output.err + output.out
+    assert 'Traceback' not in output.err + output.out
+
+
+def test_i1_scan_includes_tracked_excluded_paths(tmp_path: Path) -> None:
+    from tests.test_d36_freeze import _make_candidate
+    root, commit = _make_candidate(tmp_path, extras={'.env.prod': b'example setting',
+                                                  'frontend/node_modules/example.js': b'fixture'})
+    counts = release.scan_candidate_commit(root, commit, ())
+    assert counts['tracked_private_state'] >= 1
+    assert counts['tracked_generated_state'] >= 1
+
+
+@pytest.mark.parametrize('changed', ['pyvenv.cfg', 'base.exe'])
+def test_m1_sandbox_binds_config_and_native_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str) -> None:
+    base = tmp_path / 'base.exe'
+    base.write_bytes(b'MZbase fixture')
+    environment = tmp_path / 'env'
+    executable = environment / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+    executable.parent.mkdir(parents=True)
+    if os.name == 'nt':
+        executable.write_bytes(b'MZvenv redirector')
+    else:
+        executable.symlink_to(base)
+    config = environment / 'pyvenv.cfg'
+    config.write_bytes(b'include-system-site-packages = false\n')
+    site = environment / ('Lib/site-packages' if os.name == 'nt' else 'lib/python3.12/site-packages')
+    site.mkdir(parents=True)
+    package = site / 'fixture.py'
+    package.write_bytes(b'pass\n')
+    data = dict(version='3.12.12', executable=str(executable), prefix=str(environment),
+                base_prefix=str(tmp_path), base_executable=str(base), origins={'fixture': str(package)},
+                locations={'fixture': []}, versions={'fixture': '1.0'})
+    async def probe(*args: object) -> bytes:
+        return json.dumps(data).encode()
+    monkeypatch.setattr(release, '_probe', probe)
+    monkeypatch.setattr(release, '_BACKEND_IMPORTS', ('fixture',))
+    base_fp = release._tool_file(base, 'tools/python_bootstrap')
+    bootstrap = release._ToolSet(base, None, (release.ToolExecutionBinding(role='python_bootstrap', version='3.12.12', executable=base_fp, launcher=None),), ((base, base_fp),), tmp_path)
+    result = asyncio.run(release._sandbox_python(None, SimpleNamespace(root=tmp_path), {}, bootstrap))
+    (config if changed == 'pyvenv.cfg' else base).write_bytes(b'MZchanged fixture')
+    with pytest.raises(ValueError):
+        result.verify()
+
+
+def test_m10_pnpm_implementation_is_rehashed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    node = tmp_path / 'native/node.exe'
+    node.parent.mkdir()
+    node.write_bytes(b'MZnative fixture')
+    npm = node.parent / 'node_modules/npm' if os.name == 'nt' else node.parent.parent / 'lib/node_modules/npm'
+    (npm / 'bin').mkdir(parents=True)
+    (npm / 'package.json').write_text('{"name":"npm","version":"11.6.2"}')
+    (npm / 'bin/npx-cli.js').write_text('fixture')
+    pnpm = tmp_path / 'npm-cache/_npx/test/node_modules/pnpm'
+    (pnpm / 'bin').mkdir(parents=True)
+    (pnpm / 'dist').mkdir()
+    (pnpm / 'package.json').write_text('{"name":"pnpm","version":"10.18.3"}')
+    (pnpm / 'bin/pnpm.cjs').write_text("require('../dist/pnpm.cjs')")
+    implementation = pnpm / 'dist/pnpm.cjs'
+    implementation.write_text('fixture')
+    (tmp_path / 'source/frontend').mkdir(parents=True)
+    async def probe(scope: Any, group: Any, argv: tuple[str, ...], env: Any) -> bytes:
+        if '-e' in argv:
+            return json.dumps({'version': '24.11.1', 'executable': str(node)}).encode()
+        return b'10.18.3' if '-y' in argv or 'pnpm.cjs' in argv[1] else b'11.6.2'
+    monkeypatch.setattr(release, '_probe', probe)
+    tools = asyncio.run(release._frontend_tools(None, SimpleNamespace(root=tmp_path, source=tmp_path / 'source'), {}, node))
+    implementation.write_text('changed')
+    with pytest.raises(ValueError):
+        tools.verify()
+
+
+def test_m11_smoke_requires_producer_attestation() -> None:
+    from evaluation.smoke_contracts import SmokeManifest
+    from tests.test_d39_verifier_driver import _synthetic_smoke
+    record = SimpleNamespace(**{key: value for key, value in _receipt().items()
+                                if key in ('candidate_id', 'git_commit', 'freeze_sha256', 'runtime_instance_id', 'runtime_source_sha256')})
+    payload = _synthetic_smoke(record, 'a' * 64)
+    payload.pop('producer_tool_sha256', None)
+    with pytest.raises(ValueError):
+        SmokeManifest.model_validate_json(_bytes(payload))
+
+
+def test_m11_shared_verification_rejects_different_smoke_producer() -> None:
+    import hashlib
+    from evaluation.smoke_contracts import VerificationManifest
+    from tests.test_d39_verifier_driver import _synthetic_smoke
+    record = SimpleNamespace(candidate_id='a' * 16 + '-' + 'b' * 12, git_commit='b' * 40, freeze_sha256='a' * 64,
+                             runtime_instance_id='a' * 64, runtime_source_sha256='a' * 64)
+    smoke = _synthetic_smoke(record, 'a' * 64)
+    payload = dict(schema_version=1, **record.__dict__, materialization_sha256='a' * 64,
+                   verifier_tool_sha256='c' * 64, status='failed', commands=[], smoke_manifest=smoke,
+                   smoke_manifest_sha256=hashlib.sha256(_bytes(smoke)).hexdigest(), secret_scan_passed=False,
+                   candidate_clean_before=True, candidate_clean_after=True, candidate_snapshot_before_sha256='a' * 64,
+                   candidate_snapshot_after_sha256='a' * 64, runtime_snapshot_after_sha256='a' * 64, cleanup_status='completed')
+    with pytest.raises(ValueError, match='producer'):
+        VerificationManifest.model_validate_json(_bytes(payload))
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows ancestor junction rejection')
+def test_l9_browser_ancestor_junction_is_rejected(tmp_path: Path) -> None:
+    from evaluation.scripts import d39_smoke as producer
+    real = tmp_path / 'real'
+    real.mkdir()
+    (real / 'chrome.exe').write_bytes(b'MZfixture')
+    link = tmp_path / 'linked'
+    subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(real)], check=True, capture_output=True)
+    try:
+        with pytest.raises(ValueError):
+            producer._installed_browser(link / 'chrome.exe')
+    finally:
+        link.rmdir()

@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-METHODS = frozenset({'Browser.getVersion', 'Page.navigate', 'Runtime.evaluate', 'Input.dispatchKeyEvent',
+METHODS: frozenset[str] = frozenset({'Browser.getVersion', 'Page.navigate', 'Runtime.evaluate', 'Input.dispatchKeyEvent',
                      'Emulation.setDeviceMetricsOverride', 'Page.captureScreenshot'})
 _LIMIT = 2 * 1024 * 1024
 
@@ -168,52 +168,65 @@ def _wait(session: CDPSession, predicate: str, *, seconds: float = 10) -> None:
 
 
 def recovery_journey(session: CDPSession, *, base_url: str, migration_url: str,
-                     projects: dict[str, int], screenshots: Path) -> dict[str, Any]:
+                     projects: dict[str, int], screenshots: Path, counter_path: Path) -> dict[str, Any]:
     summary: dict[str, Any] = dict(waiting_ok=True, safe_retry_ok=True, unknown_remote_blocked=True,
                                   migration_failed_ok=True, keyboard_ok=True, duplicate_post_count=0,
                                   horizontal_overflow=False, playback_ok=True)
+    def count() -> int:
+        value = _json(_read_regular(counter_path, maximum=4096), maximum=4096)
+        if type(value) is not dict or set(value) != {'operation_posts'} or type(value['operation_posts']) is not int or not 0 <= value['operation_posts'] <= 16:
+            raise ValueError('operation counter invalid')
+        return value['operation_posts']
+
+    def capture(width: int, state: str) -> None:
+        if session.evaluate('document.documentElement.scrollWidth > document.documentElement.clientWidth') is True:
+            summary['horizontal_overflow'] = True
+        data = session.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False}).get('data')
+        if type(data) is not str or len(data) > 6 * 1024 * 1024:
+            raise ValueError('screenshot unavailable or oversized')
+        screenshot = base64.b64decode(data, validate=True)
+        if len(screenshot) > 4 * 1024 * 1024 or not screenshot.startswith(b'\x89PNG\r\n\x1a\n'):
+            raise ValueError('screenshot format/size refused')
+        _write_exclusive(screenshots / f'{width}-{state}.png', screenshot)
+
     for width in (390, 1440):
         session.call('Emulation.setDeviceMetricsOverride', {'width': width, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False})
+        summary['narrow_width' if width == 390 else 'wide_width'] = session.evaluate('innerWidth')
         for state, label in (('waiting', 'お待ち'), ('safe_retry', '現在の設定で再実行'), ('unknown_remote', '外部')):
-            session.navigate(base_url + '/projects/' + str(projects[state]))
-            _wait(session, 'document.body.innerText.includes(' + json.dumps(label) + ')')
-            if session.evaluate('document.documentElement.scrollWidth > innerWidth') is True:
-                summary['horizontal_overflow'] = True
+            project = projects['safe_retry_wide' if width == 1440 and state == 'safe_retry' else state]
+            session.navigate(base_url + '/projects/' + str(project))
+            _wait(session, "document.readyState==='complete' && !!document.querySelector('#generation-history li') && document.querySelector('#generation-history').innerText.includes(" + json.dumps(label) + ')')
+            # Require stable rendered controls across animation frames, after the
+            # durable history is present. A pre-history negation is not evidence.
+            _wait(session, "(async()=>{const h=document.querySelector('#generation-history');const state=()=>h.innerText+'|'+[...h.querySelectorAll('button')].map(b=>b.disabled).join();const a=state();await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));return a===state()})()")
             if state == 'waiting':
                 summary['waiting_ok'] &= session.evaluate("![...document.querySelectorAll('button')].some(b=>b.textContent.includes('現在の設定で再実行')&&!b.disabled)") is True
             elif state == 'safe_retry':
+                _wait(session, "[...document.querySelectorAll('#generation-history button')].some(b=>b.textContent.includes('現在の設定で再実行')&&!b.disabled)")
                 summary['safe_retry_ok'] &= session.evaluate("[...document.querySelectorAll('button')].some(b=>b.textContent.includes('現在の設定で再実行')&&!b.disabled)") is True
                 previous = session.evaluate("(()=>{const e=[...document.querySelectorAll('button,a,input,textarea,select,[tabindex]')].filter(e=>e.tabIndex>=0&&!e.disabled&&e.getClientRects().length);const i=e.findIndex(e=>e.textContent.includes('現在の設定で再実行'));if(i<1)return false;e[i-1].focus();return true})()")
                 for event in ({'type': 'keyDown', 'key': 'Tab', 'code': 'Tab'}, {'type': 'keyUp', 'key': 'Tab', 'code': 'Tab'}):
                     session.call('Input.dispatchKeyEvent', event)
                 summary['keyboard_ok'] &= previous is True and session.evaluate("document.activeElement.textContent.includes('現在の設定で再実行')") is True
+                before = count()
+                for _ in range(2):
+                    session.call('Input.dispatchKeyEvent', {'type': 'keyDown', 'key': 'Enter', 'code': 'Enter', 'text': '\r', 'windowsVirtualKeyCode': 13})
+                    session.call('Input.dispatchKeyEvent', {'type': 'keyUp', 'key': 'Enter', 'code': 'Enter', 'windowsVirtualKeyCode': 13})
+                _wait(session, "document.body.innerText.includes('現在の設定での再実行を受け付けました。')")
+                delta = count() - before
+                summary['duplicate_post_count'] = max(summary['duplicate_post_count'], delta)
+                summary['keyboard_ok'] &= delta == 1
             elif state == 'unknown_remote':
                 summary['unknown_remote_blocked'] &= session.evaluate("![...document.querySelectorAll('button')].some(b=>b.textContent.includes('現在の設定で再実行')&&!b.disabled)") is True
-            data = session.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False}).get('data')
-            if type(data) is not str or len(data) > 6 * 1024 * 1024:
-                raise ValueError('screenshot unavailable or oversized')
-            screenshot = base64.b64decode(data, validate=True)
-            if len(screenshot) > 4 * 1024 * 1024 or not screenshot.startswith(b'\x89PNG\r\n\x1a\n'):
-                raise ValueError('screenshot format/size refused')
-            _write_exclusive(screenshots / f'{width}-{state}.png', screenshot)
-    session.navigate(base_url + '/projects/' + str(projects['safe_retry']))
-    _wait(session, "[...document.querySelectorAll('button')].some(b=>b.textContent.includes('現在の設定で再実行')&&!b.disabled)")
-    # Fixed expression selects the real control; dispatch genuine keyboard events afterward.
-    session.evaluate("(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent.includes('現在の設定で再実行'));b.focus();return true})()")
-    for event in ({'type': 'keyDown', 'key': 'Tab', 'code': 'Tab'}, {'type': 'keyUp', 'key': 'Tab', 'code': 'Tab'}):
-        session.call('Input.dispatchKeyEvent', event)
-    summary['keyboard_ok'] &= session.evaluate("document.activeElement !== document.body") is True
-    session.evaluate("(()=>{[...document.querySelectorAll('button')].find(b=>b.textContent.includes('現在の設定で再実行')).focus();return true})()")
-    for _ in range(2):
-        session.call('Input.dispatchKeyEvent', {'type': 'keyDown', 'key': 'Enter', 'code': 'Enter'})
-        session.call('Input.dispatchKeyEvent', {'type': 'keyUp', 'key': 'Enter', 'code': 'Enter'})
-    _wait(session, "document.body.innerText.includes('現在の設定での再実行を受け付けました。')")
-    session.navigate(base_url + '/projects/' + str(projects['media']))
-    _wait(session, "!!document.querySelector('video')")
-    summary['playback_ok'] &= session.evaluate("(async()=>{const v=document.querySelector('video');v.muted=true;await v.play();return v.readyState>=2&&!v.paused})()") is True
-    session.navigate(migration_url)
-    _wait(session, "document.body.innerText.includes('移行')")
-    summary['migration_failed_ok'] &= session.evaluate("document.body.innerText.includes('バックアップ')||document.body.innerText.includes('起動')") is True
+            capture(width, state)
+        session.navigate(base_url + '/projects/' + str(projects['media']))
+        _wait(session, "document.readyState==='complete' && !!document.querySelector('video')")
+        summary['playback_ok'] &= session.evaluate("(async()=>{const v=document.querySelector('video');v.muted=true;await v.play();return v.readyState>=2&&!v.paused})()") is True
+        capture(width, 'playback')
+        session.navigate(migration_url)
+        _wait(session, "document.readyState==='complete' && document.body.innerText.includes('移行')")
+        summary['migration_failed_ok'] &= session.evaluate("document.body.innerText.includes('バックアップ')||document.body.innerText.includes('起動')") is True
+        capture(width, 'migration')
     return summary
 
 
@@ -276,27 +289,28 @@ def main(argv: list[str] | None = None) -> int:
     values = parser.parse_args(argv)
     try:
         config = _json(_read_regular(values.configuration, maximum=65536), maximum=65536)
-        if type(config) is not dict or set(config) != {'profile', 'base_url', 'migration_url', 'projects', 'screenshots', 'summary_path'}:
+        if type(config) is not dict or set(config) != {'profile', 'base_url', 'migration_url', 'projects', 'screenshots', 'summary_path', 'counter_path'}:
             raise ValueError('browser configuration refused')
         root = values.configuration.absolute().parent
-        for name in ('profile', 'screenshots', 'summary_path'):
+        for name in ('profile', 'screenshots', 'summary_path', 'counter_path'):
             path = Path(config[name])
             if not path.is_absolute() or not path.is_relative_to(root) or '..' in path.parts:
                 raise ValueError('browser configuration path refused')
-            current = path.parent if name == 'summary_path' else path
+            current = path.parent if name in ('summary_path', 'counter_path') else path
             while current != root.parent:
                 metadata = current.lstat()
                 if not stat.S_ISDIR(metadata.st_mode) or getattr(metadata, 'st_file_attributes', 0) & 0x400:
                     raise ValueError('browser directory type refused')
                 current = current.parent
-        if type(config['projects']) is not dict or set(config['projects']) != {'waiting', 'safe_retry', 'unknown_remote', 'media'} or any(type(value) is not int or value < 1 for value in config['projects'].values()):
+        if type(config['projects']) is not dict or set(config['projects']) != {'waiting', 'safe_retry', 'safe_retry_wide', 'unknown_remote', 'media'} or any(type(value) is not int or value < 1 for value in config['projects'].values()):
             raise ValueError('browser project identities refused')
         url, port = discover_owned_browser(Path(config['profile']), deadline=time.monotonic() + 30)
         with CDPSession(url, port=port) as session:
             product = session.call('Browser.getVersion', {}).get('product')
             if type(product) is not str or not product:
                 raise ValueError('browser identity missing')
-            summary = recovery_journey(session, base_url=config['base_url'], migration_url=config['migration_url'], projects=config['projects'], screenshots=Path(config['screenshots']))
+            summary = recovery_journey(session, base_url=config['base_url'], migration_url=config['migration_url'], projects=config['projects'], screenshots=Path(config['screenshots']), counter_path=Path(config['counter_path']))
+            summary['browser_version'] = product
         raw = json.dumps(summary, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False).encode('ascii') + b'\n'
         _write_exclusive(Path(config['summary_path']), raw)
         return 0

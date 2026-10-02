@@ -1,4 +1,27 @@
-# Plan C Handoff — D38 tooling approved; 4 GiB cap; real transfer pending
+# Plan C Handoff — D39 review corrections; operational acceptance pending
+
+## D39 review correction handoff — 2026-10-02
+
+Read `work-report-39.md` and the dated D39 review amendments in `docs/DTD.md` before
+running new evidence. The tooling fixes preserve frozen D35
+`522775516c0797abdb313e3432339a3a444b7ae2`, D37 public behavior, all byte caps and
+all non-resource acceptance gates. The user explicitly raised both development and
+D39 operational memory to **16 GiB aggregate / 14 GiB no-start / 12 GiB target**. The
+1536 MiB per-group Job cap stays in place. Historical 4 GiB refusals and synthetic
+agent tests do not count as actual-host 16 GiB acceptance.
+
+Operator-created candidate checkouts require exact LF working bytes: use
+`git -c core.autocrlf=false clone ...` and local `core.autocrlf=false` before checkout.
+Never normalize attestation input. Regenerate smoke/verification evidence after
+committing the final tooling: smoke now binds its producer attestation, and backend
+pytest includes verified FFmpeg/FFprobe bindings. Earlier evidence is not upgraded.
+
+Operational acceptance remains pending: this host lacks the audited Python 3.12.12,
+uv 0.12.15, Node 24.11.1 lane and `../blockvideo-d36-control`. Installed Chrome and
+media seams can be tested synthetically without that publication. The pinned README
+prerequisite mismatch and tracked credential-shaped test literals still fail their
+gates. Independent review remains pending. D35 stays **Not ready**; no materializer,
+verifier or smoke CLI is run against real candidate/evidence paths in this task.
 
 ## D38 current result
 
@@ -20,7 +43,7 @@ Independent review found no concrete trial content-binding false pass. Test-only
 requires refusal or the exact changed-content digest. The removed-guard mutation
 fails, and all eight targeted streamed/index/fingerprint regressions pass.
 
-The user's hard project budget is now **4 GiB aggregate** (target 3 GiB), including
+At the D38 checkpoint, the user's hard project budget was **4 GiB aggregate** (target 3 GiB), including
 agent runtime and owned descendants. Controller rerun under a verified 1 GiB native
 Job commit cap: **223 passed, 2 skipped**, sampled conservative working-set peak
 **1.739 GiB**. Earlier full backend/frontend/native Linux gates are historical and
@@ -36,7 +59,7 @@ not reconstruct private approval decisions. A failed stage may remain unaccepted
 never delete replacement paths or resume/overwrite a final.
 
 D38 tooling is approved; real aggregate transfer remains evaluator-controlled and
-pending. D39 implementation may follow with the 4 GiB budget and synthetic inputs;
+pending. That historical D38 handoff proposed a 4 GiB D39 budget (superseded above);
 the frozen README prerequisite mismatch remains a known documentation gate failure.
 New real runs require final clean tooling and fresh evidence roots; preserve previous
 publications. Historical attestations are verified against recorded Git blobs, not
