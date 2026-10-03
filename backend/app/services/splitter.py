@@ -180,6 +180,7 @@ def realign_to_source(
 
 
 _CODE_FENCE_RX = re.compile(r"```[\s\S]*?```")
+_SLIDE_FENCE_OPEN_RX = re.compile(r"```slide[ \t]*[^\n]*\n")
 _CODE_TOKEN = "〔コード{n}〕"
 _CODE_TOKEN_RX = re.compile(r"〔コード(\d+)〕")
 # Models often re-type the token without its brackets when writing tts_text
@@ -829,6 +830,52 @@ def merge_small_blocks(
     ]
 
 
+def split_authored_blocks(script: str) -> list[SplitBlock] | None:
+    """Split at the author's own block boundaries when the script states them.
+
+    The documented script format is a run of blocks, each one narration
+    followed by exactly one ```slide fence. In that form the author has
+    already decided which slide goes with which sentences, and asking the
+    model to re-split can only move a slide onto the wrong narration — a
+    68-block script came back as 48 blocks with slides drifting one or more
+    paragraphs late.
+
+    Args:
+        script: Source script, normalized or not.
+
+    Returns:
+        One block per narration+slide pair, or ``None`` when the script is not
+        entirely in that form (any non-slide fence, a slide with no narration
+        before it, or narration after the last slide) so free-form scripts
+        still go through the LLM split.
+
+    """
+    normalized = normalize_kept(script)
+    fences = list(_CODE_FENCE_RX.finditer(normalized))
+    if not fences:
+        return None
+
+    blocks: list[SplitBlock] = []
+    cursor = 0
+    for fence in fences:
+        if not _SLIDE_FENCE_OPEN_RX.match(fence.group(0)):
+            return None
+        narration = normalized[cursor : fence.start()].strip()
+        if not narration:
+            return None
+        blocks.append(
+            SplitBlock(
+                index=len(blocks),
+                source_text=f"{narration}\n\n{fence.group(0)}",
+                tts_text=sanitize_for_narration(narration),
+            )
+        )
+        cursor = fence.end()
+    if normalized[cursor:].strip():
+        return None
+    return blocks
+
+
 async def split_script(
     script: str,
     provider: LLMProvider,
@@ -858,6 +905,10 @@ async def split_script(
     normalized_script = normalize_kept(script)
     if not normalized_script:
         raise ValueError("台本が空です")
+
+    authored = split_authored_blocks(normalized_script)
+    if authored is not None:
+        return SplitResult(blocks=authored, used_fallback=False, attempts=0, issues=[])
 
     # Mask once, up front: segmenting the masked text keeps fenced code
     # atomic, so a segment boundary can never land inside a code block.

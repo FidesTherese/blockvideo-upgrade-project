@@ -11,6 +11,7 @@ from app.providers.llm_fake import FakeLLMProvider
 from app.services.splitter import (
     normalize_for_comparison,
     split_joined_source,
+    split_authored_blocks,
     split_script,
 )
 from app.services.stage_schemas import SplitPayload
@@ -115,3 +116,50 @@ async def test_deterministic_fallback_when_join_mismatch() -> None:
 def test_normalize_for_comparison() -> None:
     assert normalize_for_comparison("あ  いう\nえお") == normalize_for_comparison("あ いう えお")
     assert normalize_for_comparison("") == ""
+
+
+AUTHORED_SCRIPT = (
+    "性能は実行時間の逆数です。\n実行時間が短いほど、性能は高くなります。\n\n"
+    "```slide CPU 性能の定義\n  性能 ＝ 1 ÷ 実行時間\n```\n\n"
+    "CPI は、1 命令あたりのクロック数です。\n\n"
+    "```slide CPI\n  クロック数 ＝ 命令数 × CPI\n\n  例：命令数 100 万\n```\n"
+)
+
+
+class _UnusedProvider:
+    """Fails the test if the authored path ever reaches the model."""
+
+    async def chat(self, request):
+        raise AssertionError("authored scripts must not be re-split by the LLM")
+
+    async def chat_json(self, request):
+        raise AssertionError("authored scripts must not be re-split by the LLM")
+
+
+@pytest.mark.asyncio
+async def test_authored_blocks_keep_each_slide_with_its_narration() -> None:
+    config.reset_settings_cache()
+    from app.core.config import get_settings
+
+    result = await split_script(AUTHORED_SCRIPT, _UnusedProvider(), get_settings())
+
+    assert [b.index for b in result.blocks] == [0, 1]
+    assert result.blocks[0].source_text.startswith("性能は実行時間の逆数です。")
+    assert result.blocks[0].source_text.endswith("```slide CPU 性能の定義\n  性能 ＝ 1 ÷ 実行時間\n```")
+    assert "\n\n  例：命令数 100 万\n```" in result.blocks[1].source_text
+    assert result.blocks[0].tts_text == "性能は実行時間の逆数です。 実行時間が短いほど、性能は高くなります。"
+    assert result.blocks[1].tts_text == "CPI は、1 命令あたりのクロック数です。"
+    assert not result.used_fallback
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "```slide 先頭\n図\n```\n\nナレーションが後ろにある。",
+        "説明です。\n\n```python\nprint(1)\n```",
+        "説明です。\n\n```slide 図\n図\n```\n\n最後のスライドの後にも話が続く。",
+        "フェンスのない普通の台本です。",
+    ],
+)
+def test_non_authored_scripts_fall_through_to_llm_split(script: str) -> None:
+    assert split_authored_blocks(script) is None
