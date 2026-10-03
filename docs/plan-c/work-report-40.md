@@ -95,3 +95,37 @@ no-delete-anchor cases; none is counted as passed.
 - Known D35 failures (README prerequisites/links, tracked credential-shaped test
   literals, build-time rewrite of `frontend/vite.config.js`) would block D39 and
   therefore D40 for the frozen candidate; fixing them needs an authorized successor.
+
+## Independent review corrections (GPT-6 Astra, 2026-10-03)
+
+An independent review of `daad99e..7dab375` (and of D39 round 2) returned
+**Request changes**. The D40 findings and fixes:
+
+| ID | Finding | Status | Regression |
+|---|---|---|---|
+| B-01 (High) | Output in a not-yet-existing child of the D36 publication was accepted; the publication then failed to load | Fixed: every input file's directory is protected; the output may not equal or lie inside one (child, grandchild or through a link) | `test_decision_never_writes_into_an_input_publication` (self, child, grandchild, junction, D38/D39 evidence child) |
+| B-02 (High) | `\\?\C:\...\repo\backend\new` bypassed the tracked-source containment check and wrote files | Fixed: root, output and protected paths are normalized to Win32 form before every comparison; other device namespaces are refused; the normalized path is what gets created | `test_windows_path_spellings_cannot_reach_tracked_source` (extended, device, trailing dot, trailing space, case, extended root), `test_windows_extended_output_outside_the_repository_is_normalized`, extended-path case in the CLI tracked-output test |
+
+The reviewer found no additional false-Ready path through the canonical CLI in
+the integer thresholds, two-mode evaluation, coverage, review matching or D39
+command/smoke consistency, and judged the freeze refusal not to weaken a gate.
+The D39 findings A-01 to A-04 are recorded in `work-report-39.md`.
+
+### Review-correction verification
+
+All runs sequential, official Node 24.11.1 first on PATH.
+
+| Run | Result |
+|---|---|
+| D39 documentation + review-fix files + frozen-D35 documentation test | 117 passed |
+| D40 file | 64 passed |
+| Reversion check: each Astra fix undone in place, its regression rerun | 7 of 7 detected |
+| D40 mutation suite rerun (15 injected defects) | 14 detected; the surviving one disables the non-empty-directory rule, whose publication scenario is now also blocked by the B-01 guard (the rule itself is still detected by its CLI test) |
+| npm semver 7.7.3 cross-check | 2900 cases, 2 differences, both fail-closed rejections of `> =24` |
+| D37 runner + all D39 files + D40 file | 674 passed, 14 skipped (symlink-permission and POSIX-only) in 525 s |
+| Backend Ruff | All checks passed |
+| Frontend test / build / lint | 157 passed / passed / passed; no tracked frontend change |
+
+The complete backend suite was not rerun for these corrections; the changed
+modules (`blinded_runtime`, `d39_smoke`, `release_decision`, the decision CLI) are
+imported only by the D37 runner, D39 and D40 test files, which were all rerun.

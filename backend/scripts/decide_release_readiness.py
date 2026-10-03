@@ -105,7 +105,13 @@ def main(argv: list[str] | None = None) -> int:
         if after != tool:
             raise ValueError("decision source changed during evaluation")
         assert_running_closure(args.repo_root)
-        publish_decision(decision, args.output, args.repo_root, attestation_path=args.decision_tool_attestation)
+        # Every input's directory is protected: the decision never lands inside
+        # (and so can never invalidate) the D36, D38 or D39 publications or reviews.
+        inputs = (args.freeze, args.aggregate, args.import_validation, args.d38_tool_attestation, args.verification,
+                  args.verifier_tool_attestation, args.human, args.independent, args.limitations)
+        protected = tuple(path.parent for path in inputs if path is not None)
+        publish_decision(decision, args.output, args.repo_root, attestation_path=args.decision_tool_attestation,
+                         protected=protected)
     except (OSError, ValueError):
         print(_REFUSED, file=sys.stderr)
         return 2

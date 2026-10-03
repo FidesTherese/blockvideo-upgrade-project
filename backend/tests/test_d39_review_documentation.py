@@ -76,6 +76,7 @@ def test_passing_but_uncovering_contract_tests_fail_the_key(documented: Path, na
     'Checks are automated technical evidence, not human acceptance. The held-out corpus remains mounted outside.',
     "Automated checks aren't human acceptance; held-out execution happens externally.",
     'No automated evidence is human acceptance. Held-out data stays outside the process.',
+    'Human acceptance is not automated evidence. Held-out execution is external.',
 ])
 def test_conforming_limitation_phrasings_pass(documented: Path, spec: str) -> None:
     (documented / 'specification.md').write_text(spec, encoding='utf-8')
@@ -92,6 +93,9 @@ def test_conforming_limitation_phrasings_pass(documented: Path, spec: str) -> No
     'Held-out evaluation runs inside the candidate process, not outside.',
     "Automated evidence isn't merely technical evidence, it is human acceptance.",
     'Automated evidence is not, in practice, distinct from human acceptance.',
+    'Automated evidence is human acceptance, not merely a technical check.',
+    'Automated evidence is human acceptance and not a technical check.',
+    'Automated is human acceptance is not human acceptance.',
     'Automated evidence isn\u2019t merely technical evidence, it is human acceptance.',
 ])
 def test_appended_contradictions_fail_limitation_boundary(documented: Path, extra: str) -> None:
@@ -108,6 +112,19 @@ def test_npm_engine_spellings_in_real_locks_are_understood(documented: Path) -> 
     assert checks(documented)['locked_versions'] is True
     lock.write_text(lock.read_text(encoding='utf-8') + "  synthetic-old@1.0.0:\n    engines: {node: '<= 20'}\n", encoding='utf-8')
     assert checks(documented)['locked_versions'] is False
+
+
+@pytest.mark.parametrize(('engine', 'accepted'), [
+    ('0 - 24.11.1', True), ('0 - 24.11.1-rc.1', False), ('>=24 || nonsense', False), ('nonsense || >=24', False),
+    ('>=024', False), ('>=24.11.1-rc.01', False), ('>=24.11.1x', False), ('>=24.0.0-0 <25', True),
+])
+def test_node_ranges_fail_closed_like_npm_semver(documented: Path, engine: str, accepted: bool) -> None:
+    # Each expectation matches npm's own semver 7.7.3 for Node 24.11.1.
+    package = documented / 'frontend/package.json'
+    data = json.loads(package.read_text(encoding='utf-8'))
+    data['engines']['node'] = engine
+    package.write_text(json.dumps(data), encoding='utf-8')
+    assert checks(documented)['locked_versions'] is accepted
 
 
 def test_optional_manifest_fields_may_be_absent(documented: Path) -> None:
@@ -150,6 +167,17 @@ def test_reference_style_links_are_checked(documented: Path) -> None:
     readme = documented / 'README.md'
     readme.write_text(readme.read_text(encoding='utf-8') + '[guide]: docs/missing-guide.md\n', encoding='utf-8')
     assert checks(documented)['setup_paths'] is False
+
+
+@pytest.mark.parametrize(('definition', 'accepted'), [
+    ('[setup]:\n  docs/missing.md\n', False), ('[setup]:\n  backend/.env.example\n', True),
+    ('[setup]: backend/.env.example "Title"\n', True), ('[setup]:\n  backend/.env.example "Title"\n', True),
+    ('[setup]:\n\n  backend/.env.example\n', False), ('[setup]:\n', False),
+])
+def test_reference_destinations_on_the_next_line_are_checked(documented: Path, definition: str, accepted: bool) -> None:
+    readme = documented / 'README.md'
+    readme.write_text(readme.read_text(encoding='utf-8') + '[guide][setup]\n\n' + definition, encoding='utf-8')
+    assert checks(documented)['setup_paths'] is accepted
 
 
 @pytest.mark.parametrize(('failed', 'key'), [('recovery_codes', 'recovery_codes'), ('ui_recovery', 'recovery_codes'), ('migration_restore', 'migration_restore')])

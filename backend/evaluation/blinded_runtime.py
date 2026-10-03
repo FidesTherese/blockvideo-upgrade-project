@@ -766,16 +766,18 @@ def _windows_resident(pid: int) -> int | None:
 
 
 def _windows_creation_time(pid: int) -> int | None:
-    """Process creation FILETIME, or None when it cannot be proven."""
+    """Process creation FILETIME; None when the process is gone and
+    `UNKNOWN_CREATION` when it exists but cannot be queried (for example access
+    denied), so callers never mistake an unqueryable process for a gone one."""
     opener = _win_function("OpenProcess", [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32], ctypes.c_void_p)
     handle = opener(0x1000, 0, pid)
     if not handle:
-        return None
+        return None if ctypes.get_last_error() == 87 else UNKNOWN_CREATION
     try:
         times = [ctypes.c_uint64() for _ in range(4)]
         query = _win_function("GetProcessTimes", [ctypes.c_void_p, *(ctypes.POINTER(ctypes.c_uint64),) * 4])
         if not query(handle, *(ctypes.byref(value) for value in times)):
-            return None
+            return UNKNOWN_CREATION
         return times[0].value
     finally:
         _windows_close_handle(int(handle))
@@ -805,14 +807,18 @@ def _posix_process_table() -> dict[int, tuple[int, str, int, int, int]]:
 
 
 CreationTime = Callable[[int], "int | None"]
+# Creation times are non-negative; this marks a live process whose time is unknown.
+UNKNOWN_CREATION: int = -1
 
 
 def _process_descendants(table: dict[int, tuple[int, str]], root: int, created: CreationTime) -> set[int]:
-    """Descendants by recorded parent PID, excluding PID-reuse orphans.
+    """Descendants by recorded parent PID, excluding proven PID-reuse orphans.
 
     A recorded parent PID may belong to a newer process that reused it; a real
-    child is never created before its parent, and an unprovable relation is
-    not adopted.
+    child is never created before its parent. Only a relation proven to be
+    reuse (both times known, child older) is excluded: a live child whose time
+    cannot be queried stays counted, so its memory is measured or the sample
+    fails closed instead of silently dropping its whole subtree.
     """
     selected = {root}
     children: dict[int, list[int]] = {}
@@ -829,7 +835,7 @@ def _process_descendants(table: dict[int, tuple[int, str]], root: int, created: 
             if pid in selected:
                 continue
             child_time = created(pid)
-            if child_time is None or child_time < parent_time:
+            if child_time is None or (child_time >= 0 and parent_time >= 0 and child_time < parent_time):
                 continue
             selected.add(pid)
             pending.append(pid)
@@ -854,7 +860,7 @@ def _agent_root(table: dict[int, tuple[int, str]], controller: int,
         if ancestors and created is not None:
             # Stop at a reused parent PID: an ancestor is never newer than its child.
             child_time, parent_time = created(ancestors[-1]), created(pid)
-            if child_time is None or parent_time is None or parent_time > child_time:
+            if child_time is None or parent_time is None or child_time < 0 or parent_time < 0 or parent_time > child_time:
                 break
         ancestors.append(pid)
         pid = table[pid][0]
@@ -908,10 +914,9 @@ def _owned_memory_sample(scope: OwnedProcessScope | None = None) -> tuple[int, i
         try:
             size = _windows_resident(pid) if os.name == "nt" else posix[pid][3]
         except OSError:
-            if pid in owned or pid in controller_tree:
-                raise ValueError("owned resident accounting lost") from None
-            unknown_agent = True
-            continue
+            # A live process in any accounted tree whose memory cannot be read
+            # fails closed: a reserve could undercount an arbitrarily large tree.
+            raise ValueError("owned resident accounting lost") from None
         if size is None:
             if pid == root:
                 unknown_agent = True

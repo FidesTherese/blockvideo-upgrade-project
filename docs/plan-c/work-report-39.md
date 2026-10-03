@@ -252,3 +252,22 @@ POSIX/Linux-only and Windows no-delete-anchor cases; none is counted as passed.
 During this round, scripted edits briefly wrote CRLF working bytes into four
 files; they were normalized back to exact LF (committed blobs contain no CR)
 before the full run, as the LF attestation requires.
+
+## Independent review corrections (GPT-6 Astra, 2026-10-03)
+
+An independent review of `42c0683..60dad35` returned **Request changes** with one
+plausible and three confirmed D39 findings. All are fixed on
+`claude/d40-readiness-decision` (PR #2) because D39 was already merged; the DTD
+amendments above are updated in place.
+
+| ID | Finding | Status | Regression |
+|---|---|---|---|
+| A-01 (High, plausible) | A live child of the detected agent whose creation time is access-denied was dropped with its whole subtree and no reserve | Fixed: only proven PID reuse is excluded; unqueryable live processes stay counted and an unreadable accounted process fails the sample | `test_b1_unqueryable_live_agent_child_is_counted_or_fails_closed` |
+| A-02 (Medium) | Negations were counted across clauses (`Automated evidence is human acceptance, not merely a technical check.` passed) | Fixed: five exact denial forms; every other equating sentence is a contradiction | three sentences added to `test_appended_contradictions_fail_limitation_boundary`; reverse-order denial added to the conforming set |
+| A-03 (Medium) | `0 - 24.11.1-rc.1`, `>=24 \|\| nonsense` and `>=024` were accepted | Fixed: all alternatives parsed first, prerelease upper bounds, no leading zeros, whitespace-separated comparators; 2900 cases agree with npm semver 7.7.3 except fail-closed rejections of `> =24` | `test_node_ranges_fail_closed_like_npm_semver` |
+| A-04 (Medium) | A reference definition with its destination on the next line was not extracted | Fixed: next-line destinations parsed; a label without a parsed destination fails `setup_paths` | `test_reference_destinations_on_the_next_line_are_checked` |
+
+Each fix was reverted in place and its regression then failed (7 of 7 reversion
+checks detected, including the D40 items). The full frozen D35 tree still fails
+only `locked_versions`. Verification results are recorded in
+`work-report-40.md` under the same heading.

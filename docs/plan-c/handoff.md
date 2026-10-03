@@ -19,6 +19,11 @@ Read `D40 implementation amendments (2026-10-03)` in `docs/DTD.md` and
 - `evidence_json.py` changed, so D38/D39 attestation aggregates change: produce
   their evidence with the final committed tooling.
 - D40 never tags, publishes, deploys or creates a release.
+- An independent GPT-6 Astra review (2026-10-03) requested changes for D39 round 2
+  (A-01 to A-04) and D40 (B-01, B-02). All six are fixed on this branch (PR #2),
+  including the D39 ones because D39 was already merged; see the "Independent
+  review corrections" sections of `work-report-39.md` and `work-report-40.md`. A
+  follow-up review of these corrections is still pending.
 
 ## D39 second review correction handoff — 2026-10-03
 

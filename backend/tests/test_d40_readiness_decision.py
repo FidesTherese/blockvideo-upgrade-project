@@ -584,6 +584,9 @@ def test_decision_cli_refuses_unattested_source_and_tracked_output(world: dict[s
     tracked = ROOT / "backend" / "d40-decision-must-not-exist"
     assert cli.main(_cli_arguments(world, ROOT, attestation, aggregate, None, tracked)) == 2
     assert not tracked.exists()
+    if os.name == "nt":  # the same location through the Win32 extended-length namespace
+        assert cli.main(_cli_arguments(world, ROOT, attestation, aggregate, None, Path("\\\\?\\" + str(tracked)))) == 2
+        assert not tracked.exists()
 
 
 def test_decision_cli_refuses_a_root_that_is_not_the_running_code(world: dict[str, Any], tmp_path: Path) -> None:
@@ -596,14 +599,63 @@ def test_decision_cli_refuses_a_root_that_is_not_the_running_code(world: dict[st
     assert not output.exists()
 
 
-def test_decision_never_writes_into_an_input_publication(world: dict[str, Any], tmp_path: Path) -> None:
+def _snapshot(directory: Path) -> dict[str, bytes | None]:
+    return {path.relative_to(directory).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in sorted(directory.rglob("*"))}
+
+
+@pytest.mark.parametrize("target", ["self", "child", "grandchild", "junction", "evidence_child"])
+def test_decision_never_writes_into_an_input_publication(world: dict[str, Any], tmp_path: Path, target: str) -> None:
     from scripts import decide_release_readiness as cli
     attestation, aggregate = _real_attestation(tmp_path / "attestation")
     publication = world["freeze_path"].parent
-    before = sorted(entry.name for entry in publication.iterdir())
-    assert cli.main(_cli_arguments(world, ROOT, attestation, aggregate, None, publication)) == 2
-    assert sorted(entry.name for entry in publication.iterdir()) == before
-    decision.load_freeze(world["freeze_path"])  # still a complete, loadable publication
+    inputs = _write_inputs(world, tmp_path / "evidence")
+    before, evidence_before = _snapshot(publication), _snapshot(tmp_path / "evidence")
+    link = tmp_path / "alias"
+    if target == "junction":
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(publication), str(link))
+        else:
+            link.symlink_to(publication, target_is_directory=True)
+    output = {"self": publication, "child": publication / "decision", "grandchild": publication / "a" / "b",
+              "junction": link / "decision", "evidence_child": tmp_path / "evidence" / "decision"}[target]
+    try:
+        assert cli.main(_cli_arguments(world, ROOT, attestation, aggregate, inputs, output)) == 2
+        assert _snapshot(publication) == before and _snapshot(tmp_path / "evidence") == evidence_before
+        decision.load_freeze(world["freeze_path"])  # still a complete, loadable publication
+    finally:
+        if target == "junction":
+            os.rmdir(link) if os.name == "nt" else link.unlink()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 path namespaces")
+@pytest.mark.parametrize("form", ["extended", "device", "trailing_dot", "trailing_space", "case", "extended_root"])
+def test_windows_path_spellings_cannot_reach_tracked_source(tmp_path: Path, form: str) -> None:
+    root = _source_root(tmp_path)
+    tracked = root / "backend" / "d40-new"
+    output, repo = {
+        "extended": (Path("\\\\?\\" + str(tracked)), root),
+        "device": (Path("\\\\.\\" + str(tracked)), root),
+        "trailing_dot": (Path(str(root / "backend") + ".\\d40-new"), root),
+        "trailing_space": (Path(str(root / "backend") + " \\d40-new"), root),
+        "case": (Path(str(tracked).upper()), root),
+        "extended_root": (tracked, Path("\\\\?\\" + str(root))),
+    }[form]
+    with pytest.raises(ValueError):
+        decision.validate_output_location(output, repo, create_parent=True)
+    assert not tracked.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 path namespaces")
+def test_windows_extended_output_outside_the_repository_is_normalized(tmp_path: Path) -> None:
+    root = _source_root(tmp_path)
+    target = tmp_path / "outside" / "decision"
+    resolved = decision.validate_output_location(Path("\\\\?\\" + str(target)), root, create_parent=True)
+    assert not str(resolved).startswith("\\\\") and resolved.parent.is_dir()
+    for device in ("\\\\?\\GLOBALROOT\\Device\\x", "\\\\.\\pipe\\x", "\\\\?\\Volume{0}\\x"):
+        with pytest.raises(ValueError):
+            decision.validate_output_location(Path(device), root)
 
 
 def test_failed_summary_never_leaves_a_lone_decision(world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -122,6 +122,29 @@ def test_b1_declared_agent_tree_only_adds_accounting(monkeypatch: pytest.MonkeyP
         runtime._owned_memory_sample(runtime.OwnedProcessScope())
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows process table seam')
+@pytest.mark.parametrize('readable', [True, False])
+def test_b1_unqueryable_live_agent_child_is_counted_or_fails_closed(monkeypatch: pytest.MonkeyPatch, readable: bool) -> None:
+    # 12 is a live child of the detected agent whose creation time is access-denied.
+    table = {1: (0, 'explorer'), 10: (1, 'claude'), 12: (10, 'worker'), 13: (12, 'worker'), 20: (10, 'pwsh'), 30: (20, 'python')}
+    times = {1: 1, 10: 2, 12: runtime.UNKNOWN_CREATION, 13: 5, 20: 3, 30: 4}
+    monkeypatch.setattr(runtime, '_windows_process_table', lambda: table)
+    monkeypatch.setattr(runtime, '_windows_creation_time', times.get)
+    monkeypatch.setattr(runtime.os, 'getpid', lambda: 30)
+    monkeypatch.delenv('D39_AGENT_PID', raising=False)
+    large = 15 * 1024 ** 3
+    def resident(pid: int) -> int:
+        if pid == 12 and not readable:
+            raise OSError('access denied')
+        return large if pid in (12, 13) else 10
+    monkeypatch.setattr(runtime, '_windows_resident', resident)
+    if readable:
+        assert runtime._owned_memory_sample() == (0, 2 * large + 30)
+    else:
+        with pytest.raises(ValueError, match='accounting lost'):
+            runtime._owned_memory_sample()
+
+
 @pytest.mark.parametrize('value', ['abc', '0', '-1'])
 def test_b1_invalid_agent_pid_refuses_before_any_group_exists(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str) -> None:
     monkeypatch.setenv('D39_AGENT_PID', value)

@@ -297,28 +297,67 @@ def _allowed_output(path: Path, root: Path) -> bool:
     return not _within(path, root) or (_within(path, evidence) and path != evidence)
 
 
-def validate_output_location(output: Path, repo_root: Path, *, create_parent: bool = False) -> Path:
-    """Outputs live outside the repository or under its Git-ignored release-evidence root.
+_DEVICE_PREFIX = re.compile(r"^[\\/]{2}[?.][\\/]")
 
-    Decided lexically and again after resolving links, without Git.
+
+def _plain_path(path: Path) -> Path:
+    r"""Win32 form of a path so equal locations compare equal.
+
+    `\\?\C:\x` and `\\.\C:\x` become `C:\x`; `\\?\UNC\server\share` becomes
+    `\\server\share`; any other device namespace (volume GUIDs, GLOBALROOT, pipes)
+    is refused. The normalized path is also what is later created and written.
     """
-    root = repo_root.resolve(strict=True)
-    lexical = Path(os.path.abspath(output))
-    if not _allowed_output(lexical, root):
-        raise ValueError("decision output must be outside tracked source")
+    text = os.fspath(path)
+    if os.name == "nt" and _DEVICE_PREFIX.match(text):
+        rest = text[4:]
+        if re.match(r"(?i)unc[\\/]", rest):
+            text = "\\\\" + rest[4:]
+        elif re.match(r"[A-Za-z]:[\\/]", rest):
+            text = rest
+        else:
+            raise ValueError("decision output must be a plain drive or UNC path")
+    return Path(text)
+
+
+def _absolute(path: Path) -> Path:
+    # abspath also applies Win32 normalization (`..`, trailing dots and spaces).
+    return _plain_path(Path(os.path.abspath(_plain_path(path))))
+
+
+def _resolved(path: Path, *, strict: bool) -> Path:
+    return _plain_path(_absolute(path).resolve(strict=strict))
+
+
+def validate_output_location(output: Path, repo_root: Path, *, create_parent: bool = False,
+                             protected: tuple[Path, ...] = ()) -> Path:
+    """Outputs live outside the repository or under its Git-ignored release-evidence root,
+    and never inside a protected input directory (or a child of one).
+
+    Decided on the normalized lexical path, on the deepest existing ancestor
+    resolved before anything is created, and again after creation, without Git.
+    """
+    root = _resolved(repo_root, strict=True)
+    guards = [location for path in protected for location in (_absolute(path), _resolved(path, strict=False))]
+
+    def allowed(candidate: Path) -> bool:
+        return _allowed_output(candidate, root) and not any(_within(candidate, guard) for guard in guards)
+
+    lexical = _absolute(output)
+    if not allowed(lexical):
+        raise ValueError("decision output must be outside tracked source and input publications")
     # Resolve the deepest existing ancestor first so no directory is ever created
-    # through a link that leads back into tracked source.
+    # through a link that leads back into tracked source or an input publication.
     existing = lexical.parent
     while not os.path.lexists(existing) and existing.parent != existing:
         existing = existing.parent
-    projected = existing.resolve(strict=True).joinpath(*lexical.parent.relative_to(existing).parts, lexical.name)
-    if not _allowed_output(projected, root):
-        raise ValueError("decision output must be outside tracked source")
+    projected = _plain_path(existing.resolve(strict=True)).joinpath(*lexical.parent.relative_to(existing).parts, lexical.name)
+    if not allowed(projected):
+        raise ValueError("decision output must be outside tracked source and input publications")
     if create_parent:
         lexical.parent.mkdir(parents=True, exist_ok=True)
-    resolved = lexical.parent.resolve(strict=True) / lexical.name
-    if not _allowed_output(resolved, root):
-        raise ValueError("decision output must be outside tracked source")
+    resolved = _plain_path(lexical.parent.resolve(strict=True)) / lexical.name
+    if not allowed(resolved):
+        raise ValueError("decision output must be outside tracked source and input publications")
     return resolved
 
 
@@ -834,17 +873,19 @@ def render_markdown(decision: ReadinessDecision) -> str:
 
 
 def publish_decision(decision: ReadinessDecision, output: Path, repo_root: Path, *,
-                     attestation_path: Path | None = None) -> None:
+                     attestation_path: Path | None = None, protected: tuple[Path, ...] = ()) -> None:
     """Write decision.json and decision.md exclusively (never replacing prior evidence).
 
     The output directory must be new or empty except for this run's decision-tool
     attestation, so a decision can never be added to (and thereby invalidate) an
-    input publication. A lone decision.json is never left behind.
+    input publication. `protected` names every input directory; the output may not be
+    inside one either, so an input publication can never gain new entries. A lone
+    decision.json is never left behind.
     """
-    target = validate_output_location(output, repo_root, create_parent=True)
+    target = validate_output_location(output, repo_root, create_parent=True, protected=protected)
     require_directory(target, "decision output", create=True)
     allowed = set()
-    if attestation_path is not None and Path(os.path.abspath(attestation_path)).parent == Path(os.path.abspath(output)):
+    if attestation_path is not None and _absolute(attestation_path).parent == _absolute(output):
         allowed.add(attestation_path.name)
     with os.scandir(target) as entries:
         if any(entry.name not in allowed for entry in entries):
