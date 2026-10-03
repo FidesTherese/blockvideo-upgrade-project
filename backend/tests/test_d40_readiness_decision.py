@@ -648,6 +648,20 @@ def test_windows_path_spellings_cannot_reach_tracked_source(tmp_path: Path, form
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 path namespaces")
+def test_extended_repo_root_gives_the_same_decision(world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import decide_release_readiness as cli
+    inputs = _write_inputs(world, tmp_path / "evidence")
+    attestation, aggregate = _real_attestation(tmp_path / "attestation")
+    _forbid_side_effects(monkeypatch)
+    outputs = []
+    for index, root in enumerate((ROOT, Path("\\\\?\\" + str(ROOT)))):
+        output = tmp_path / f"decision-{index}"
+        assert cli.main(_cli_arguments(world, root, attestation, aggregate, inputs, output)) == 0
+        outputs.append((output / "decision.json").read_bytes())
+    assert outputs[0] == outputs[1]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 path namespaces")
 def test_windows_extended_output_outside_the_repository_is_normalized(tmp_path: Path) -> None:
     root = _source_root(tmp_path)
     target = tmp_path / "outside" / "decision"
@@ -668,8 +682,26 @@ def test_failed_summary_never_leaves_a_lone_decision(world: dict[str, Any], tmp_
     monkeypatch.setattr(decision, "publish_immutable", flaky)
     output = tmp_path / "partial"
     with pytest.raises(OSError):
-        decision.publish_decision(result, output, ROOT)
+        decision.publish_decision(result, output, ROOT, protected=(world["freeze_path"].parent,))
     assert list(output.iterdir()) == []
+
+
+def test_publication_api_always_protects_its_inputs(world: dict[str, Any], tmp_path: Path) -> None:
+    result = _decide(world)
+    publication = world["freeze_path"].parent
+    before = _snapshot(publication)
+    publish = decision.publish_decision
+    with pytest.raises(TypeError):
+        publish(result, publication / "api-child", ROOT)  # type: ignore[call-arg]
+    for protected in ((), [publication], ("not-a-path",)):
+        with pytest.raises(ValueError):
+            publish(result, publication / "api-child", ROOT, protected=protected)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        publish(result, publication / "api-child", ROOT, protected=(publication,))
+    assert _snapshot(publication) == before
+    decision.load_freeze(world["freeze_path"])
+    publish(result, tmp_path / "api-output", ROOT, protected=(publication,))
+    assert sorted(entry.name for entry in (tmp_path / "api-output").iterdir()) == ["decision.json", "decision.md"]
 
 def test_output_location_never_creates_through_a_link_into_tracked_source(tmp_path: Path) -> None:
     root = _source_root(tmp_path)

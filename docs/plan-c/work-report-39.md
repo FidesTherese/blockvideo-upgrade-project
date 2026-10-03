@@ -271,3 +271,17 @@ Each fix was reverted in place and its regression then failed (7 of 7 reversion
 checks detected, including the D40 items). The full frozen D35 tree still fails
 only `locked_versions`. Verification results are recorded in
 `work-report-40.md` under the same heading.
+
+### Follow-up review of the corrections (Astra, 2026-10-03)
+
+The follow-up review of `1a1cd40` judged A-01 resolved and A-02 to A-04 partially
+resolved, and added R-02 to R-04 and R-06 for D39. All are fixed:
+
+| ID | Remaining gap | Fix | Regression |
+|---|---|---|---|
+| R-02 (Medium) | `No doubt automated evidence is human acceptance.` matched the `no ...` denial form | `no` must directly precede `automated`; only determiners may start a subject; qualifier words are excluded | three sentences added to `test_appended_contradictions_fail_limitation_boundary` |
+| R-03 (Medium) | Empty build-metadata identifiers (`+a..b`, `+...`) were accepted | Build metadata is non-empty dot-separated identifiers; 3120 cases agree with npm semver 7.7.3 except fail-closed `> =24` | four cases added to `test_node_ranges_fail_closed_like_npm_semver` |
+| R-04 (Medium) | Reference labels spanning lines or containing escapes were skipped | Labels may contain line endings and backslash escapes; a label crossing a blank line (CR-aware) is refused | `test_multiline_and_escaped_reference_labels_are_checked` |
+| R-06 (Low) | The A-01 test mocked the classifier it was meant to protect | A new test fakes only the Win32 layer (errors 5 and 87, failed `GetProcessTimes`) and runs the real classifier through accounting and refusal | `test_b1_win32_creation_errors_are_classified_and_counted` |
+
+Verification is recorded in `work-report-40.md` under the same heading.

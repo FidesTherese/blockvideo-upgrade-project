@@ -115,7 +115,7 @@ def fake_providers() -> Iterator[tuple[str, dict[str, int]]]:
 # Numeric identifiers follow SemVer/node-semver: no leading zeros (`024` is invalid).
 _SEMVER_COMPARATOR = re.compile(
     r'(?P<op>>=|<=|>|<|=|\^|~>|~)?\s*v?(?P<major>0|[1-9]\d*|[xX*])(?:\.(?P<minor>0|[1-9]\d*|[xX*]))?'
-    r'(?:\.(?P<patch>0|[1-9]\d*|[xX*]))?(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?')
+    r'(?:\.(?P<patch>0|[1-9]\d*|[xX*]))?(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?')
 _SEMVER_HYPHEN = re.compile(r'\s*(\S+)\s+-\s+(\S+)\s*')
 Bound = tuple[str, tuple[int, int, int]]
 
@@ -289,12 +289,16 @@ _EQUATES = re.compile(r"\b(?:is|are|isn't|aren't|counts? as|constitutes?|equals?
 # sentence about the two is treated as an affirmation (fail closed).
 # Subject words exclude verbs, negations and the predicate, so no second clause or
 # affirmation can hide inside a subject phrase.
-_WORD = r"(?!(?:is|are|was|were|be|been|not|never|no|nor|human|acceptance|counts?|means?|equals?|constitutes?|replaces?)\b)[a-z][a-z/-]*"
-_SUBJECT = rf"(?:{_WORD} ){{0,6}}automated(?: {_WORD}){{0,4}}"
+_WORD = (r"(?!(?:is|are|was|were|be|been|not|never|no|nor|human|acceptance|counts?|means?|equals?|constitutes?"
+         r"|replaces?|but|except|unless|if|only|than|without|doubt|question|also|too)\b)[a-z][a-z/-]*")
+# Only determiners may precede "automated"; an adverbial or quantifying prefix
+# ("no doubt", "not only") could otherwise reverse the sentence.
+_DETERMINERS = r"(?:(?:the|all|any|these|those|such|our|its|their|this|that) ){0,2}"
+_SUBJECT = rf"{_DETERMINERS}automated(?: {_WORD}){{0,4}}"
 _AUTOMATED_DENIALS: tuple[re.Pattern[str], ...] = (
     re.compile(_SUBJECT + r" (?:is|are) (?:not|never) human acceptance"),
     re.compile(_SUBJECT + r" (?:isn't|aren't) human acceptance"),
-    re.compile(rf"no(?: {_WORD}){{0,3}} automated(?: {_WORD}){{0,4}} (?:is|are) human acceptance"),
+    re.compile(rf"no automated(?: {_WORD}){{0,4}} (?:is|are) human acceptance"),
     re.compile(rf"(?:{_WORD} ){{1,4}}(?:is|are) automated(?: {_WORD}){{0,4}}, not human acceptance"),
     re.compile(rf"human acceptance (?:is|are) (?:not|never) automated(?: {_WORD}){{0,4}}"),
 )
@@ -351,14 +355,20 @@ _INLINE_LINK = re.compile(r'\]\(\s*(?:<([^<>\n]*)>|([^\s()<>]+))(?:\s+(?:"[^"\n]
 _HTML_LINK = re.compile(r'\b(?:src|href)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s"\'<>`=]+))', re.IGNORECASE)
 # A reference definition's destination may follow on the next line (CommonMark
 # allows one line ending); every definition label must yield a parsed destination.
-_REFERENCE_START = re.compile(r'^ {0,3}\[[^\]\n]+\]:', re.MULTILINE)
-_REFERENCE_LINK = re.compile(r'^ {0,3}\[[^\]\n]+\]:[ \t]*(?:\r?\n[ \t]*)?(?:<([^<>\n]*)>|([^\s<>]\S*))', re.MULTILINE)
+_REFERENCE_LABEL = r'\[(?:[^\[\]\\]|\\.){1,999}\]'
+_REFERENCE_START = re.compile(r'^ {0,3}' + _REFERENCE_LABEL + ':', re.MULTILINE | re.DOTALL)
+_REFERENCE_LINK = re.compile(r'^ {0,3}' + _REFERENCE_LABEL + r':[ \t]*(?:\r?\n[ \t]*)?(?:<([^<>\n]*)>|([^\s<>]\S*))',
+                             re.MULTILINE | re.DOTALL)
 
 
 def _readme_links(readme: str) -> list[str] | None:
     inline = _INLINE_LINK.findall(readme)
     references = _REFERENCE_LINK.findall(readme)
-    if len(inline) != readme.count('](') or len(references) != len(_REFERENCE_START.findall(readme)):
+    starts = _REFERENCE_START.findall(readme)
+    # A blank line ends a label, so a "label" spanning one is not a definition here;
+    # refusing it keeps unparsed definitions from being silently skipped.
+    if (len(inline) != readme.count('](') or len(references) != len(starts)
+            or any(re.search(r'\n[ \t\r]*\n', start) for start in starts)):
         return None
     groups = [*inline, *_HTML_LINK.findall(readme), *references]
     return [next((item for item in group if item), '') for group in groups]

@@ -2246,10 +2246,11 @@ pin, cap or threshold.
   versions (spaced operators, `v` prefixes, x-ranges, hyphen ranges, prerelease
   bounds); unknown syntax fails closed. Every `||` alternative is parsed before any
   is evaluated, numeric identifiers reject leading zeros, comparators must be
-  whitespace-separated, and a hyphen upper bound with a prerelease excludes that
-  release (`0 - 24.11.1-rc.1` rejects 24.11.1). Cross-checked against npm's semver
-  7.7.3 on 2900 cases; the only differences are rejections of nonstandard spacing
-  such as `> =24`. `packageManager`/`engines.node` must agree
+  whitespace-separated, build metadata consists of non-empty dot-separated
+  identifiers, and a hyphen upper bound with a prerelease excludes that release
+  (`0 - 24.11.1-rc.1` rejects 24.11.1). Cross-checked against npm's semver 7.7.3 on
+  3120 cases; the only differences are rejections of nonstandard spacing such as
+  `> =24`. `packageManager`/`engines.node` must agree
   with the lane when present and may be absent. README inline (spaced, bracketed
   and titled destinations), reference and HTML (`src`/`href`, any quoting) links
   must be case-exact, forward-slash relative paths to regular files named in the
@@ -2257,18 +2258,22 @@ pin, cap or threshold.
   afterwards (`/x` means repository root; drive prefixes including `C:x` and
   backslashes are refused). Any `](` that is not a parsed inline link fails the
   key, and so does any reference-definition label without a parsed destination
-  (a destination on the following line is parsed, as CommonMark allows). Coverage keys also require the committed D34/D35 tests to reference
+  (labels may span lines and contain backslash escapes, and a destination on the
+  following line is parsed, as CommonMark allows; a label crossing a blank line is
+  refused). Coverage keys also require the committed D34/D35 tests to reference
   live-lease rejection, backup restore and the three recovery codes as exact
   names, attributes or non-docstring string constants inside `test*` functions or
   their decorators (comments, docstrings, function names and module-level values do
   not count) and the UI test to name the three codes. `limitation_boundary` is
   sentence-level and fails closed: a sentence naming automated evidence and human
   acceptance (either order) with any equating verb must be one of five exact denial
-  forms (`<subject with automated> is|are not|never human acceptance`, the
-  `isn't`/`aren't` form, `no ... automated ... is|are human acceptance`,
+  forms (`[determiner] automated ... is|are not|never human acceptance`, the
+  `isn't`/`aren't` form, `no automated ... is|are human acceptance` with nothing
+  between `no` and `automated`,
   `<subject> is|are automated ..., not human acceptance`, and `human acceptance
-  is|are not|never automated ...`), whose subject words cannot contain verbs,
-  negations or the predicate. Negation words are never counted across clauses
+  is|are not|never automated ...`); only determiners (`the`, `all`, `these`, ...)
+  may precede `automated`, and subject words cannot contain verbs, negations,
+  qualifiers (`but`, `only`, `doubt`, ...) or the predicate. Negation words are never counted across clauses
   (amended after the 2026-10-03 Astra review). Any other equating sentence, or a
   held-out sentence placing execution both inside and outside, fails the key, as
   does any affirming contradiction. Expected frozen-D35 result in the real
@@ -3199,7 +3204,10 @@ change no threshold, pin or source inventory.
   `\\?\UNC\s\x` to `\\s\x`, trailing dots/spaces removed); other device
   namespaces are refused. The decision CLI passes every input file's directory as
   protected: the output may not equal or lie inside one (child, grandchild or via a
-  link), so no D36/D38/D39 publication or review directory gains entries.
+  link), so no D36/D38/D39 publication or review directory gains entries. The public
+  `publish_decision(..., *, protected, attestation_path=None)` requires a non-empty
+  tuple of protected paths, and the running-closure check compares normalized
+  paths, so a `\\?\`-spelled `--repo-root` decides exactly like the plain one.
   Files are published with the shared no-replace `publish_immutable`. The decision
   output directory must be new or contain only this run's decision-tool attestation,
   so a decision can never be added to (and thereby invalidate) an input publication

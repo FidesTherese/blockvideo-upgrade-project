@@ -96,6 +96,9 @@ def test_conforming_limitation_phrasings_pass(documented: Path, spec: str) -> No
     'Automated evidence is human acceptance, not merely a technical check.',
     'Automated evidence is human acceptance and not a technical check.',
     'Automated is human acceptance is not human acceptance.',
+    'No doubt automated evidence is human acceptance.',
+    'No question automated evidence is human acceptance.',
+    'Not only automated evidence is human acceptance.',
     'Automated evidence isn\u2019t merely technical evidence, it is human acceptance.',
 ])
 def test_appended_contradictions_fail_limitation_boundary(documented: Path, extra: str) -> None:
@@ -117,6 +120,7 @@ def test_npm_engine_spellings_in_real_locks_are_understood(documented: Path) -> 
 @pytest.mark.parametrize(('engine', 'accepted'), [
     ('0 - 24.11.1', True), ('0 - 24.11.1-rc.1', False), ('>=24 || nonsense', False), ('nonsense || >=24', False),
     ('>=024', False), ('>=24.11.1-rc.01', False), ('>=24.11.1x', False), ('>=24.0.0-0 <25', True),
+    ('>=24.11.1+a..b', False), ('>=24.11.1+...', False), ('>=24.11.1+', False), ('>=24.11.1+build.1', True),
 ])
 def test_node_ranges_fail_closed_like_npm_semver(documented: Path, engine: str, accepted: bool) -> None:
     # Each expectation matches npm's own semver 7.7.3 for Node 24.11.1.
@@ -167,6 +171,17 @@ def test_reference_style_links_are_checked(documented: Path) -> None:
     readme = documented / 'README.md'
     readme.write_text(readme.read_text(encoding='utf-8') + '[guide]: docs/missing-guide.md\n', encoding='utf-8')
     assert checks(documented)['setup_paths'] is False
+
+
+@pytest.mark.parametrize(('definition', 'accepted'), [
+    ('[setup\n label]: docs/missing.md\n', False), ('[setup\n label]: backend/.env.example\n', True),
+    ('[a\\]b]: docs/missing.md\n', False), ('[a\\]b]: backend/.env.example\n', True),
+    ('[setup\n\n label]: backend/.env.example\n', False),
+])
+def test_multiline_and_escaped_reference_labels_are_checked(documented: Path, definition: str, accepted: bool) -> None:
+    readme = documented / 'README.md'
+    readme.write_text(readme.read_text(encoding='utf-8') + '[guide][setup label]\n\n' + definition, encoding='utf-8')
+    assert checks(documented)['setup_paths'] is accepted
 
 
 @pytest.mark.parametrize(('definition', 'accepted'), [

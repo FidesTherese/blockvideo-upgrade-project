@@ -129,3 +129,28 @@ All runs sequential, official Node 24.11.1 first on PATH.
 The complete backend suite was not rerun for these corrections; the changed
 modules (`blinded_runtime`, `d39_smoke`, `release_decision`, the decision CLI) are
 imported only by the D37 runner, D39 and D40 test files, which were all rerun.
+
+### Follow-up review of the corrections (Astra, 2026-10-03)
+
+The follow-up review of `1a1cd40` judged B-02 resolved and B-01 partially resolved
+(PR #2: Request changes), and added R-01 and R-05 for D40. All six follow-up items
+(R-01 to R-06; D39 items in `work-report-39.md`) are fixed:
+
+| ID | Remaining gap | Fix | Regression |
+|---|---|---|---|
+| R-01 (High) | `publish_decision` defaulted to no protected inputs, so a direct API call could still write into a publication | `protected` is a required keyword and must be a non-empty tuple of paths | `test_publication_api_always_protects_its_inputs` |
+| R-05 (Medium) | A `\\?\`-spelled `--repo-root` was refused by the running-closure check | The closure and attestation loaders compare normalized paths | `test_extended_repo_root_gives_the_same_decision` (byte-identical Ready decisions) |
+
+Verification:
+
+| Run | Result |
+|---|---|
+| Reversion check: each R-01 to R-06 fix undone in place (R-05 with both normalization points), its regression rerun | 6 of 6 detected |
+| D40 mutation suite (15) | 14 detected; the survivor is the known redundancy with the B-01 guard |
+| npm semver 7.7.3 cross-check | 3120 cases, 2 fail-closed differences (`> =24`) |
+| Focused D39 documentation/review-fix, D40 and frozen-D35 documentation tests | all passed |
+| All D39 files + D40 file | 470 passed, 3 skipped (POSIX-only) in 462 s |
+| Backend Ruff / frontend test, build, lint | All checks passed / 157 passed, passed, passed |
+
+The D37 runner was not rerun: `blinded_runtime.py` did not change in this round
+(only its test file did, and that file is part of the D39 run).

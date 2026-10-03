@@ -378,7 +378,7 @@ def attest_and_validate_decision_tool(*, repo_root: Path, output_path: Path, exp
 def load_decision_tool_attestation(*, repo_root: Path, attestation_path: Path, expected_sha256: str) -> tuple[ToolAttestation, str]:
     """Rehash the fixed decision sources locally (no Git/subprocess) and bind the artifact."""
     expected = _expected_digest(expected_sha256)
-    root = repo_root.resolve(strict=True)
+    root = _resolved(repo_root, strict=True)
     raw = read_regular(attestation_path, maximum=MAX_ATTESTATION_BYTES)
     attestation = parse_canonical_model(raw, ToolAttestation, maximum=MAX_ATTESTATION_BYTES)
     if not _attestation_closure(attestation, TOOL_NAME, DECISION_SOURCE_PATHS):
@@ -405,12 +405,12 @@ def load_freeze(path: Path) -> tuple[FreezeManifest, str, ToolAttestation]:
 def assert_running_closure(repo_root: Path) -> None:
     """The decision modules actually executing must be the attested files under
     `repo_root`, so the recorded source aggregate describes the code that ran (no Git)."""
-    root = repo_root.resolve(strict=True)
+    root = _resolved(repo_root, strict=True)
     expected: dict[str, Path] = {}
     for path in DECISION_SOURCE_PATHS:
         if path.endswith(".py"):
             name = path.removeprefix("backend/").removesuffix(".py").replace("/", ".").removesuffix(".__init__")
-            expected[name] = (root / path).resolve(strict=True)
+            expected[name] = _resolved(root / path, strict=True)
     loaded = {name: module for name, module in sys.modules.items() if name in expected and module is not None}
     main = sys.modules.get("__main__")
     main_file = getattr(main, "__file__", None)
@@ -420,7 +420,7 @@ def assert_running_closure(repo_root: Path) -> None:
         raise ValueError("running decision code is not the attested source")
     for name, module in loaded.items():
         file = getattr(module, "__file__", None)
-        if type(file) is not str or Path(file).resolve(strict=True) != expected[name]:
+        if type(file) is not str or _resolved(Path(file), strict=True) != expected[name]:
             raise ValueError("running decision code is not the attested source")
 
 
@@ -873,15 +873,18 @@ def render_markdown(decision: ReadinessDecision) -> str:
 
 
 def publish_decision(decision: ReadinessDecision, output: Path, repo_root: Path, *,
-                     attestation_path: Path | None = None, protected: tuple[Path, ...] = ()) -> None:
+                     protected: tuple[Path, ...], attestation_path: Path | None = None) -> None:
     """Write decision.json and decision.md exclusively (never replacing prior evidence).
 
     The output directory must be new or empty except for this run's decision-tool
     attestation, so a decision can never be added to (and thereby invalidate) an
     input publication. `protected` names every input directory; the output may not be
     inside one either, so an input publication can never gain new entries. A lone
-    decision.json is never left behind.
+    decision.json is never left behind. `protected` is mandatory and non-empty: at
+    least the D36 publication is always an input.
     """
+    if type(protected) is not tuple or not protected or any(not isinstance(path, Path) for path in protected):
+        raise ValueError("decision publication requires the protected input directories")
     target = validate_output_location(output, repo_root, create_parent=True, protected=protected)
     require_directory(target, "decision output", create=True)
     allowed = set()
