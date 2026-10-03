@@ -121,6 +121,7 @@ def test_npm_engine_spellings_in_real_locks_are_understood(documented: Path) -> 
     ('0 - 24.11.1', True), ('0 - 24.11.1-rc.1', False), ('>=24 || nonsense', False), ('nonsense || >=24', False),
     ('>=024', False), ('>=24.11.1-rc.01', False), ('>=24.11.1x', False), ('>=24.0.0-0 <25', True),
     ('>=24.11.1+a..b', False), ('>=24.11.1+...', False), ('>=24.11.1+', False), ('>=24.11.1+build.1', True),
+    ('>=2\u0664.11.1', False), ('>=24.1\u0661.1', False), ('>=24.11.\u0661', False), ('\u0662\u0664 - 25', False),
 ])
 def test_node_ranges_fail_closed_like_npm_semver(documented: Path, engine: str, accepted: bool) -> None:
     # Each expectation matches npm's own semver 7.7.3 for Node 24.11.1.
@@ -129,6 +130,12 @@ def test_node_ranges_fail_closed_like_npm_semver(documented: Path, engine: str, 
     data['engines']['node'] = engine
     package.write_text(json.dumps(data), encoding='utf-8')
     assert checks(documented)['locked_versions'] is accepted
+
+
+def test_locked_versions_with_non_ascii_digits_are_refused(documented: Path) -> None:
+    lock = documented / 'frontend/pnpm-lock.yaml'
+    lock.write_text(lock.read_text(encoding='utf-8').replace('version: 18.3.1', 'version: 1\u0668.3.1'), encoding='utf-8')
+    assert checks(documented)['locked_versions'] is False
 
 
 def test_optional_manifest_fields_may_be_absent(documented: Path) -> None:
@@ -182,6 +189,22 @@ def test_multiline_and_escaped_reference_labels_are_checked(documented: Path, de
     readme = documented / 'README.md'
     readme.write_text(readme.read_text(encoding='utf-8') + '[guide][setup label]\n\n' + definition, encoding='utf-8')
     assert checks(documented)['setup_paths'] is accepted
+
+
+@pytest.mark.parametrize('container', ['> ', '- ', '* ', '1. ', '> - ', '- > ', '    '])
+@pytest.mark.parametrize(('destination', 'accepted'), [('docs/missing.md', False), ('backend/.env.example', True)])
+def test_reference_definitions_inside_containers_are_checked(documented: Path, container: str, destination: str,
+                                                            accepted: bool) -> None:
+    readme = documented / 'README.md'
+    body = '[guide][setup]\n\n- item\n\n' if container == '    ' else '[guide][setup]\n\n'
+    readme.write_text(readme.read_text(encoding='utf-8') + body + f'{container}[setup]: {destination}\n', encoding='utf-8')
+    assert checks(documented)['setup_paths'] is accepted
+
+
+def test_reference_definition_split_across_quoted_lines_is_checked(documented: Path) -> None:
+    readme = documented / 'README.md'
+    readme.write_text(readme.read_text(encoding='utf-8') + '[guide][setup]\n\n> [setup]:\n>   docs/missing.md\n', encoding='utf-8')
+    assert checks(documented)['setup_paths'] is False
 
 
 @pytest.mark.parametrize(('definition', 'accepted'), [

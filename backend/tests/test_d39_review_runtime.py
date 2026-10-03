@@ -71,10 +71,13 @@ def test_i2_nonzero_exit_before_stop_cannot_be_forgiven(tmp_path: Path, syntheti
                 tmp_path, sys.executable, '-c', "from pathlib import Path; Path('exiting').write_text('1'); raise SystemExit(3)"))
             until = time.monotonic() + 5
             # Block the asyncio callback deliberately, reproducing its stale
-            # returncode while the native target/gate have already exited.
-            while not (tmp_path / 'exiting').exists() and time.monotonic() < until:
+            # returncode while the native target/gate have already exited. The
+            # marker is written before exit, so wait for the gate's own exited
+            # record: under load the target may otherwise still be alive and the
+            # stop would legitimately kill it (exit 125), which is not this case.
+            while child._observation()[0] != 'exited' and time.monotonic() < until:
                 time.sleep(0.001)
-            assert (tmp_path / 'exiting').exists()
+            assert (tmp_path / 'exiting').exists() and child._observation()[0] == 'exited'
             time.sleep(delay)
             result = await child.stop()
             assert result.exit_code == 3

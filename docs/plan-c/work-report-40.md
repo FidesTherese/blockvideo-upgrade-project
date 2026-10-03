@@ -154,3 +154,17 @@ Verification:
 
 The D37 runner was not rerun: `blinded_runtime.py` did not change in this round
 (only its test file did, and that file is part of the D39 run).
+
+### Third review round (Astra, 2026-10-03)
+
+The confirmation review of `c03eadb` judged R-01, R-02, R-05 and R-06 resolved and
+R-03/R-04 partial because of R-07 and R-08 (both D39 documentation checks, recorded
+in `work-report-39.md`). No new D40 finding was raised.
+
+| Run | Result |
+|---|---|
+| Reversion check: R-07 (container stripping, indentation) and R-08 (range digits, version digits) undone in place | 4 of 4 detected |
+| npm semver 7.7.3 on the non-ASCII digit cases | all `validRange=null`, `satisfies=false`, matching the implementation |
+| Documentation file + frozen-D35 test + stop-race test | 103 passed |
+| All D39 files + D40 file | 489 passed, 1 failed, 3 skipped (POSIX-only) in 479 s. The failure is the native `test_real_owned_chrome_tab_enter_and_version`: a cold Chrome start exceeded its 15 s discovery deadline and teardown was then reported unconfirmed (fail-closed). The file passed 3 of 3 reruns (7 tests each); closing a scope during Chrome startup was confirmed cleanly in 7 of 7 forced cases; the slow-start teardown has not been reproduced and remains an open environment-dependent item |
+| Backend Ruff / frontend test, build, lint | All checks passed / 157 passed, passed, passed |

@@ -2246,8 +2246,9 @@ pin, cap or threshold.
   versions (spaced operators, `v` prefixes, x-ranges, hyphen ranges, prerelease
   bounds); unknown syntax fails closed. Every `||` alternative is parsed before any
   is evaluated, numeric identifiers reject leading zeros, comparators must be
-  whitespace-separated, build metadata consists of non-empty dot-separated
-  identifiers, and a hyphen upper bound with a prerelease excludes that release
+  whitespace-separated, numeric identifiers and the checked version use ASCII
+  digits only (Unicode digits such as U+0664 are refused, as npm does), build
+  metadata consists of non-empty dot-separated identifiers, and a hyphen upper bound with a prerelease excludes that release
   (`0 - 24.11.1-rc.1` rejects 24.11.1). Cross-checked against npm's semver 7.7.3 on
   3120 cases; the only differences are rejections of nonstandard spacing such as
   `> =24`. `packageManager`/`engines.node` must agree
@@ -2260,7 +2261,10 @@ pin, cap or threshold.
   key, and so does any reference-definition label without a parsed destination
   (labels may span lines and contain backslash escapes, and a destination on the
   following line is parsed, as CommonMark allows; a label crossing a blank line is
-  refused). Coverage keys also require the committed D34/D35 tests to reference
+  refused). Block-quote and list-item markers are stripped per line before
+  definitions are found, and definitions are recognized at any indentation, so a
+  definition inside `>`, `-`, `1.` or nested containers is checked; detection inside
+  code blocks only over-detects and fails closed). Coverage keys also require the committed D34/D35 tests to reference
   live-lease rejection, backup restore and the three recovery codes as exact
   names, attributes or non-docstring string constants inside `test*` functions or
   their decorators (comments, docstrings, function names and module-level values do

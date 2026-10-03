@@ -115,8 +115,9 @@ def fake_providers() -> Iterator[tuple[str, dict[str, int]]]:
 # Numeric identifiers follow SemVer/node-semver: no leading zeros (`024` is invalid).
 _SEMVER_COMPARATOR = re.compile(
     r'(?P<op>>=|<=|>|<|=|\^|~>|~)?\s*v?(?P<major>0|[1-9]\d*|[xX*])(?:\.(?P<minor>0|[1-9]\d*|[xX*]))?'
-    r'(?:\.(?P<patch>0|[1-9]\d*|[xX*]))?(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?')
-_SEMVER_HYPHEN = re.compile(r'\s*(\S+)\s+-\s+(\S+)\s*')
+    r'(?:\.(?P<patch>0|[1-9]\d*|[xX*]))?(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?', re.ASCII)
+_SEMVER_HYPHEN = re.compile(r'\s*(\S+)\s+-\s+(\S+)\s*', re.ASCII)
+_RELEASE_VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', re.ASCII)
 Bound = tuple[str, tuple[int, int, int]]
 
 
@@ -221,12 +222,10 @@ def _node_range(version: str, expression: str) -> bool:
     Every `||` alternative is parsed before any is evaluated, so one valid
     branch can never hide invalid syntax elsewhere (fails closed).
     """
-    try:
-        actual = tuple(int(item) for item in version.split('.'))
-    except ValueError:
+    release = _RELEASE_VERSION.fullmatch(version) if type(version) is str else None
+    if release is None or type(expression) is not str or len(expression) > 512:
         return False
-    if len(actual) != 3 or len(expression) > 512:
-        return False
+    actual = tuple(int(item) for item in release.groups())
     alternatives = [_range_bounds(item) for item in expression.split('||')]
     if any(bounds is None for bounds in alternatives):
         return False
@@ -256,7 +255,7 @@ def _locked_documentation(values: dict[str, str]) -> bool:
             return False
         readme = values['README.md']
         for label, pattern, expected in (('python', r'Python\s+(\d+\.\d+(?:\.\d+)?)\+?', python), ('node', r'Node(?:\.js)?\s+(\d+(?:\.\d+){0,2})\+?', node), ('pnpm', r'pnpm\s+(\d+\.\d+\.\d+)', pnpm)):
-            stated = re.findall(pattern, readme, re.IGNORECASE)
+            stated = re.findall(pattern, readme, re.IGNORECASE | re.ASCII)
             if not stated or any(not (expected == value or expected.startswith(value + '.')) for value in stated):
                 return False
         locked = {item['name'].lower().replace('_', '-'): item['version'] for item in uv.get('package', [])}
@@ -356,15 +355,21 @@ _HTML_LINK = re.compile(r'\b(?:src|href)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s"\
 # A reference definition's destination may follow on the next line (CommonMark
 # allows one line ending); every definition label must yield a parsed destination.
 _REFERENCE_LABEL = r'\[(?:[^\[\]\\]|\\.){1,999}\]'
-_REFERENCE_START = re.compile(r'^ {0,3}' + _REFERENCE_LABEL + ':', re.MULTILINE | re.DOTALL)
-_REFERENCE_LINK = re.compile(r'^ {0,3}' + _REFERENCE_LABEL + r':[ \t]*(?:\r?\n[ \t]*)?(?:<([^<>\n]*)>|([^\s<>]\S*))',
+_REFERENCE_START = re.compile(r'^[ \t]*' + _REFERENCE_LABEL + ':', re.MULTILINE | re.DOTALL)
+_REFERENCE_LINK = re.compile(r'^[ \t]*' + _REFERENCE_LABEL + r':[ \t]*(?:\r?\n[ \t]*)?(?:<([^<>\n]*)>|([^\s<>]\S*))',
                              re.MULTILINE | re.DOTALL)
+# Block-quote and list-item markers are container syntax, not text: a definition
+# inside `> `, `- `, `1. ` (nested or not) is still a definition. Removing them per
+# line and accepting any indentation over-detects (e.g. inside code), which only
+# fails closed.
+_CONTAINER_PREFIX = re.compile(r'^(?:[ \t]*(?:>[ \t]?|[-+*][ \t]+|[0-9]{1,9}[.)][ \t]+))+', re.MULTILINE | re.ASCII)
 
 
 def _readme_links(readme: str) -> list[str] | None:
     inline = _INLINE_LINK.findall(readme)
-    references = _REFERENCE_LINK.findall(readme)
-    starts = _REFERENCE_START.findall(readme)
+    flattened = _CONTAINER_PREFIX.sub('', readme)
+    references = _REFERENCE_LINK.findall(flattened)
+    starts = _REFERENCE_START.findall(flattened)
     # A blank line ends a label, so a "label" spanning one is not a definition here;
     # refusing it keeps unparsed definitions from being silently skipped.
     if (len(inline) != readme.count('](') or len(references) != len(starts)

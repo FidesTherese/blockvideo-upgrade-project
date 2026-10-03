@@ -23,8 +23,12 @@ Read `D40 implementation amendments (2026-10-03)` in `docs/DTD.md` and
   (A-01 to A-04) and D40 (B-01, B-02). All six are fixed on this branch (PR #2),
   including the D39 ones because D39 was already merged; see the "Independent
   review corrections" sections of `work-report-39.md` and `work-report-40.md`. The
-  follow-up review of those corrections raised R-01 to R-06, all fixed in the next
-  commit; confirmation of that round is still pending.
+  follow-up review of those corrections raised R-01 to R-06, and its confirmation
+  raised R-07 and R-08 (documentation parsing); all are fixed. A final confirmation
+  is still pending before PR #2 is merged.
+- Open, environment-dependent: after a cold Chrome start slower than 15 s the native
+  CDP test can report `teardown_failed` (fail-closed). It passes on warm starts and was
+  not reproducible by closing a scope during startup; investigate if it recurs.
 
 ## D39 second review correction handoff — 2026-10-03
 

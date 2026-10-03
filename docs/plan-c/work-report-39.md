@@ -285,3 +285,20 @@ resolved, and added R-02 to R-04 and R-06 for D39. All are fixed:
 | R-06 (Low) | The A-01 test mocked the classifier it was meant to protect | A new test fakes only the Win32 layer (errors 5 and 87, failed `GetProcessTimes`) and runs the real classifier through accounting and refusal | `test_b1_win32_creation_errors_are_classified_and_counted` |
 
 Verification is recorded in `work-report-40.md` under the same heading.
+
+### Third review round (Astra, 2026-10-03)
+
+The confirmation review of `c03eadb` resolved R-01, R-02, R-05 and R-06 and found
+two remaining false-pass paths in the documentation checks:
+
+| ID | Remaining gap | Fix | Regression |
+|---|---|---|---|
+| R-07 (Medium) | Reference definitions inside block quotes or list items (`> [setup]: ...`, `- [setup]: ...`) were not found | Container markers are removed per line and definitions are recognized at any indentation | `test_reference_definitions_inside_containers_are_checked` (7 containers x missing/existing), `test_reference_definition_split_across_quoted_lines_is_checked` |
+| R-08 (Medium) | Non-ASCII digits (`>=2\u0664.11.1`) passed Python's `\d`/`int()` | ASCII-only numeric identifiers in ranges, README version statements and the checked version | four range cases in `test_node_ranges_fail_closed_like_npm_semver`, `test_locked_versions_with_non_ascii_digits_are_refused` |
+
+The reviewer's one-off failure of
+`test_i2_nonzero_exit_before_stop_cannot_be_forgiven[0.004]` (exit 125 instead of 3)
+was a test-precondition race: the test waited for a marker file written *before*
+the target exits, so under load the stop could arrive while the target was still
+alive and correctly kill it. The test now waits for the gate's own `exited` record,
+which is the precondition its comment states; runtime behaviour is unchanged.
