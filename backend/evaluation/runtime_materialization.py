@@ -626,7 +626,10 @@ def _freeze_inputs(candidate: Path, frozen: Path) -> tuple[FreezeManifest, str, 
     manifest = parse_canonical_model(raw, FreezeManifest, maximum=MAX_MATERIALIZATION_BYTES)
     if freeze.read_frozen_candidate(publication)[0] != manifest:
         raise ValueError("complete freeze publication mismatch")
-    control = CandidateControl(schema_version=1, git_commit=manifest.git_commit, git_commit_subject=freeze.CANDIDATE_COMMIT_SUBJECT, git_tree_clean=True)
+    subject = freeze._git(candidate, "show", "-s", "--format=%s", manifest.git_commit).stdout.rstrip("\r\n")
+    if subject not in freeze.CANDIDATE_COMMIT_SUBJECTS:
+        raise ValueError("candidate commit is not an authorized candidate")
+    control = CandidateControl(schema_version=1, git_commit=manifest.git_commit, git_commit_subject=subject, git_tree_clean=True)
     freeze._candidate_identity(candidate, control)
     snapshot = freeze._snapshot_tree(candidate)
     validate_git_repository(candidate, expected_commit=manifest.git_commit)

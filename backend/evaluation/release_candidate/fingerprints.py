@@ -151,6 +151,10 @@ def _is_allowlisted(path: str) -> bool:
         return True
     if path in {"docs/DTD.md", "docs/plan-c/contracts.md", "docs/plan-c/decisions.md"}:
         return True
+    # README-referenced documentation (reports, guides and their images) is part of
+    # the candidate, so its README links resolve inside the materialized runtime.
+    if path.startswith("docs/") and lowered.endswith((".md", ".png", ".jpg", ".jpeg", ".gif", ".svg")):
+        return True
     if path.startswith("evaluation/d24/") or path.startswith("evaluation/d31/"):
         return True
     if path.startswith("samples/") or path.startswith("scripts/"):

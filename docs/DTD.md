@@ -1075,7 +1075,10 @@ class CandidateControl(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal[1]
     git_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    git_commit_subject: Literal["[DONE] Mission 35 Add recovery-oriented operational UI"]
+    git_commit_subject: Literal[
+        "[DONE] Mission 35 Add recovery-oriented operational UI",
+        "[DONE] Mission 35.1 Fix release-candidate verification blockers",
+    ]
     git_tree_clean: Literal[True]
 
 class FileFingerprint(BaseModel):
@@ -1100,6 +1103,24 @@ class CompletionMarker(BaseModel):
     schema_version: Literal[1]
     files: list[FileFingerprint]  # exact sorted canonical artifact fingerprints
 ```
+
+#### D36 successor candidate amendment (2026-10-03)
+
+The frozen D35 commit cannot pass D39 (credential-shaped test literals, a
+build-time rewrite of tracked `frontend/vite.config.js`, README prerequisites and
+README links to documents outside the inventory), and D35 bytes are never edited. An
+authorized successor candidate is therefore allowed: a commit on top of D35 whose
+subject is exactly `[DONE] Mission 35.1 Fix release-candidate verification blockers`
+and which changes only those blockers. `CANDIDATE_COMMIT_SUBJECTS` lists the two
+authorized subjects; the strict `CandidateControl` literal, the freezer and the
+runtime materializer (which now reconstructs the control from the candidate
+commit's own subject) accept only them. Any other subject is refused.
+
+The inventory also includes tracked documentation under `docs/` with `.md`, `.png`,
+`.jpg`, `.jpeg`, `.gif` or `.svg` suffixes, so README links resolve inside the
+materialized runtime. This changes the inventory and aggregate of any re-freeze
+(including D35), so earlier D36 evidence stays valid only for the tooling that
+produced it. No gate, threshold or pin changes.
 
 `evaluation/release_candidate/freeze.py` reads bounded control bytes once, validates
 the detached lowercase 64-hex digest before parsing, requires byte-for-byte canonical

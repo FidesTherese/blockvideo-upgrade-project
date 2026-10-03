@@ -8,6 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from evaluation.tool_attestation import FileFingerprint
 
 CANDIDATE_COMMIT_SUBJECT = "[DONE] Mission 35 Add recovery-oriented operational UI"
+# The authorized successor fixes only D39 release-verification blockers of D35
+# (credential-shaped test literals, build-time config rewrite, README prerequisites).
+SUCCESSOR_COMMIT_SUBJECT = "[DONE] Mission 35.1 Fix release-candidate verification blockers"
+CANDIDATE_COMMIT_SUBJECTS: tuple[str, ...] = (CANDIDATE_COMMIT_SUBJECT, SUCCESSOR_COMMIT_SUBJECT)
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 
@@ -32,7 +36,10 @@ class CandidateControl(_StrictFreezeModel):
 
     schema_version: Literal[1]
     git_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    git_commit_subject: Literal["[DONE] Mission 35 Add recovery-oriented operational UI"]
+    git_commit_subject: Literal[
+        "[DONE] Mission 35 Add recovery-oriented operational UI",
+        "[DONE] Mission 35.1 Fix release-candidate verification blockers",
+    ]
     git_tree_clean: Literal[True]
 
 
