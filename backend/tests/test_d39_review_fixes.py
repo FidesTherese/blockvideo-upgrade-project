@@ -122,6 +122,78 @@ def test_b1_declared_agent_tree_only_adds_accounting(monkeypatch: pytest.MonkeyP
         runtime._owned_memory_sample(runtime.OwnedProcessScope())
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows process table seam')
+@pytest.mark.parametrize('readable', [True, False])
+def test_b1_unqueryable_live_agent_child_is_counted_or_fails_closed(monkeypatch: pytest.MonkeyPatch, readable: bool) -> None:
+    # 12 is a live child of the detected agent whose creation time is access-denied.
+    table = {1: (0, 'explorer'), 10: (1, 'claude'), 12: (10, 'worker'), 13: (12, 'worker'), 20: (10, 'pwsh'), 30: (20, 'python')}
+    times = {1: 1, 10: 2, 12: runtime.UNKNOWN_CREATION, 13: 5, 20: 3, 30: 4}
+    monkeypatch.setattr(runtime, '_windows_process_table', lambda: table)
+    monkeypatch.setattr(runtime, '_windows_creation_time', times.get)
+    monkeypatch.setattr(runtime.os, 'getpid', lambda: 30)
+    monkeypatch.delenv('D39_AGENT_PID', raising=False)
+    large = 15 * 1024 ** 3
+    def resident(pid: int) -> int:
+        if pid == 12 and not readable:
+            raise OSError('access denied')
+        return large if pid in (12, 13) else 10
+    monkeypatch.setattr(runtime, '_windows_resident', resident)
+    if readable:
+        assert runtime._owned_memory_sample() == (0, 2 * large + 30)
+    else:
+        with pytest.raises(ValueError, match='accounting lost'):
+            runtime._owned_memory_sample()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows process API seam')
+@pytest.mark.parametrize('readable', [True, False])
+def test_b1_win32_creation_errors_are_classified_and_counted(monkeypatch: pytest.MonkeyPatch, readable: bool) -> None:
+    # The real _windows_creation_time runs against a fake Win32 layer: OpenProcess
+    # access denied (5) is unknown, invalid parameter (87) is gone, and a failed
+    # GetProcessTimes is unknown. The unknown live child must then be counted.
+    created = {1: 1, 10: 2, 20: 3, 30: 4, 13: 6}
+    denied, gone, times_fail = {12}, {14}, {15}
+    table = {1: (0, 'explorer'), 10: (1, 'claude'), 12: (10, 'worker'), 13: (12, 'worker'), 14: (10, 'exited'),
+             15: (10, 'worker'), 20: (10, 'pwsh'), 30: (20, 'python')}
+    state = {'error': 0}
+    def open_process(access: int, inherit: int, pid: int) -> int:
+        if pid in denied | gone:
+            state['error'] = 5 if pid in denied else 87
+            return 0
+        return 100000 + pid
+    def process_times(handle: int, creation: Any, *others: Any) -> int:
+        pid = handle - 100000
+        if pid in times_fail:
+            return 0
+        creation._obj.value = created[pid]
+        return 1
+    def win_function(name: str, args: list[object], result: object = None, *, library: str = 'kernel32') -> object:
+        return {'OpenProcess': open_process, 'GetProcessTimes': process_times}[name]
+    monkeypatch.setattr(runtime, '_win_function', win_function)
+    monkeypatch.setattr(runtime, '_windows_close_handle', lambda handle: None)
+    monkeypatch.setattr(runtime.ctypes, 'get_last_error', lambda: state['error'])
+    assert runtime._windows_creation_time(10) == 2
+    assert runtime._windows_creation_time(12) == runtime.UNKNOWN_CREATION
+    assert runtime._windows_creation_time(14) is None
+    assert runtime._windows_creation_time(15) == runtime.UNKNOWN_CREATION
+    monkeypatch.setattr(runtime, '_windows_process_table', lambda: table)
+    monkeypatch.setattr(runtime.os, 'getpid', lambda: 30)
+    monkeypatch.delenv('D39_AGENT_PID', raising=False)
+    large = 15 * 1024 ** 3
+    def resident(pid: int) -> int | None:
+        if pid == 14:
+            return None
+        if pid in (12, 15) and not readable:
+            raise OSError('access denied')
+        return large if pid in (12, 13, 15) else 10
+    monkeypatch.setattr(runtime, '_windows_resident', resident)
+    if readable:
+        assert runtime._owned_memory_sample() == (0, 3 * large + 30)
+    else:
+        with pytest.raises(ValueError, match='accounting lost'):
+            runtime._owned_memory_sample()
+
+
 @pytest.mark.parametrize('value', ['abc', '0', '-1'])
 def test_b1_invalid_agent_pid_refuses_before_any_group_exists(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str) -> None:
     monkeypatch.setenv('D39_AGENT_PID', value)

@@ -1,5 +1,16 @@
 # BlockVideo Plan C Specification — Work Units 01–40
 
+## D40 readiness decision checkpoint — 2026-10-03
+
+D40 decision tooling is implemented: detached-digest loaders for the D36 freeze,
+D38 triplet and D39 manifest/attestation, a separately attested fixed source
+closure, 27 fixed-order gates with exact integer thresholds (both modes, 90%
+overall, 80% per category, zero safety events), strict review and limitation
+records, and no-replace JSON/Markdown output. Decision execution performs no Git,
+network or subprocess work. Verification is synthetic only (`work-report-40.md`);
+no decision or evidence was produced. Readiness is **Not ready** until real
+aggregate evidence, fresh D39 verification and both reviews exist.
+
 ## D39 review correction checkpoint — 2026-10-02
 
 D39 materialization, verification and all six smoke entry points are implemented.

@@ -766,16 +766,18 @@ def _windows_resident(pid: int) -> int | None:
 
 
 def _windows_creation_time(pid: int) -> int | None:
-    """Process creation FILETIME, or None when it cannot be proven."""
+    """Process creation FILETIME; None when the process is gone and
+    `UNKNOWN_CREATION` when it exists but cannot be queried (for example access
+    denied), so callers never mistake an unqueryable process for a gone one."""
     opener = _win_function("OpenProcess", [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32], ctypes.c_void_p)
     handle = opener(0x1000, 0, pid)
     if not handle:
-        return None
+        return None if ctypes.get_last_error() == 87 else UNKNOWN_CREATION
     try:
         times = [ctypes.c_uint64() for _ in range(4)]
         query = _win_function("GetProcessTimes", [ctypes.c_void_p, *(ctypes.POINTER(ctypes.c_uint64),) * 4])
         if not query(handle, *(ctypes.byref(value) for value in times)):
-            return None
+            return UNKNOWN_CREATION
         return times[0].value
     finally:
         _windows_close_handle(int(handle))
@@ -805,14 +807,18 @@ def _posix_process_table() -> dict[int, tuple[int, str, int, int, int]]:
 
 
 CreationTime = Callable[[int], "int | None"]
+# Creation times are non-negative; this marks a live process whose time is unknown.
+UNKNOWN_CREATION: int = -1
 
 
 def _process_descendants(table: dict[int, tuple[int, str]], root: int, created: CreationTime) -> set[int]:
-    """Descendants by recorded parent PID, excluding PID-reuse orphans.
+    """Descendants by recorded parent PID, excluding proven PID-reuse orphans.
 
     A recorded parent PID may belong to a newer process that reused it; a real
-    child is never created before its parent, and an unprovable relation is
-    not adopted.
+    child is never created before its parent. Only a relation proven to be
+    reuse (both times known, child older) is excluded: a live child whose time
+    cannot be queried stays counted, so its memory is measured or the sample
+    fails closed instead of silently dropping its whole subtree.
     """
     selected = {root}
     children: dict[int, list[int]] = {}
@@ -829,7 +835,7 @@ def _process_descendants(table: dict[int, tuple[int, str]], root: int, created: 
             if pid in selected:
                 continue
             child_time = created(pid)
-            if child_time is None or child_time < parent_time:
+            if child_time is None or (child_time >= 0 and parent_time >= 0 and child_time < parent_time):
                 continue
             selected.add(pid)
             pending.append(pid)
@@ -854,7 +860,7 @@ def _agent_root(table: dict[int, tuple[int, str]], controller: int,
         if ancestors and created is not None:
             # Stop at a reused parent PID: an ancestor is never newer than its child.
             child_time, parent_time = created(ancestors[-1]), created(pid)
-            if child_time is None or parent_time is None or parent_time > child_time:
+            if child_time is None or parent_time is None or child_time < 0 or parent_time < 0 or parent_time > child_time:
                 break
         ancestors.append(pid)
         pid = table[pid][0]
@@ -908,10 +914,9 @@ def _owned_memory_sample(scope: OwnedProcessScope | None = None) -> tuple[int, i
         try:
             size = _windows_resident(pid) if os.name == "nt" else posix[pid][3]
         except OSError:
-            if pid in owned or pid in controller_tree:
-                raise ValueError("owned resident accounting lost") from None
-            unknown_agent = True
-            continue
+            # A live process in any accounted tree whose memory cannot be read
+            # fails closed: a reserve could undercount an arbitrarily large tree.
+            raise ValueError("owned resident accounting lost") from None
         if size is None:
             if pid == root:
                 unknown_agent = True
@@ -946,6 +951,7 @@ class OwnedProcessScope:
         self.committed_memory_limit: int = 0
         self.peak_aggregate_resident: int = 0
         self.teardown_confirmed: bool = False
+        self.teardown_details: tuple[str, ...] = ()
 
     async def _sample(self) -> tuple[int, int]:
         if self._sampler is None:
@@ -1043,6 +1049,7 @@ class OwnedProcessScope:
             await asyncio.gather(self._monitor, return_exceptions=True)
         self._stop_sampler()
         confirmed = True
+        details: list[str] = []
         children = tuple(self._children)
         # Stop children concurrently so they share, rather than serially exhaust,
         # the one confirmed teardown budget. Any stop failure is unconfirmed.
@@ -1050,14 +1057,17 @@ class OwnedProcessScope:
         for child, result in zip(children, results, strict=True):
             if isinstance(result, BaseException):
                 confirmed = False
+                details.append("child stop raised " + type(result).__name__)
             if child.outcome is not None and child.outcome.outcome == "teardown_failed":
                 confirmed = False
+                details.append("child: " + (child.teardown_detail or "teardown_failed"))
         if self._job is not None:
             try:
                 self._sample_job_peak()
                 await _terminate_job_confirmed(self._job, deadline=self._teardown_deadline)
             except (OSError, ValueError):
                 confirmed = False
+                details.append("scope Job termination unconfirmed")
             finally:
                 _windows_close_handle(self._job)
                 self._job = None
@@ -1067,10 +1077,12 @@ class OwnedProcessScope:
                     await _confirm_session_gone(session, self._teardown_deadline)
                 except (OSError, ValueError):
                     confirmed = False
+                    details.append("session teardown unconfirmed")
         self.teardown_confirmed = confirmed
+        self.teardown_details = tuple(details)
         self._closed = True
         if not confirmed:
-            raise ValueError("owned scope teardown_failed")
+            raise ValueError("owned scope teardown_failed (" + "; ".join(details or ["unconfirmed"]) + ")")
 
 
 async def _terminate_job_confirmed(handle: int, *, deadline: float | None = None) -> None:
@@ -1084,7 +1096,7 @@ async def _terminate_job_confirmed(handle: int, *, deadline: float | None = None
         if information.active == 0:
             return
         if time.monotonic() >= until:
-            raise ValueError("owned Job descendant teardown_failed")
+            raise ValueError(f"owned Job descendant teardown_failed (active={information.active})")
         await asyncio.sleep(0.02)
 
 
@@ -1129,6 +1141,8 @@ class OwnedProcess:
         self._terminate_lock = asyncio.Lock()
         self._terminated = False
         self._tree_confirmed = False
+        # Diagnostic only (never evidence): why this child ended teardown_failed.
+        self.teardown_detail: str | None = None
 
     def _observation(self) -> tuple[str, int | None, bool]:
         if self._control_path is None:
@@ -1198,6 +1212,7 @@ class OwnedProcess:
                 deadline = min(deadline, self.scope._teardown_deadline)
             confirmed = True
             process = self._process
+            step = "Job termination"
             try:
                 if self._job is not None:
                     await _terminate_job_confirmed(self._job, deadline=deadline)
@@ -1206,14 +1221,20 @@ class OwnedProcess:
                 elif process is not None and process.returncode is None:
                     process.kill()
                 if process is not None:
+                    step = "gate process wait"
                     await asyncio.wait_for(process.wait(), timeout=max(0.01, deadline - time.monotonic()))
                 if os.name == "posix" and process is not None:
+                    step = "session confirmation"
                     await _confirm_session_gone(process.pid, deadline)
                     self.scope._sessions.discard(process.pid)
                 if self._readers:
+                    step = "pipe drain"
                     await asyncio.wait_for(asyncio.gather(*self._readers), timeout=max(0.01, deadline - time.monotonic()))
             except BaseException as error:
                 confirmed = False
+                # Diagnostic only: which step could not be confirmed, with the budget left.
+                left = round(deadline - time.monotonic(), 2)
+                self.teardown_detail = f"process tree termination unconfirmed at {step}: {error or type(error).__name__} (budget left {left}s)"
                 for task in self._readers:
                     task.cancel()
                 await asyncio.gather(*self._readers, return_exceptions=True)
@@ -1263,6 +1284,7 @@ class OwnedProcess:
                 break
             if any(task.done() and task.exception() is not None for task in self._readers):
                 reason = "teardown_failed"
+                self.teardown_detail = "pipe reader failed"
                 break
             await asyncio.sleep(0.02)
         try:
@@ -1270,6 +1292,7 @@ class OwnedProcess:
             await self._terminate()
         except (OSError, ValueError):
             reason = "teardown_failed"
+            self.teardown_detail = self.teardown_detail or "process tree termination unconfirmed"
         latched = (reason, self._stop_reason)
         if "teardown_failed" in latched:
             reason = "teardown_failed"
@@ -1285,6 +1308,9 @@ class OwnedProcess:
         self._administrative_stop = stopped and not self.scope._failed
         if reason == "completed" and state != "exited":
             reason = "launch_failed" if state == "launch_failed" else "teardown_failed"
+            if reason == "teardown_failed":
+                self.teardown_detail = self.teardown_detail or (
+                    f"gate exit record missing (state={state}, tree_confirmed={self._tree_confirmed})")
         if reason != "completed" or (code != 0 and not self._administrative_stop):
             self.scope._failed = True
             for child in self.scope._children:

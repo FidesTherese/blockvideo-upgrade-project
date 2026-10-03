@@ -168,9 +168,11 @@ def test_real_owned_chrome_tab_enter_and_version(tmp_path: Path, synthetic_agent
     profile.mkdir()
     async def exercise() -> None:
         async with runtime.OwnedProcessScope() as scope:
-            child = await runtime.start_owned_process(scope=scope, argv=(str(chrome), '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--disable-extensions', '--disable-default-apps', '--no-proxy-server', '--renderer-process-limit=1', '--disk-cache-size=1048576', '--media-cache-size=1048576', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', '--user-data-dir=' + str(profile), 'about:blank'), cwd=tmp_path, env=dict(os.environ), stdout_path=tmp_path / 'out', stderr_path=tmp_path / 'err', deadline_seconds=30)
+            child = await runtime.start_owned_process(scope=scope, argv=(str(chrome), '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--disable-extensions', '--disable-default-apps', '--no-proxy-server', '--renderer-process-limit=1', '--disk-cache-size=1048576', '--media-cache-size=1048576', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', '--user-data-dir=' + str(profile), 'about:blank'), cwd=tmp_path, env=dict(os.environ), stdout_path=tmp_path / 'out', stderr_path=tmp_path / 'err', deadline_seconds=240)
             def observe() -> None:
-                url, port = browser.discover_owned_browser(profile, deadline=time.monotonic() + 15)
+                # A cold Chrome start can take far longer than a warm one (disk cache,
+                # antivirus scanning), so allow 3 minutes for its DevTools endpoint.
+                url, port = browser.discover_owned_browser(profile, deadline=time.monotonic() + 180)
                 with browser.CDPSession(url, port=port) as session:
                     assert session.call('Browser.getVersion', {})['product'].startswith(('Chrome/', 'HeadlessChrome/'))
                     session.navigate(f'http://127.0.0.1:{server.server_port}/')

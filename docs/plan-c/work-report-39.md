@@ -252,3 +252,106 @@ POSIX/Linux-only and Windows no-delete-anchor cases; none is counted as passed.
 During this round, scripted edits briefly wrote CRLF working bytes into four
 files; they were normalized back to exact LF (committed blobs contain no CR)
 before the full run, as the LF attestation requires.
+
+## Independent review corrections (GPT-6 Astra, 2026-10-03)
+
+An independent review of `42c0683..60dad35` returned **Request changes** with one
+plausible and three confirmed D39 findings. All are fixed on
+`claude/d40-readiness-decision` (PR #2) because D39 was already merged; the DTD
+amendments above are updated in place.
+
+| ID | Finding | Status | Regression |
+|---|---|---|---|
+| A-01 (High, plausible) | A live child of the detected agent whose creation time is access-denied was dropped with its whole subtree and no reserve | Fixed: only proven PID reuse is excluded; unqueryable live processes stay counted and an unreadable accounted process fails the sample | `test_b1_unqueryable_live_agent_child_is_counted_or_fails_closed` |
+| A-02 (Medium) | Negations were counted across clauses (`Automated evidence is human acceptance, not merely a technical check.` passed) | Fixed: five exact denial forms; every other equating sentence is a contradiction | three sentences added to `test_appended_contradictions_fail_limitation_boundary`; reverse-order denial added to the conforming set |
+| A-03 (Medium) | `0 - 24.11.1-rc.1`, `>=24 \|\| nonsense` and `>=024` were accepted | Fixed: all alternatives parsed first, prerelease upper bounds, no leading zeros, whitespace-separated comparators; 2900 cases agree with npm semver 7.7.3 except fail-closed rejections of `> =24` | `test_node_ranges_fail_closed_like_npm_semver` |
+| A-04 (Medium) | A reference definition with its destination on the next line was not extracted | Fixed: next-line destinations parsed; a label without a parsed destination fails `setup_paths` | `test_reference_destinations_on_the_next_line_are_checked` |
+
+Each fix was reverted in place and its regression then failed (7 of 7 reversion
+checks detected, including the D40 items). The full frozen D35 tree still fails
+only `locked_versions`. Verification results are recorded in
+`work-report-40.md` under the same heading.
+
+### Follow-up review of the corrections (Astra, 2026-10-03)
+
+The follow-up review of `1a1cd40` judged A-01 resolved and A-02 to A-04 partially
+resolved, and added R-02 to R-04 and R-06 for D39. All are fixed:
+
+| ID | Remaining gap | Fix | Regression |
+|---|---|---|---|
+| R-02 (Medium) | `No doubt automated evidence is human acceptance.` matched the `no ...` denial form | `no` must directly precede `automated`; only determiners may start a subject; qualifier words are excluded | three sentences added to `test_appended_contradictions_fail_limitation_boundary` |
+| R-03 (Medium) | Empty build-metadata identifiers (`+a..b`, `+...`) were accepted | Build metadata is non-empty dot-separated identifiers; 3120 cases agree with npm semver 7.7.3 except fail-closed `> =24` | four cases added to `test_node_ranges_fail_closed_like_npm_semver` |
+| R-04 (Medium) | Reference labels spanning lines or containing escapes were skipped | Labels may contain line endings and backslash escapes; a label crossing a blank line (CR-aware) is refused | `test_multiline_and_escaped_reference_labels_are_checked` |
+| R-06 (Low) | The A-01 test mocked the classifier it was meant to protect | A new test fakes only the Win32 layer (errors 5 and 87, failed `GetProcessTimes`) and runs the real classifier through accounting and refusal | `test_b1_win32_creation_errors_are_classified_and_counted` |
+
+Verification is recorded in `work-report-40.md` under the same heading.
+
+### Third review round (Astra, 2026-10-03)
+
+The confirmation review of `c03eadb` resolved R-01, R-02, R-05 and R-06 and found
+two remaining false-pass paths in the documentation checks:
+
+| ID | Remaining gap | Fix | Regression |
+|---|---|---|---|
+| R-07 (Medium) | Reference definitions inside block quotes or list items (`> [setup]: ...`, `- [setup]: ...`) were not found | Container markers are removed per line and definitions are recognized at any indentation | `test_reference_definitions_inside_containers_are_checked` (7 containers x missing/existing), `test_reference_definition_split_across_quoted_lines_is_checked` |
+| R-08 (Medium) | Non-ASCII digits (`>=2\u0664.11.1`) passed Python's `\d`/`int()` | ASCII-only numeric identifiers in ranges, README version statements and the checked version | four range cases in `test_node_ranges_fail_closed_like_npm_semver`, `test_locked_versions_with_non_ascii_digits_are_refused` |
+
+The reviewer's one-off failure of
+`test_i2_nonzero_exit_before_stop_cannot_be_forgiven[0.004]` (exit 125 instead of 3)
+was a test-precondition race: the test waited for a marker file written *before*
+the target exits, so under load the stop could arrive while the target was still
+alive and correctly kill it. The test now waits for the gate's own `exited` record,
+which is the precondition its comment states; runtime behaviour is unchanged.
+
+### Fourth review round (Astra, 2026-10-03)
+
+The confirmation of `ec23739` resolved R-07, judged R-08 partial and raised:
+
+| ID | Gap | Fix | Regression |
+|---|---|---|---|
+| R-09 (Medium, introduced by the R-08 fix) | `re.ASCII` cut a README token such as `Node.js 24.11.\u0669` to `24.11`, which then matched | The whole token after the tool name is taken with Unicode digits and must be ASCII and fully match the version pattern; Japanese text directly after a version still works | `test_readme_version_tokens_are_never_cut_short` |
+| R-10 (Low, introduced by the R-07 fix) | An indented code example `    [setup]: docs/missing.md` was treated as a definition | A CommonMark-aware scan removes container markers, de-indents list continuation (also inside quotes and nested lists) and blanks fenced/indented code and code spans | `test_code_examples_are_not_links_but_container_definitions_are` (code examples allowed; quoted and nested list definitions still checked) |
+
+The reviewer's hypothesis for the open native Chrome item was reproduced: when the
+gate's exit record is delayed beyond the stop wait, the process tree is confirmed
+gone but the outcome is `teardown_failed`, because an administrative stop without
+the gate's record has no truthful exit status. The outcome stays fail-closed; the
+scope now names the failing step (`teardown_details`, also in the error), pinned by
+`test_late_gate_exit_record_names_the_failed_teardown_step`. Whether the real
+cold-start failure is this path remains to be confirmed by its next occurrence.
+
+### Fifth review round (GPT-6.1 Sol, 2026-10-03)
+
+The confirmation of `83dd4a2` resolved R-09 and found that the R-10 code-aware
+scanner itself introduced two false passes: R-11 (a fence inside a block quote was
+never closed, hiding every later link) and R-12 (unequal backtick runs treated as a
+code span, hiding the link). It also listed R-13 (a multi-line code span rejected)
+as an over-rejection condition.
+
+Fix: the code-aware scanner is removed and README link extraction is restored to
+the never-hide scan the previous round confirmed (byte-identical to `ec23739`).
+Code is no longer excluded, so R-11 and R-12 cannot hide anything; R-10 and R-13
+become documented fail-closed over-rejections of missing targets shown as code (an
+example pointing at an existing file still passes). `test_code_never_hides_a_link_or_definition`
+covers both reproductions, code examples with missing and existing targets, and
+container definitions; reintroducing code-span, fence or indentation hiding makes it
+fail (3 of 3). The R-09 fix and the teardown diagnostics are unchanged.
+
+### Review outcome (GPT-6.1 Sol, 2026-10-03)
+
+The confirmation of `3e572a8` returned **Approve with conditions** with no new
+finding: R-11 and R-12 resolved; the link extraction and its seven regular
+expressions match `ec23739` exactly; the R-09 fix and the teardown implementation
+are unchanged; the frozen D35 documentation results are unchanged (full tree: only
+`locked_versions` fails; allowlist: `setup_paths` and `locked_versions` fail; 32
+README links in both).
+
+Condition (accepted, to be kept in operation): the README scan does not exclude
+code, so a missing target shown as code (an indented `[setup]: docs/missing.md`, a
+fenced `[bad](docs/missing.md)`, or the same link in a multi-line code span) fails
+`setup_paths`; examples pointing at existing files pass. This is the documented
+fail-closed over-rejection in `docs/DTD.md`, not a waiver.
+
+This approval covers the reviewed tooling only. Real D36/D37/D38/D39 evidence,
+human-operation and independent-review records, the pinned Python 3.12.12 lane and
+the open native Chrome cold-start item remain pending; readiness is **Not ready**.

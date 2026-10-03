@@ -112,10 +112,12 @@ def fake_providers() -> Iterator[tuple[str, dict[str, int]]]:
             raise ValueError('fake provider teardown unconfirmed')
 
 
+# Numeric identifiers follow SemVer/node-semver: no leading zeros (`024` is invalid).
 _SEMVER_COMPARATOR = re.compile(
-    r'(?P<op>>=|<=|>|<|=|\^|~>|~)?\s*v?(?P<major>\d+|[xX*])(?:\.(?P<minor>\d+|[xX*]))?'
-    r'(?:\.(?P<patch>\d+|[xX*]))?(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?')
-_SEMVER_HYPHEN = re.compile(r'\s*(\S+)\s+-\s+(\S+)\s*')
+    r'(?P<op>>=|<=|>|<|=|\^|~>|~)?\s*v?(?P<major>0|[1-9]\d*|[xX*])(?:\.(?P<minor>0|[1-9]\d*|[xX*]))?'
+    r'(?:\.(?P<patch>0|[1-9]\d*|[xX*]))?(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?', re.ASCII)
+_SEMVER_HYPHEN = re.compile(r'\s*(\S+)\s+-\s+(\S+)\s*', re.ASCII)
+_RELEASE_VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', re.ASCII)
 Bound = tuple[str, tuple[int, int, int]]
 
 
@@ -166,43 +168,70 @@ def _semver_bounds(operator: str, values: list[int], prerelease: bool = False) -
     return None
 
 
+def _valid_prerelease(match: re.Match[str], values: list[int]) -> bool:
+    """A prerelease needs a full version and non-empty identifiers without leading zeros."""
+    if match['pre'] is None:
+        return True
+    identifiers = match['pre'].split('.')
+    return len(values) == 3 and all(item and not (item.isdecimal() and len(item) > 1 and item[0] == '0') for item in identifiers)
+
+
+def _range_bounds(alternative: str) -> list[Bound] | None:
+    """Bounds of one `||` alternative for release versions, or None when invalid."""
+    hyphen = _SEMVER_HYPHEN.fullmatch(alternative)
+    if hyphen is not None:
+        first, last = (_SEMVER_COMPARATOR.fullmatch(side) for side in hyphen.groups())
+        if first is None or last is None or first['op'] or last['op']:
+            return None
+        start, end = _semver_prefix(first), _semver_prefix(last)
+        if not _valid_prerelease(first, start) or not _valid_prerelease(last, end):
+            return None
+        # For release versions `>= X.Y.Z-pre` equals `>= X.Y.Z`, while `<= X.Y.Z-pre`
+        # admits no X.Y.Z release (X.Y.Z-pre < X.Y.Z), so it becomes `< X.Y.Z`.
+        bounds = _semver_bounds('>=', start) or []
+        if len(end) == 3:
+            bounds.append(('<' if last['pre'] is not None else '<=', (end[0], end[1], end[2])))
+        elif end:
+            bounds.append(('<', _semver_bump(end, len(end))))
+        return bounds
+    bounds = []
+    text = alternative.strip()
+    position = 0
+    while position < len(text):
+        match = _SEMVER_COMPARATOR.match(text, position)
+        if match is None or match.end() == position:
+            return None
+        if match.end() < len(text) and not text[match.end()].isspace():
+            return None  # comparators are whitespace-separated (`>=024`, `1.2.3x` are invalid)
+        values = _semver_prefix(match)
+        if not _valid_prerelease(match, values):
+            return None
+        found = _semver_bounds(match['op'] or '', values, match['pre'] is not None)
+        if found is None:
+            return None
+        bounds += found
+        position = match.end()
+        while position < len(text) and text[position].isspace():
+            position += 1
+    return bounds
+
+
 def _node_range(version: str, expression: str) -> bool:
-    """npm-compatible range satisfaction for a release version (fails closed on unknown syntax)."""
-    try:
-        actual = tuple(int(item) for item in version.split('.'))
-    except ValueError:
+    """npm-compatible range satisfaction for a release version.
+
+    Every `||` alternative is parsed before any is evaluated, so one valid
+    branch can never hide invalid syntax elsewhere (fails closed).
+    """
+    release = _RELEASE_VERSION.fullmatch(version) if type(version) is str else None
+    if release is None or type(expression) is not str or len(expression) > 512:
         return False
-    if len(actual) != 3 or len(expression) > 512:
+    actual = tuple(int(item) for item in release.groups())
+    alternatives = [_range_bounds(item) for item in expression.split('||')]
+    if any(bounds is None for bounds in alternatives):
         return False
     checks = {'==': lambda a, b: a == b, '>=': lambda a, b: a >= b, '>': lambda a, b: a > b,
               '<': lambda a, b: a < b, '<=': lambda a, b: a <= b}
-    for alternative in expression.split('||'):
-        bounds: list[Bound] = []
-        hyphen = _SEMVER_HYPHEN.fullmatch(alternative)
-        if hyphen is not None:
-            first, last = (_SEMVER_COMPARATOR.fullmatch(side) for side in hyphen.groups())
-            if first is None or last is None or first['op'] or last['op']:
-                return False
-            start, end = _semver_prefix(first), _semver_prefix(last)
-            bounds += _semver_bounds('>=', start) or []
-            bounds += ([('<=', (end[0], end[1], end[2]))] if len(end) == 3 else [('<', _semver_bump(end, len(end)))] if end else [])
-        else:
-            position = 0
-            text = alternative.strip()
-            while position < len(text):
-                match = _SEMVER_COMPARATOR.match(text, position)
-                if match is None or match.end() == position:
-                    return False
-                found = _semver_bounds(match['op'] or '', _semver_prefix(match), match['pre'] is not None)
-                if found is None:
-                    return False
-                bounds += found
-                position = match.end()
-                while position < len(text) and text[position].isspace():
-                    position += 1
-        if all(checks[operator](actual, target) for operator, target in bounds):
-            return True
-    return False
+    return any(all(checks[operator](actual, target) for operator, target in bounds or ()) for bounds in alternatives)
 
 
 def _locked_documentation(values: dict[str, str]) -> bool:
@@ -225,8 +254,20 @@ def _locked_documentation(values: dict[str, str]) -> bool:
         if type(engines) is not dict or ('node' in engines and not _node_range(node, engines['node'])):
             return False
         readme = values['README.md']
-        for label, pattern, expected in (('python', r'Python\s+(\d+\.\d+(?:\.\d+)?)\+?', python), ('node', r'Node(?:\.js)?\s+(\d+(?:\.\d+){0,2})\+?', node), ('pnpm', r'pnpm\s+(\d+\.\d+\.\d+)', pnpm)):
-            stated = re.findall(pattern, readme, re.IGNORECASE)
+        for word, pattern, expected in (('Python', r'(\d+\.\d+(?:\.\d+)?)\+?', python), (r'Node(?:\.js)?', r'(\d+(?:\.\d+){0,2})\+?', node), ('pnpm', r'(\d+\.\d+\.\d+)', pnpm)):
+            stated = []
+            # The whole token after the tool name (Unicode digits included, so a
+            # non-ASCII digit can never cut it short) must be one ASCII version.
+            for token in re.findall(word + r'\s+(\d(?:\d|[A-Za-z._+-])*)', readme, re.IGNORECASE):
+                token = token.rstrip('.')
+                if not token.isascii():
+                    return False
+                version = re.match(pattern, token, re.ASCII)
+                if version is None:
+                    continue  # not a version statement (for example "Python 3")
+                if version.end() != len(token):
+                    return False
+                stated.append(version.group(1))
             if not stated or any(not (expected == value or expected.startswith(value + '.')) for value in stated):
                 return False
         locked = {item['name'].lower().replace('_', '-'): item['version'] for item in uv.get('package', [])}
@@ -254,6 +295,26 @@ _NEGATIONS = re.compile(r"\b(?:not|never|no|cannot|can't|isn't|aren't|doesn't|do
 _EQUATES = re.compile(r"\b(?:is|are|isn't|aren't|counts? as|constitutes?|equals?|serves? as|replaces?|substitutes? for|amounts? to|means?)\b")
 
 
+# The only accepted ways to deny that automated evidence is human acceptance. The
+# negation must govern the human-acceptance predicate itself; any other equating
+# sentence about the two is treated as an affirmation (fail closed).
+# Subject words exclude verbs, negations and the predicate, so no second clause or
+# affirmation can hide inside a subject phrase.
+_WORD = (r"(?!(?:is|are|was|were|be|been|not|never|no|nor|human|acceptance|counts?|means?|equals?|constitutes?"
+         r"|replaces?|but|except|unless|if|only|than|without|doubt|question|also|too)\b)[a-z][a-z/-]*")
+# Only determiners may precede "automated"; an adverbial or quantifying prefix
+# ("no doubt", "not only") could otherwise reverse the sentence.
+_DETERMINERS = r"(?:(?:the|all|any|these|those|such|our|its|their|this|that) ){0,2}"
+_SUBJECT = rf"{_DETERMINERS}automated(?: {_WORD}){{0,4}}"
+_AUTOMATED_DENIALS: tuple[re.Pattern[str], ...] = (
+    re.compile(_SUBJECT + r" (?:is|are) (?:not|never) human acceptance"),
+    re.compile(_SUBJECT + r" (?:isn't|aren't) human acceptance"),
+    re.compile(rf"no automated(?: {_WORD}){{0,4}} (?:is|are) human acceptance"),
+    re.compile(rf"(?:{_WORD} ){{1,4}}(?:is|are) automated(?: {_WORD}){{0,4}}, not human acceptance"),
+    re.compile(rf"human acceptance (?:is|are) (?:not|never) automated(?: {_WORD}){{0,4}}"),
+)
+
+
 def _negated(clause: str) -> bool:
     """Odd negation count means the clause denies its predicate."""
     return len(_NEGATIONS.findall(clause)) % 2 == 1
@@ -262,11 +323,12 @@ def _negated(clause: str) -> bool:
 def _limitation_boundary(specification: str) -> bool:
     """Sentence-level check of the two DTD limitation statements; fails closed.
 
-    A conforming statement is a sentence about automated evidence with exactly
-    one equating verb whose polarity denies that it is human acceptance, and a
-    sentence placing held-out execution/data outside. A sentence affirming the
-    opposite, or one that cannot be classified (several equating verbs, or both
-    inside and outside placement), fails the key regardless of other sentences.
+    A sentence naming automated evidence and human acceptance with any equating
+    verb must be one of the exact denial forms in `_AUTOMATED_DENIALS`; every
+    other equating sentence (affirmations, mixed or unclassifiable clauses) is a
+    contradiction. Negation words are never counted across clauses. A held-out
+    sentence must place execution/data outside; inside, both placements or a
+    negated outside placement fail the key regardless of other sentences.
     """
     text = specification.lower().translate({0x2018: "'", 0x2019: "'"})
     text = re.sub(r'\s+', ' ', re.sub(r'[*_`>#]', ' ', text))
@@ -274,13 +336,14 @@ def _limitation_boundary(specification: str) -> bool:
     automated = held_out = contradiction = False
     for sentence in sentences:
         if 'automated' in sentence and 'human acceptance' in sentence:
-            verbs = _EQUATES.findall(sentence)
             # A list that merely names both categories ("distinguish automated
             # checks, ..., human acceptance") neither affirms nor denies.
-            if len(verbs) == 1 and _negated(sentence):
-                automated = True
-            elif verbs:
-                contradiction = True
+            if _EQUATES.search(sentence):
+                clause = sentence.rstrip('.!?;: ')
+                if any(form.fullmatch(clause) for form in _AUTOMATED_DENIALS):
+                    automated = True
+                else:
+                    contradiction = True
         if 'held-out' in sentence or 'held out' in sentence:
             outside = re.search(r'\b(?:external(?:ly)?|outside)\b', sentence)
             inside = re.search(r'\b(?:internal(?:ly)?|inside|in-house)\b', sentence)
@@ -301,14 +364,32 @@ def _limitation_boundary(specification: str) -> bool:
 # parsed inline link; an unparsed one fails setup_paths (fail closed).
 _INLINE_LINK = re.compile(r'\]\(\s*(?:<([^<>\n]*)>|([^\s()<>]+))(?:\s+(?:"[^"\n]*"|\'[^\'\n]*\'|\([^()\n]*\)))?\s*\)')
 _HTML_LINK = re.compile(r'\b(?:src|href)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s"\'<>`=]+))', re.IGNORECASE)
-_REFERENCE_LINK = re.compile(r'^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<([^<>\n]*)>|(\S+))', re.MULTILINE)
+# A reference definition's destination may follow on the next line (CommonMark
+# allows one line ending); every definition label must yield a parsed destination.
+_REFERENCE_LABEL = r'\[(?:[^\[\]\\]|\\.){1,999}\]'
+_REFERENCE_START = re.compile(r'^[ \t]*' + _REFERENCE_LABEL + ':', re.MULTILINE | re.DOTALL)
+_REFERENCE_LINK = re.compile(r'^[ \t]*' + _REFERENCE_LABEL + r':[ \t]*(?:\r?\n[ \t]*)?(?:<([^<>\n]*)>|([^\s<>]\S*))',
+                             re.MULTILINE | re.DOTALL)
+# The scan never hides README text. Block-quote and list-item markers are removed
+# (they are container syntax, so a definition inside `> `, `- `, `1. ` or nested
+# containers is still found) and definitions are recognized at any indentation.
+# Code blocks and code spans are deliberately NOT excluded: a mis-parsed code
+# region could otherwise hide a real link, so a link or definition shown as code is
+# still checked. That can only over-reject (fail closed), never pass a missing file.
+_CONTAINER_PREFIX = re.compile(r'^(?:[ \t]*(?:>[ \t]?|[-+*][ \t]+|[0-9]{1,9}[.)][ \t]+))+', re.MULTILINE | re.ASCII)
 
 
 def _readme_links(readme: str) -> list[str] | None:
     inline = _INLINE_LINK.findall(readme)
-    if len(inline) != readme.count(']('):
+    flattened = _CONTAINER_PREFIX.sub('', readme)
+    references = _REFERENCE_LINK.findall(flattened)
+    starts = _REFERENCE_START.findall(flattened)
+    # A blank line ends a label, so a "label" spanning one is not a definition here;
+    # refusing it keeps unparsed definitions from being silently skipped.
+    if (len(inline) != readme.count('](') or len(references) != len(starts)
+            or any(re.search(r'\n[ \t\r]*\n', start) for start in starts)):
         return None
-    groups = [*inline, *_HTML_LINK.findall(readme), *_REFERENCE_LINK.findall(readme)]
+    groups = [*inline, *_HTML_LINK.findall(readme), *references]
     return [next((item for item in group if item), '') for group in groups]
 
 

@@ -5,11 +5,12 @@ import json
 import math
 from typing import TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from evaluation.tool_attestation import canonical_json_bytes
 
 TModel = TypeVar("TModel", bound=BaseModel)
+TValue = TypeVar("TValue")
 _MAX_DEPTH = 32
 _MAX_TOKENS = 8_000_000
 _MAX_STRING_BYTES = 8192
@@ -88,10 +89,8 @@ def _check_values(value: object) -> None:
             _check_values(item)
 
 
-def parse_canonical_model(
-    raw: bytes, model_type: type[TModel], *, maximum: int,
-) -> TModel:
-    """Reject noncanonical or unsafe evidence without including input in errors."""
+def _check_canonical_raw(raw: bytes, maximum: int) -> None:
+    """Shared pre-model checks: size, lexical limits, duplicates, nonfinite, canonical LF bytes."""
     if type(raw) is not bytes or type(maximum) is not int or maximum < 1:
         raise ValueError("invalid evidence JSON")
     if len(raw) > maximum:
@@ -108,7 +107,32 @@ def parse_canonical_model(
         raise ValueError("invalid evidence JSON") from None
     if canonical != raw:
         raise ValueError("evidence is not canonical")
-    del decoded, canonical, text
+
+
+def parse_canonical_typed(
+    raw: bytes, adapter: TypeAdapter[TValue], *, maximum: int,
+) -> TValue:
+    """Strict canonical parse for non-model evidence such as tuples of models.
+
+    Shares every check with `parse_canonical_model`; the strictly validated value
+    must serialize back to exactly the same canonical LF-terminated bytes.
+    """
+    _check_canonical_raw(raw, maximum)
+    try:
+        value = adapter.validate_json(raw, strict=True)
+        canonical = canonical_json_bytes(adapter.dump_python(value, mode="json")) + b"\n"
+    except (ValueError, TypeError, UnicodeError, OverflowError, RecursionError):
+        raise ValueError("evidence model mismatch") from None
+    if canonical != raw:
+        raise ValueError("evidence model mismatch")
+    return value
+
+
+def parse_canonical_model(
+    raw: bytes, model_type: type[TModel], *, maximum: int,
+) -> TModel:
+    """Reject noncanonical or unsafe evidence without including input in errors."""
+    _check_canonical_raw(raw, maximum)
     try:
         model = model_type.model_validate_json(raw, strict=True)
         canonical = canonical_json_bytes(model) + b"\n"

@@ -1,4 +1,40 @@
-# Plan C Handoff — D39 review corrections; operational acceptance pending
+# Plan C Handoff — D40 decision tooling; operational acceptance pending
+
+## D40 readiness decision handoff — 2026-10-03
+
+Read `D40 implementation amendments (2026-10-03)` in `docs/DTD.md` and
+`work-report-40.md`. The decision tooling exists; no decision has been made.
+
+- Operator order: commit and push final tooling; run
+  `python -m evaluation.scripts.attest_release_decision --repo-root .. --output <evidence>/decision-tool-attestation.json --expected-sha256 <aggregate>`
+  from `backend/` on the clean checkout; then run
+  `python -m scripts.decide_release_readiness` with the D36 publication's
+  `freeze-manifest.json`, the D38 triplet and D39 manifest/attestation (each with
+  its detached SHA-256), both review records and optional limitations.
+- Outputs go outside the repository or under the ignored `release-evidence/`; the
+  decision never replaces an existing `decision.json`/`decision.md`.
+- Missing evidence yields a named Not-ready decision (exit 2), never an inferred
+  pass. Real D37/D38/D39 evidence and both reviews do not exist yet, so the
+  actual result for the frozen candidate is **Not ready**.
+- `evidence_json.py` changed, so D38/D39 attestation aggregates change: produce
+  their evidence with the final committed tooling.
+- D40 never tags, publishes, deploys or creates a release.
+- An independent GPT-6 Astra review (2026-10-03) requested changes for D39 round 2
+  (A-01 to A-04) and D40 (B-01, B-02). All six are fixed on this branch (PR #2),
+  including the D39 ones because D39 was already merged; see the "Independent
+  review corrections" sections of `work-report-39.md` and `work-report-40.md`. The
+  follow-up review of those corrections raised R-01 to R-06, and its confirmation
+  raised R-07 to R-13 (documentation parsing); all are fixed. The final GPT-6.1 Sol
+  confirmation of `3e572a8` returned Approve with conditions: keep the documented
+  fail-closed over-rejection of missing targets shown as code in README examples.
+- Open, environment-dependent: after a cold Chrome start slower than 15 s the native
+  CDP test can report `teardown_failed` (fail-closed). It passes on warm starts. The
+  reviewer's hypothesis (gate exit record later than the stop wait while the tree is
+  confirmed gone) is reproduced synthetically. The pre-merge full run hit the flake
+  and the diagnostics showed a different path: process-tree termination itself was
+  unconfirmed. The detail now names the sub-step (Job active count, gate process
+  wait, session, pipe drain) and the remaining budget; investigate with it.
+  The test now waits 180 s for a cold Chrome start (production still 30 s).
 
 ## D39 second review correction handoff — 2026-10-03
 
