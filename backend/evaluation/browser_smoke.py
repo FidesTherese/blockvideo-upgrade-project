@@ -172,11 +172,39 @@ def recovery_journey(session: CDPSession, *, base_url: str, migration_url: str,
     summary: dict[str, Any] = dict(waiting_ok=True, safe_retry_ok=True, unknown_remote_blocked=True,
                                   migration_failed_ok=True, keyboard_ok=True, duplicate_post_count=0,
                                   horizontal_overflow=False, playback_ok=True)
-    def count() -> int:
-        value = _json(_read_regular(counter_path, maximum=4096), maximum=4096)
+    def read_count() -> int:
+        for attempt in range(40):
+            try:
+                value = _json(_read_regular(counter_path, maximum=4096), maximum=4096)
+                break
+            except (OSError, ValueError):
+                # The server replaces the counter atomically; a read racing that
+                # replacement is retried, never interpreted.
+                if attempt == 39:
+                    raise
+                time.sleep(0.05)
         if type(value) is not dict or set(value) != {'operation_posts'} or type(value['operation_posts']) is not int or not 0 <= value['operation_posts'] <= 16:
             raise ValueError('operation counter invalid')
         return value['operation_posts']
+
+    def count() -> int:
+        """Counter value after a quiet second, so a late duplicate POST is observed."""
+        value = read_count()
+        quiet_since = time.monotonic()
+        deadline = quiet_since + 6
+        while time.monotonic() - quiet_since < 1.0:
+            if time.monotonic() >= deadline:
+                raise ValueError('operation counter never settled')
+            time.sleep(0.1)
+            current = read_count()
+            if current != value:
+                value, quiet_since = current, time.monotonic()
+        return value
+
+    initial = count()
+    retry_label = json.dumps('現在の設定で再実行')
+    no_enabled_retry = ("(async()=>{for(let i=0;i<25;i++){if([...document.querySelectorAll('button')].some(b=>b.textContent.includes("
+                        + retry_label + ")&&!b.disabled))return false;await new Promise(r=>setTimeout(r,100));}return true})()")
 
     def capture(width: int, state: str) -> None:
         if session.evaluate('document.documentElement.scrollWidth > document.documentElement.clientWidth') is True:
@@ -196,11 +224,13 @@ def recovery_journey(session: CDPSession, *, base_url: str, migration_url: str,
             project = projects['safe_retry_wide' if width == 1440 and state == 'safe_retry' else state]
             session.navigate(base_url + '/projects/' + str(project))
             _wait(session, "document.readyState==='complete' && !!document.querySelector('#generation-history li') && document.querySelector('#generation-history').innerText.includes(" + json.dumps(label) + ')')
-            # Require stable rendered controls across animation frames, after the
+            # Require rendered controls that stay unchanged for 600 ms after the
             # durable history is present. A pre-history negation is not evidence.
-            _wait(session, "(async()=>{const h=document.querySelector('#generation-history');const state=()=>h.innerText+'|'+[...h.querySelectorAll('button')].map(b=>b.disabled).join();const a=state();await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));return a===state()})()")
+            _wait(session, "(async()=>{const h=document.querySelector('#generation-history');const state=()=>h.innerText+'|'+[...document.querySelectorAll('button')].map(b=>b.disabled).join();const a=state();for(let i=0;i<4;i++){await new Promise(r=>setTimeout(r,150));if(state()!==a)return false;}return true})()")
             if state == 'waiting':
-                summary['waiting_ok'] &= session.evaluate("![...document.querySelectorAll('button')].some(b=>b.textContent.includes('現在の設定で再実行')&&!b.disabled)") is True
+                # Negations are sampled across 2.5 s (longer than the 2 s polling
+                # refetch), so a fetch-disabled moment cannot satisfy them.
+                summary['waiting_ok'] &= session.evaluate(no_enabled_retry) is True
             elif state == 'safe_retry':
                 _wait(session, "[...document.querySelectorAll('#generation-history button')].some(b=>b.textContent.includes('現在の設定で再実行')&&!b.disabled)")
                 summary['safe_retry_ok'] &= session.evaluate("[...document.querySelectorAll('button')].some(b=>b.textContent.includes('現在の設定で再実行')&&!b.disabled)") is True
@@ -217,7 +247,7 @@ def recovery_journey(session: CDPSession, *, base_url: str, migration_url: str,
                 summary['duplicate_post_count'] = max(summary['duplicate_post_count'], delta)
                 summary['keyboard_ok'] &= delta == 1
             elif state == 'unknown_remote':
-                summary['unknown_remote_blocked'] &= session.evaluate("![...document.querySelectorAll('button')].some(b=>b.textContent.includes('現在の設定で再実行')&&!b.disabled)") is True
+                summary['unknown_remote_blocked'] &= session.evaluate(no_enabled_retry) is True
             capture(width, state)
         session.navigate(base_url + '/projects/' + str(projects['media']))
         _wait(session, "document.readyState==='complete' && !!document.querySelector('video')")
@@ -225,8 +255,15 @@ def recovery_journey(session: CDPSession, *, base_url: str, migration_url: str,
         capture(width, 'playback')
         session.navigate(migration_url)
         _wait(session, "document.readyState==='complete' && document.body.innerText.includes('移行')")
-        summary['migration_failed_ok'] &= session.evaluate("document.body.innerText.includes('バックアップ')||document.body.innerText.includes('起動')") is True
+        # The migration-failed alert itself must carry the stop-the-app guidance
+        # (both D35 variants); generic startup text containing '起動' is not enough.
+        summary['migration_failed_ok'] &= session.evaluate("[...document.querySelectorAll('[role=alert]')].some(a=>a.innerText.includes('移行')&&a.innerText.includes('アプリを停止'))") is True
         capture(width, 'migration')
+    total = count() - initial
+    if total != 2:
+        # Exactly one accepted POST per viewport across the whole journey.
+        summary['keyboard_ok'] = False
+        summary['duplicate_post_count'] = 0 if total < 2 else min(4, max(2, total - 1))
     return summary
 
 

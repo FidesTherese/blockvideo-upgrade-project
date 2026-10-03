@@ -11,10 +11,11 @@ import stat
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from evaluation import blinded_io
 
@@ -575,7 +576,6 @@ def record(value):
     with open(control,'r+b',buffering=0) as output:
         output.write(raw)
         output.truncate()
-        os.fsync(output.fileno())
 try:
     target=subprocess.Popen(sys.argv[1:],stdin=subprocess.DEVNULL)
 except (OSError,ValueError):
@@ -765,8 +765,24 @@ def _windows_resident(pid: int) -> int | None:
         _windows_close_handle(int(handle))
 
 
-def _posix_process_table() -> dict[int, tuple[int, str, int, int]]:
-    table: dict[int, tuple[int, str, int, int]] = {}
+def _windows_creation_time(pid: int) -> int | None:
+    """Process creation FILETIME, or None when it cannot be proven."""
+    opener = _win_function("OpenProcess", [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32], ctypes.c_void_p)
+    handle = opener(0x1000, 0, pid)
+    if not handle:
+        return None
+    try:
+        times = [ctypes.c_uint64() for _ in range(4)]
+        query = _win_function("GetProcessTimes", [ctypes.c_void_p, *(ctypes.POINTER(ctypes.c_uint64),) * 4])
+        if not query(handle, *(ctypes.byref(value) for value in times)):
+            return None
+        return times[0].value
+    finally:
+        _windows_close_handle(int(handle))
+
+
+def _posix_process_table() -> dict[int, tuple[int, str, int, int, int]]:
+    table: dict[int, tuple[int, str, int, int, int]] = {}
     with os.scandir("/proc") as entries:
         for entry in entries:
             if not entry.name.isdecimal():
@@ -778,39 +794,70 @@ def _posix_process_table() -> dict[int, tuple[int, str, int, int]]:
                     raise ValueError("resident accounting unavailable")
                 end = raw.rindex(b")")
                 fields = raw[end + 2:].split()
-                name = raw[raw.index(b"(") + 1:end].decode("utf-8", "strict")
-                table[int(entry.name)] = (int(fields[1]), name, int(fields[3]), int(fields[21]) * os.sysconf("SC_PAGE_SIZE"))
-            except (FileNotFoundError, ProcessLookupError):
+                # comm is truncated to 15 bytes and may split a UTF-8 sequence.
+                name = raw[raw.index(b"(") + 1:end].decode("utf-8", "replace")
+                table[int(entry.name)] = (int(fields[1]), name, int(fields[3]), int(fields[21]) * os.sysconf("SC_PAGE_SIZE"), int(fields[19]))
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
                 continue
             if len(table) > 32768:
                 raise ValueError("resident inventory limit exceeded")
     return table
 
 
-def _process_descendants(table: dict[int, tuple[int, str]], root: int) -> set[int]:
+CreationTime = Callable[[int], "int | None"]
+
+
+def _process_descendants(table: dict[int, tuple[int, str]], root: int, created: CreationTime) -> set[int]:
+    """Descendants by recorded parent PID, excluding PID-reuse orphans.
+
+    A recorded parent PID may belong to a newer process that reused it; a real
+    child is never created before its parent, and an unprovable relation is
+    not adopted.
+    """
     selected = {root}
     children: dict[int, list[int]] = {}
     for pid, (parent, _) in table.items():
-        children.setdefault(parent, []).append(pid)
+        if pid != parent:
+            children.setdefault(parent, []).append(pid)
     pending = [root]
     while pending:
-        for pid in children.get(pending.pop(), ()):
-            if pid not in selected:
-                selected.add(pid)
-                pending.append(pid)
+        parent = pending.pop()
+        parent_time = created(parent)
+        if parent_time is None:
+            continue
+        for pid in children.get(parent, ()):
+            if pid in selected:
+                continue
+            child_time = created(pid)
+            if child_time is None or child_time < parent_time:
+                continue
+            selected.add(pid)
+            pending.append(pid)
     return selected
 
 
-def _agent_root(table: dict[int, tuple[int, str]], controller: int, explicit: int | None) -> int | None:
+def _declared_agent_pid() -> int | None:
+    """Operator-declared agent process tree (validated as live at sampling time)."""
+    value = os.environ.get("D39_AGENT_PID")
+    if value is None:
+        return None
+    if not value.isdecimal() or not 0 < int(value) < 2 ** 32:
+        raise ValueError("D39_AGENT_PID must be a positive process id")
+    return int(value)
+
+
+def _agent_root(table: dict[int, tuple[int, str]], controller: int,
+                created: CreationTime | None = None) -> int | None:
     ancestors: list[int] = []
     pid = controller
     while pid and pid not in ancestors and pid in table:
+        if ancestors and created is not None:
+            # Stop at a reused parent PID: an ancestor is never newer than its child.
+            child_time, parent_time = created(ancestors[-1]), created(pid)
+            if child_time is None or parent_time is None or parent_time > child_time:
+                break
         ancestors.append(pid)
         pid = table[pid][0]
-    if explicit is not None:
-        if type(explicit) is not int or explicit not in ancestors or table[explicit][1] not in _AGENT_NAMES:
-            raise ValueError("agent PID must identify an agent ancestor")
-        return explicit
     for index, pid in enumerate(ancestors):
         if table[pid][1] in _AGENT_NAMES:
             root = pid
@@ -823,22 +870,36 @@ def _agent_root(table: dict[int, tuple[int, str]], controller: int, explicit: in
 
 
 def _owned_memory_sample(scope: OwnedProcessScope | None = None) -> tuple[int, int]:
+    cache: dict[int, int | None] = {}
     if os.name == "nt":
         table = _windows_process_table()
         owned = _job_pids(scope._job) if scope is not None and scope._job is not None else set()
+        def created(pid: int) -> int | None:
+            if pid not in cache:
+                cache[pid] = _windows_creation_time(pid)
+            return cache[pid]
     elif os.name == "posix" and Path("/proc").is_dir():
         posix = _posix_process_table()
         table = {pid: (record[0], record[1]) for pid, record in posix.items()}
         sessions = scope._sessions if scope is not None else set()
         owned = {pid for pid, record in posix.items() if record[2] in sessions}
+        def created(pid: int) -> int | None:
+            return posix[pid][4] if pid in posix else None
     else:
         raise ValueError("resident accounting unavailable")
     controller = os.getpid()
     if controller not in table:
         raise ValueError("controller resident accounting lost")
-    root = _agent_root(table, controller, scope._agent_pid if scope is not None else None)
-    agent = _process_descendants(table, root) if root is not None else set()
-    controller_tree = _process_descendants(table, controller)
+    root = _agent_root(table, controller, created)
+    agent = _process_descendants(table, root, created) if root is not None else set()
+    declared = scope._agent_pid if scope is not None else None
+    if declared is not None:
+        # A declaration only adds a live tree; it never replaces the detected
+        # agent or removes the unknown-agent reserve, so it cannot undercount.
+        if declared not in table or created(declared) is None:
+            raise ValueError("D39_AGENT_PID must identify a live process")
+        agent |= _process_descendants(table, declared, created)
+    controller_tree = _process_descendants(table, controller, created)
     selected = owned | agent | controller_tree
     group = 0
     outside = 0
@@ -867,7 +928,10 @@ def _owned_memory_sample(scope: OwnedProcessScope | None = None) -> tuple[int, i
 class OwnedProcessScope:
     """One memory-gated Job/session registry for commands and long-lived children."""
     def __init__(self, *, agent_pid: int | None = None) -> None:
-        self._agent_pid = agent_pid
+        self._agent_pid = agent_pid if agent_pid is not None else _declared_agent_pid()
+        # Dedicated sampler thread: resident samples never queue behind the
+        # drivers' single-worker hashing executor (DTD: monitor stays runnable).
+        self._sampler: ThreadPoolExecutor | None = None
         self._job: int | None = None
         self._sessions: set[int] = set()
         self._children: list[OwnedProcess] = []
@@ -883,12 +947,27 @@ class OwnedProcessScope:
         self.peak_aggregate_resident: int = 0
         self.teardown_confirmed: bool = False
 
+    async def _sample(self) -> tuple[int, int]:
+        if self._sampler is None:
+            self._sampler = ThreadPoolExecutor(max_workers=1, thread_name_prefix="d39-memory")
+        return await asyncio.get_running_loop().run_in_executor(self._sampler, _owned_memory_sample, self)
+
+    def _stop_sampler(self) -> None:
+        if self._sampler is not None:
+            self._sampler.shutdown(wait=False, cancel_futures=True)
+            self._sampler = None
+
     async def __aenter__(self) -> OwnedProcessScope:
         if self._entered or self._closed:
             raise ValueError("owned scope is single-use")
-        group, outside = await asyncio.to_thread(_owned_memory_sample, self)
+        try:
+            group, outside = await self._sample()
+        except BaseException:
+            self._stop_sampler()
+            raise
         limit = min(1536 * _MIB, OWNED_MEMORY_START_LIMIT_BYTES - outside - 512 * _MIB)
         if group + outside >= OWNED_MEMORY_START_LIMIT_BYTES or limit < 768 * _MIB or outside + limit + 512 * _MIB > OWNED_MEMORY_START_LIMIT_BYTES:
+            self._stop_sampler()
             raise ValueError("insufficient aggregate memory headroom")
         self.committed_memory_limit = limit
         self.peak_aggregate_resident = group + outside
@@ -919,7 +998,7 @@ class OwnedProcessScope:
     async def _monitor_memory(self) -> None:
         while not self._closing:
             try:
-                group, outside = await asyncio.to_thread(_owned_memory_sample, self)
+                group, outside = await self._sample()
                 self.peak_aggregate_resident = max(self.peak_aggregate_resident, group + outside)
                 if group + outside >= OWNED_MEMORY_START_LIMIT_BYTES or group >= self.committed_memory_limit:
                     self._memory_lost.set()
@@ -962,11 +1041,14 @@ class OwnedProcessScope:
         if self._monitor is not None:
             self._monitor.cancel()
             await asyncio.gather(self._monitor, return_exceptions=True)
+        self._stop_sampler()
         confirmed = True
-        for child in tuple(self._children):
-            try:
-                await child.stop()
-            except (OSError, ValueError):
+        children = tuple(self._children)
+        # Stop children concurrently so they share, rather than serially exhaust,
+        # the one confirmed teardown budget. Any stop failure is unconfirmed.
+        results = await asyncio.gather(*(child.stop() for child in children), return_exceptions=True)
+        for child, result in zip(children, results, strict=True):
+            if isinstance(result, BaseException):
                 confirmed = False
             if child.outcome is not None and child.outcome.outcome == "teardown_failed":
                 confirmed = False
@@ -1011,7 +1093,8 @@ def _kill_owned_session(session: int) -> set[int]:
     for pid in pids:
         try:
             os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # Gone, or the PID was reused outside our session before the kill.
             pass
     return pids
 
@@ -1230,8 +1313,19 @@ class OwnedProcess:
                             await process.stdin.drain()
                         except (BrokenPipeError, ConnectionResetError):
                             pass
-                    until = min(self._deadline, time.monotonic() + 1)
+                    # Wait for the gate's own terminal record (bounded by the confirmed
+                    # teardown budget, not a fixed 1 s): a slow but successful stop
+                    # under load must not become teardown_failed.
+                    until = min(self._deadline, time.monotonic() + HOST_TEARDOWN_SECONDS)
+                    if self.scope._teardown_deadline is not None:
+                        # Inside scope close, keep at least half of the shared budget
+                        # for the confirmed Job/session termination that follows (a
+                        # browser tree holds the pipes until every process is gone).
+                        now = time.monotonic()
+                        until = min(until, now + max(0.0, self.scope._teardown_deadline - now) / 2)
                     while self._observation()[0] not in {"exited", "launch_failed"} and time.monotonic() < until:
+                        if process is not None and process.returncode is not None:
+                            break
                         await asyncio.sleep(0.01)
                     self._latch("completed")
             await self._terminate()

@@ -733,7 +733,7 @@ def _inventory_fixture(monkeypatch: pytest.MonkeyPatch, *, fail_index: int | Non
         # native target, stdout/stderr, process ownership and cleanup stay real.
         from dataclasses import replace
         bindings = tuple(release.ToolExecutionBinding(role=role, version='synthetic-1', executable=release._native_file(tools.executable, 'tools/' + role), launcher=None) for role in ('ffmpeg', 'ffprobe'))
-        return replace(tools, media_bindings=bindings)
+        return replace(tools, media_bindings=bindings), dict(env)
     monkeypatch.setattr(release, "_bootstrap_python", backend)
     monkeypatch.setattr(release, "_sandbox_python", sandbox)
     monkeypatch.setattr(release, "_frontend_tools", frontend)

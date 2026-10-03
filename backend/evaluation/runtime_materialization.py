@@ -66,7 +66,6 @@ def _delete_owned_path(path: Path, identity: tuple[int, int], *, directory: bool
                 raise OSError("owned deletion identity unavailable")
             if (bool(information.file_attributes & 0x10) != directory
                     or bool(information.file_attributes & 0x400) != reparse
-                    or not directory and not reparse and information.number_of_links != 1
                     or _native_identity(int(handle)) != identity):
                 raise ValueError("owned deletion identity or type lost")
             flags = ctypes.c_uint32(0x1 | 0x2 | 0x10)
@@ -86,7 +85,7 @@ def _delete_owned_path(path: Path, identity: tuple[int, int], *, directory: bool
         if parent_descriptor is None:
             raise ValueError("owned parent descriptor unavailable")
         before = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if _identity(before) != identity or stat.S_ISDIR(before.st_mode) != directory or stat.S_ISREG(before.st_mode) and before.st_nlink != 1:
+        if _identity(before) != identity or stat.S_ISDIR(before.st_mode) != directory:
             raise ValueError("owned deletion identity lost")
         # Nothing slow occurs between fstatat and unlinkat/rmdir at this anchor.
         if directory:
@@ -195,7 +194,9 @@ def _directory(path: Path) -> Path:
     current = Path(absolute.anchor)
     blinded_io.validate_directory(_fs_path(current), "root alias")
     for part in absolute.parts[1:]:
-        if part in {".", ".."}:
+        # On Windows '\\?\' validation sees a literal 'name.' while unprefixed
+        # consumers normalize it to 'name' (possibly a junction): refuse aliases.
+        if part in {".", ".."} or os.name == "nt" and part.endswith((".", " ")):
             raise ValueError("unsafe root alias")
         current /= part
         blinded_io.validate_directory(_fs_path(current), "root alias")

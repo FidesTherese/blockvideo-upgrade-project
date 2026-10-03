@@ -19,7 +19,7 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, NoReturn
 
 import httpx
@@ -112,34 +112,95 @@ def fake_providers() -> Iterator[tuple[str, dict[str, int]]]:
             raise ValueError('fake provider teardown unconfirmed')
 
 
+_SEMVER_COMPARATOR = re.compile(
+    r'(?P<op>>=|<=|>|<|=|\^|~>|~)?\s*v?(?P<major>\d+|[xX*])(?:\.(?P<minor>\d+|[xX*]))?'
+    r'(?:\.(?P<patch>\d+|[xX*]))?(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?')
+_SEMVER_HYPHEN = re.compile(r'\s*(\S+)\s+-\s+(\S+)\s*')
+Bound = tuple[str, tuple[int, int, int]]
+
+
+def _semver_prefix(match: re.Match[str]) -> list[int]:
+    """Concrete numeric prefix of a (possibly partial or x-range) version."""
+    values: list[int] = []
+    for part in (match['major'], match['minor'], match['patch']):
+        if part is None or part in 'xX*':
+            break
+        values.append(int(part))
+    return values
+
+
+def _semver_bump(values: list[int], position: int) -> tuple[int, int, int]:
+    padded = values[:position] + [0] * (3 - position)
+    padded[position - 1] += 1
+    return padded[0], padded[1], padded[2]
+
+
+def _semver_bounds(operator: str, values: list[int], prerelease: bool = False) -> list[Bound] | None:
+    """npm node-semver comparator semantics for release versions."""
+    count = len(values)
+    low = values + [0] * (3 - count)
+    lower: Bound = ('>=', (low[0], low[1], low[2]))
+    if prerelease and count == 3:
+        # Release versions only: X.Y.Z-pre < X.Y.Z, so an exact prerelease never
+        # matches, '>' behaves like '>=' and '<=' like '<'; ~ and ^ are unchanged.
+        if operator in ('', '='):
+            return [('<', (0, 0, 0))]
+        operator = {'>': '>=', '<=': '<'}.get(operator, operator)
+    if operator in ('', '='):
+        return [] if count == 0 else [('==', lower[1])] if count == 3 else [lower, ('<', _semver_bump(values, count))]
+    if operator == '>=':
+        return [] if count == 0 else [lower]
+    if operator == '>':
+        return [('<', (0, 0, 0))] if count == 0 else [('>', lower[1])] if count == 3 else [('>=', _semver_bump(values, count))]
+    if operator == '<':
+        return [('<', (0, 0, 0) if count == 0 else lower[1])]
+    if operator == '<=':
+        return [] if count == 0 else [('<=', lower[1])] if count == 3 else [('<', _semver_bump(values, count))]
+    if operator in ('~', '~>'):
+        return [] if count == 0 else [lower, ('<', _semver_bump(values, 1 if count == 1 else 2))]
+    if operator == '^':
+        if count == 0:
+            return []
+        position = next((index + 1 for index, value in enumerate(values) if value), count)
+        return [lower, ('<', _semver_bump(values, min(position, count) if count < 3 or any(values) else 3))]
+    return None
+
+
 def _node_range(version: str, expression: str) -> bool:
-    """Bounded npm numeric ranges; unsupported spellings fail the document gate."""
-    actual = tuple(int(item) for item in version.split('.'))
-    if len(actual) != 3 or len(expression) > 256:
+    """npm-compatible range satisfaction for a release version (fails closed on unknown syntax)."""
+    try:
+        actual = tuple(int(item) for item in version.split('.'))
+    except ValueError:
         return False
+    if len(actual) != 3 or len(expression) > 512:
+        return False
+    checks = {'==': lambda a, b: a == b, '>=': lambda a, b: a >= b, '>': lambda a, b: a > b,
+              '<': lambda a, b: a < b, '<=': lambda a, b: a <= b}
     for alternative in expression.split('||'):
-        tokens = alternative.strip().split()
-        accepted = bool(tokens)
-        for token in tokens:
-            match = re.fullmatch(r'(>=|<=|>|<|=|\^|~)?(\d+)(?:\.(\d+))?(?:\.(\d+))?', token)
-            if match is None:
-                accepted = False
-                break
-            operator = match[1] or '='
-            target = tuple(int(match[i] or 0) for i in (2, 3, 4))
-            if operator == '^':
-                position = next((i for i, n in enumerate(target) if n), 2)
-                ceiling = tuple(target[i] + 1 if i == position else target[i] if i < position else 0 for i in range(3))
-                accepted &= target <= actual < ceiling
-            elif operator == '~':
-                ceiling = (target[0], target[1] + 1, 0) if match[3] else (target[0] + 1, 0, 0)
-                accepted &= target <= actual < ceiling
-            elif operator == '=':
-                count = 3 if match[4] else 2 if match[3] else 1
-                accepted &= actual[:count] == target[:count]
-            else:
-                accepted &= {'>=': actual >= target, '<=': actual <= target, '>': actual > target, '<': actual < target}[operator]
-        if accepted:
+        bounds: list[Bound] = []
+        hyphen = _SEMVER_HYPHEN.fullmatch(alternative)
+        if hyphen is not None:
+            first, last = (_SEMVER_COMPARATOR.fullmatch(side) for side in hyphen.groups())
+            if first is None or last is None or first['op'] or last['op']:
+                return False
+            start, end = _semver_prefix(first), _semver_prefix(last)
+            bounds += _semver_bounds('>=', start) or []
+            bounds += ([('<=', (end[0], end[1], end[2]))] if len(end) == 3 else [('<', _semver_bump(end, len(end)))] if end else [])
+        else:
+            position = 0
+            text = alternative.strip()
+            while position < len(text):
+                match = _SEMVER_COMPARATOR.match(text, position)
+                if match is None or match.end() == position:
+                    return False
+                found = _semver_bounds(match['op'] or '', _semver_prefix(match), match['pre'] is not None)
+                if found is None:
+                    return False
+                bounds += found
+                position = match.end()
+                while position < len(text) and text[position].isspace():
+                    position += 1
+        if all(checks[operator](actual, target) for operator, target in bounds):
             return True
     return False
 
@@ -155,7 +216,13 @@ def _locked_documentation(values: dict[str, str]) -> bool:
         pnpm = TOOL_RULES['pnpm'][0]
         if project['requires-python'] != uv['requires-python'] or python not in SpecifierSet(project['requires-python']):
             return False
-        if package['packageManager'] != 'pnpm@' + pnpm or not _node_range(node, package['engines']['node']):
+        # Optional manifest declarations must agree with the lane when present;
+        # their absence is not a disagreement (the README statement is checked below).
+        manager = package.get('packageManager')
+        if manager is not None and (type(manager) is not str or manager.split('+', 1)[0] != 'pnpm@' + pnpm):
+            return False
+        engines = package.get('engines', {})
+        if type(engines) is not dict or ('node' in engines and not _node_range(node, engines['node'])):
             return False
         readme = values['README.md']
         for label, pattern, expected in (('python', r'Python\s+(\d+\.\d+(?:\.\d+)?)\+?', python), ('node', r'Node(?:\.js)?\s+(\d+(?:\.\d+){0,2})\+?', node), ('pnpm', r'pnpm\s+(\d+\.\d+\.\d+)', pnpm)):
@@ -183,8 +250,112 @@ def _locked_documentation(values: dict[str, str]) -> bool:
         return False
 
 
-def documentation_checks(source: Path, *, contracts_passed: bool | dict[str, bool]) -> dict[str, bool]:
+_NEGATIONS = re.compile(r"\b(?:not|never|no|cannot|can't|isn't|aren't|doesn't|don't|neither|without|false|distinct|separate|different|rather than|instead of)\b")
+_EQUATES = re.compile(r"\b(?:is|are|isn't|aren't|counts? as|constitutes?|equals?|serves? as|replaces?|substitutes? for|amounts? to|means?)\b")
+
+
+def _negated(clause: str) -> bool:
+    """Odd negation count means the clause denies its predicate."""
+    return len(_NEGATIONS.findall(clause)) % 2 == 1
+
+
+def _limitation_boundary(specification: str) -> bool:
+    """Sentence-level check of the two DTD limitation statements; fails closed.
+
+    A conforming statement is a sentence about automated evidence with exactly
+    one equating verb whose polarity denies that it is human acceptance, and a
+    sentence placing held-out execution/data outside. A sentence affirming the
+    opposite, or one that cannot be classified (several equating verbs, or both
+    inside and outside placement), fails the key regardless of other sentences.
+    """
+    text = specification.lower().translate({0x2018: "'", 0x2019: "'"})
+    text = re.sub(r'\s+', ' ', re.sub(r'[*_`>#]', ' ', text))
+    sentences = [item.strip() for item in re.split(r'(?<=[.!?;:])\s+', text) if item.strip()]
+    automated = held_out = contradiction = False
+    for sentence in sentences:
+        if 'automated' in sentence and 'human acceptance' in sentence:
+            verbs = _EQUATES.findall(sentence)
+            # A list that merely names both categories ("distinguish automated
+            # checks, ..., human acceptance") neither affirms nor denies.
+            if len(verbs) == 1 and _negated(sentence):
+                automated = True
+            elif verbs:
+                contradiction = True
+        if 'held-out' in sentence or 'held out' in sentence:
+            outside = re.search(r'\b(?:external(?:ly)?|outside)\b', sentence)
+            inside = re.search(r'\b(?:internal(?:ly)?|inside|in-house)\b', sentence)
+            if outside and inside:
+                contradiction = True
+            elif outside:
+                if _negated(sentence[:outside.end()]):
+                    contradiction = True
+                else:
+                    held_out = True
+            elif inside and not _negated(sentence[:inside.end()]):
+                contradiction = True
+    return automated and held_out and not contradiction
+
+
+# CommonMark inline destinations (optionally <bracketed>) with an optional title,
+# HTML src/href in any quoting, and reference definitions. Every "](" must be a
+# parsed inline link; an unparsed one fails setup_paths (fail closed).
+_INLINE_LINK = re.compile(r'\]\(\s*(?:<([^<>\n]*)>|([^\s()<>]+))(?:\s+(?:"[^"\n]*"|\'[^\'\n]*\'|\([^()\n]*\)))?\s*\)')
+_HTML_LINK = re.compile(r'\b(?:src|href)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s"\'<>`=]+))', re.IGNORECASE)
+_REFERENCE_LINK = re.compile(r'^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<([^<>\n]*)>|(\S+))', re.MULTILINE)
+
+
+def _readme_links(readme: str) -> list[str] | None:
+    inline = _INLINE_LINK.findall(readme)
+    if len(inline) != readme.count(']('):
+        return None
+    groups = [*inline, *_HTML_LINK.findall(readme), *_REFERENCE_LINK.findall(readme)]
+    return [next((item for item in group if item), '') for group in groups]
+
+
+_COVERAGE_TERMS: dict[str, tuple[str, tuple[str, ...]]] = {
+    'migration_restore': ('backend/tests/test_d34_migrations.py', ('restore_database_backup', 'database_lease_unavailable')),
+    'recovery_codes': ('backend/tests/test_d35_startup_recovery_api.py', ('safe_retry', 'external_outcome_unknown', 'migration_failed')),
+}
+
+
+def _python_terms(source: str) -> set[str]:
+    """Exact code tokens used inside committed `test*` functions.
+
+    Names, attributes and string constants in test bodies and their decorators
+    count; comments, docstrings, function names and module-level values cannot
+    satisfy coverage.
+    """
+    tree = ast.parse(source)
+    docstrings = {id(node.body[0].value) for node in ast.walk(tree)
+                  if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                  and node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant)
+                  and isinstance(node.body[0].value.value, str)}
+    terms: set[str] = set()
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) or not function.name.startswith('test'):
+            continue
+        for statement in (*function.decorator_list, *function.body):
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Name):
+                    terms.add(node.id)
+                elif isinstance(node, ast.Attribute):
+                    terms.add(node.attr)
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+                    terms.add(node.value)
+    return terms
+
+
+def _covers(source: str, required: tuple[str, ...]) -> bool:
+    terms = _python_terms(source)
+    return all(term in terms for term in required)
+
+
+def documentation_checks(source: Path, *, contracts_passed: bool | dict[str, bool], inventory: frozenset[str]) -> dict[str, bool]:
+    """Six documentation keys. README links must name files of `inventory` (the
+    materialized record), never files the verifier later wrote into the group."""
     checks = dict.fromkeys(DOC_KEYS, False)
+    if type(inventory) is not frozenset:
+        return checks
     required = ('README.md', 'Makefile', 'backend/.env.example', 'backend/pyproject.toml',
                 'backend/uv.lock', 'frontend/package.json', 'frontend/pnpm-lock.yaml',
                 'backend/scripts/plan_c_demo.py', 'backend/tests/test_d34_migrations.py',
@@ -197,14 +368,21 @@ def documentation_checks(source: Path, *, contracts_passed: bool | dict[str, boo
         except (OSError, ValueError, UnicodeError):
             return checks
     readme = values['README.md']
-    links = re.findall(r'\]\(([^\s)]+)(?:\s+"[^"\n]*")?\)|(?:src|href)=["\']([^"\']+)["\']', readme)
-    checks['setup_paths'] = True
-    for target in (first or second for first, second in links):
-        if target.startswith(('https://', 'http://', '#', 'mailto:')):
-            continue
-        relative = Path(target.split('#', 1)[0])
+    links = _readme_links(readme)
+    checks['setup_paths'] = links is not None
+    for target in links or ():
+        if re.match(r'[a-zA-Z][a-zA-Z0-9+.-]+:', target) or target.startswith('#'):
+            continue  # external URL schemes (two or more characters) and in-page anchors
+        reference = target.split('#', 1)[0].split('?', 1)[0]
         try:
-            if relative.is_absolute() or '..' in relative.parts or any(part in {'node_modules', '.venv', 'dist', '.git'} for part in relative.parts):
+            # GitHub resolves '/x' against the repository root; anything that is
+            # not a plain forward-slash relative path to an inventoried file is refused.
+            relative = PurePosixPath(reference[1:] if reference.startswith('/') else reference)
+            if (not reference or '\\' in reference or re.match(r'[a-zA-Z]:', reference) or relative.is_absolute()
+                    or any(part in {'', '.', '..'} or part.endswith(('.', ' ')) for part in relative.parts)
+                    or any(part in {'node_modules', '.venv', 'dist', '.git'} for part in relative.parts)):
+                raise ValueError('setup reference not inventoried')
+            if relative.as_posix() not in inventory:
                 raise ValueError('setup reference not inventoried')
             materialization._directory((source / relative).parent)
             blinded_io.fingerprint_regular(source / relative, maximum=8 * 1024 * 1024)
@@ -220,15 +398,19 @@ def documentation_checks(source: Path, *, contracts_passed: bool | dict[str, boo
     except (SyntaxError, ValueError, TypeError):
         pass
     results = dict.fromkeys(('recovery_codes', 'migration_restore', 'ui_recovery'), contracts_passed) if type(contracts_passed) is bool else contracts_passed
-    checks['recovery_codes'] = results.get('recovery_codes') is True and results.get('ui_recovery') is True
-    checks['migration_restore'] = results.get('migration_restore') is True
-    # Deliberately bounded grammatical claims; keyword co-occurrence and a
-    # contradictory affirmative sentence cannot satisfy either proposition.
-    specification = re.sub(r'\s+', ' ', values['specification.md'].lower())
-    automated = re.search(r'automated (?:technical )?evidence (?:is|are)[, ]+(?:not human acceptance|not (?:a substitute for|equivalent to) human acceptance)', specification)
-    external = re.search(r'(?:real )?held-out (?:execution|evaluation) (?:is|remains|must remain) external', specification)
-    contradiction = re.search(r'automated (?:technical )?evidence (?:is|are) human acceptance|held-out (?:execution|evaluation) (?:is|remains) internal', specification)
-    checks['limitation_boundary'] = bool(automated and external and not contradiction)
+    # The committed tests must still cover the DTD cases (live-lease rejection,
+    # backup restore and the three recovery codes); passing an unrelated test
+    # file is not evidence. Coverage is structural (AST), results are executed.
+    covered: dict[str, bool] = {}
+    for key, (name, terms) in _COVERAGE_TERMS.items():
+        try:
+            covered[key] = _covers(values[name], terms)
+        except (SyntaxError, ValueError):
+            covered[key] = False
+    ui_codes = all(code in values['frontend/src/test/recovery-status.test.tsx'] for code in _COVERAGE_TERMS['recovery_codes'][1])
+    checks['recovery_codes'] = results.get('recovery_codes') is True and results.get('ui_recovery') is True and covered['recovery_codes'] and ui_codes
+    checks['migration_restore'] = results.get('migration_restore') is True and covered['migration_restore']
+    checks['limitation_boundary'] = _limitation_boundary(values['specification.md'])
     return checks
 
 
@@ -403,7 +585,8 @@ async def _browser_stage(scope: blinded_runtime.OwnedProcessScope, group: verifi
                                                     stdout_path=group.root / 'ui-contract.out', stderr_path=group.root / 'ui-contract.err', deadline_seconds=120)
         await asyncio.to_thread(frontend.verify)
         contracts['ui_recovery'] = ui.outcome == 'completed' and ui.exit_code == 0
-        observations.update(stage='browser', documentation_checks=await asyncio.to_thread(documentation_checks, group.source, contracts_passed=contracts))
+        observations.update(stage='browser', documentation_checks=await asyncio.to_thread(documentation_checks, group.source, contracts_passed=contracts,
+                                                                                           inventory=frozenset(item.path for item in group.record.files)))
         artifacts = []
         for path in sorted(screenshots.iterdir()):
             artifacts.append(await asyncio.to_thread(_screenshot_fingerprint, path))
@@ -415,6 +598,20 @@ async def _browser_stage(scope: blinded_runtime.OwnedProcessScope, group: verifi
             if child is not None:
                 await child.stop()
                 await child.wait()
+
+
+def _symlink_prerequisite(root: Path) -> None:
+    """The committed D34 contract tests need symlink creation; refuse early otherwise.
+
+    Without it (Windows lacking SeCreateSymbolicLinkPrivilege/Developer Mode)
+    three tests skip, and a skip never counts as a passed contract test.
+    """
+    probe = root / ('.symlink-probe-' + secrets.token_hex(8))
+    try:
+        os.symlink('symlink-probe-target', probe)
+    except OSError:
+        raise ValueError('symlink creation prerequisite unavailable') from None
+    os.unlink(probe)
 
 
 def _screenshot_fingerprint(path: Path) -> FileFingerprint:
@@ -442,11 +639,13 @@ async def _run(*, candidate: Path, frozen_path: Path, runtime: Path, path: Path,
     root = verification._trusted_tool_root()
     attestation = await asyncio.to_thread(verification._attest_verifier, root)
     verification._validate_output(output, root, candidate, runtime, work, path, work / 'not-used-input' / 'smoke.json', frozen_path)
+    # Constructed before any owned directory exists: an invalid D39_AGENT_PID
+    # refuses without leaving an output directory or anchor behind.
+    scope = blinded_runtime.OwnedProcessScope()
     output.mkdir()
     output_anchor = materialization._open_anchor(output)
     output_identity = output_anchor.identity
     group = None
-    scope = blinded_runtime.OwnedProcessScope()
     entered = False
     receipts = []
     async def boundary() -> None:
@@ -455,6 +654,7 @@ async def _run(*, candidate: Path, frozen_path: Path, runtime: Path, path: Path,
     try:
         await boundary()
         group = await asyncio.to_thread(verification._ExecutionGroup, work, runtime, record)
+        await asyncio.to_thread(_symlink_prerequisite, group.root)
         native = await asyncio.to_thread(verification._native_path, Path(getattr(sys, '_base_executable', sys.executable)))
         node = await asyncio.to_thread(verification._installed_node)
         env = await asyncio.to_thread(verification.build_group_environment, group.root, python_executable=native, node_executable=node)
@@ -484,7 +684,10 @@ async def _run(*, candidate: Path, frozen_path: Path, runtime: Path, path: Path,
                 raise ValueError('installed media executable missing')
             executable = await asyncio.to_thread(verification._native_path, Path(found))
             fingerprint = await asyncio.to_thread(verification._native_file, executable, 'tools/' + role)
-            version = (await verification._probe(scope, group, (str(executable), '-version'), env)).decode('utf-8').splitlines()[0]
+            lines = (await verification._probe(scope, group, (str(executable), '-version'), env)).decode('utf-8').splitlines()
+            if not lines or not lines[0].strip():
+                raise ValueError('installed media version unavailable')
+            version = lines[0]
             media_tools.append(ToolExecutionBinding(role=role, version=version[:512], executable=fingerprint, launcher=None))
             media_paths[role] = str(executable)
         with fake_providers() as (provider_url, provider_counts):

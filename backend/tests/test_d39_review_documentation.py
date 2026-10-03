@@ -20,9 +20,9 @@ def documented(tmp_path: Path) -> Path:
         'frontend/package.json': json.dumps({'packageManager': 'pnpm@10.18.3', 'engines': {'node': '>=24.11.1'}, 'dependencies': {'react': '^18.3.1'}}),
         'frontend/pnpm-lock.yaml': "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      react:\n        specifier: ^18.3.1\n        version: 18.3.1\npackages:\n  react@18.3.1:\n    engines: {node: '>=18'}\n",
         'backend/scripts/plan_c_demo.py': 'def prepare_storage(): pass\ndef exclusive_demo(): pass\ndef demo_settings(): pass\ndef create_demo_app(): pass\ndef main():\n    parser.add_argument("--mode", choices=("all_tools", "stateful"))\n',
-        'backend/tests/test_d34_migrations.py': 'def test_restore_database_backup_database_lease_unavailable(): pass\n',
-        'backend/tests/test_d35_startup_recovery_api.py': 'def test_safe_retry_external_outcome_unknown_migration_failed(): pass\n',
-        'frontend/src/test/recovery-status.test.tsx': '/* synthetic reason/action fixture */',
+        'backend/tests/test_d34_migrations.py': 'def test_restore():\n    assert restore_database_backup is not None\n    assert reason == "database_lease_unavailable"\n',
+        'backend/tests/test_d35_startup_recovery_api.py': 'def test_codes():\n    assert codes == ("safe_retry", "external_outcome_unknown", "migration_failed")\n',
+        'frontend/src/test/recovery-status.test.tsx': "it.each(['safe_retry', 'external_outcome_unknown', 'migration_failed'])('%s', () => {});\n",
         'specification.md': 'Automated evidence is not human acceptance.\nReal held-out execution is external.\n',
     }
     for name, value in files.items():
@@ -33,7 +33,9 @@ def documented(tmp_path: Path) -> Path:
 
 
 def checks(source: Path, **results: bool) -> dict[str, bool]:
-    return documentation_checks(source, contracts_passed={'recovery_codes': True, 'migration_restore': True, 'ui_recovery': True} | results)
+    inventory = frozenset(path.relative_to(source).as_posix() for path in source.rglob('*') if path.is_file())
+    return documentation_checks(source, contracts_passed={'recovery_codes': True, 'migration_restore': True, 'ui_recovery': True} | results,
+                                inventory=inventory)
 
 
 def test_consistent_successor_documentation_passes_all_six(documented: Path) -> None:
@@ -54,6 +56,100 @@ def test_documentation_contradictions_fail_one_key(documented: Path, name: str, 
     path = documented / name
     path.write_text(path.read_text(encoding='utf-8').replace(old, new), encoding='utf-8')
     assert checks(documented)[key] is False
+
+
+@pytest.mark.parametrize(('name', 'body', 'key'), [
+    ('backend/tests/test_d34_migrations.py', 'def test_trivial(): pass\n', 'migration_restore'),
+    ('backend/tests/test_d34_migrations.py', '# restore_database_backup database_lease_unavailable\ndef test_trivial(): pass\n', 'migration_restore'),
+    ('backend/tests/test_d34_migrations.py', 'def test_restore_database_backup_database_lease_unavailable():\n    """restore_database_backup database_lease_unavailable"""\n', 'migration_restore'),
+    ('backend/tests/test_d34_migrations.py', 'TERMS = ("restore_database_backup", "database_lease_unavailable")\ndef test_trivial(): pass\n', 'migration_restore'),
+    ('backend/tests/test_d35_startup_recovery_api.py', 'def test_x():\n    assert "safe_retry_external_outcome_unknown_migration_failed"\n', 'recovery_codes'),
+    ('backend/tests/test_d35_startup_recovery_api.py', 'def test_trivial(): pass\n', 'recovery_codes'),
+    ('frontend/src/test/recovery-status.test.tsx', 'it("trivial", () => {});\n', 'recovery_codes'),
+])
+def test_passing_but_uncovering_contract_tests_fail_the_key(documented: Path, name: str, body: str, key: str) -> None:
+    (documented / name).write_text(body, encoding='utf-8')
+    assert checks(documented)[key] is False
+
+
+@pytest.mark.parametrize('spec', [
+    'Checks are automated technical evidence, not human acceptance. The held-out corpus remains mounted outside.',
+    "Automated checks aren't human acceptance; held-out execution happens externally.",
+    'No automated evidence is human acceptance. Held-out data stays outside the process.',
+])
+def test_conforming_limitation_phrasings_pass(documented: Path, spec: str) -> None:
+    (documented / 'specification.md').write_text(spec, encoding='utf-8')
+    assert checks(documented)['limitation_boundary'] is True
+
+
+@pytest.mark.parametrize('extra', [
+    'Automated evidence also counts as human acceptance.',
+    'Automated technical evidence is also human acceptance.',
+    'Held-out execution must remain internal.',
+    'Held-out evaluation runs inside the candidate process.',
+    'It is false that real held-out execution is external.',
+    'Human acceptance is provided by automated evidence.',
+    'Held-out evaluation runs inside the candidate process, not outside.',
+    "Automated evidence isn't merely technical evidence, it is human acceptance.",
+    'Automated evidence is not, in practice, distinct from human acceptance.',
+    'Automated evidence isn\u2019t merely technical evidence, it is human acceptance.',
+])
+def test_appended_contradictions_fail_limitation_boundary(documented: Path, extra: str) -> None:
+    path = documented / 'specification.md'
+    path.write_text(path.read_text(encoding='utf-8') + extra + '\n', encoding='utf-8')
+    assert checks(documented)['limitation_boundary'] is False
+
+
+def test_npm_engine_spellings_in_real_locks_are_understood(documented: Path) -> None:
+    lock = documented / 'frontend/pnpm-lock.yaml'
+    spellings = ["'>= 0.4'", "'>= 8'", "'>=v12.22.7'", "'^12 || ^14 || >= 16'", "'>= 14.16'", "'>=18.x'", "'*'"]
+    lock.write_text(lock.read_text(encoding='utf-8') + ''.join(
+        f'  synthetic-{index}@1.0.0:\n    engines: {{node: {value}}}\n' for index, value in enumerate(spellings)), encoding='utf-8')
+    assert checks(documented)['locked_versions'] is True
+    lock.write_text(lock.read_text(encoding='utf-8') + "  synthetic-old@1.0.0:\n    engines: {node: '<= 20'}\n", encoding='utf-8')
+    assert checks(documented)['locked_versions'] is False
+
+
+def test_optional_manifest_fields_may_be_absent(documented: Path) -> None:
+    package = documented / 'frontend/package.json'
+    data = json.loads(package.read_text(encoding='utf-8'))
+    del data['packageManager'], data['engines']
+    package.write_text(json.dumps(data), encoding='utf-8')
+    assert checks(documented)['locked_versions'] is True
+
+
+@pytest.mark.parametrize('link', ['/README.md', 'readme.MD', 'BACKEND/.env.example', 'C:/Windows/win.ini', r'backend\.env.example'])
+def test_setup_links_are_case_exact_and_repository_relative(documented: Path, link: str) -> None:
+    readme = documented / 'README.md'
+    readme.write_text(readme.read_text(encoding='utf-8') + f'[x]({link})\n', encoding='utf-8')
+    assert checks(documented)['setup_paths'] is (link == '/README.md')
+
+
+@pytest.mark.parametrize('link', [
+    '[x]( docs/missing.md )', "[x](docs/missing.md 'T')", '[x](docs/missing.md (T))', '[x](<docs/missing.md>)',
+    '<a href=docs/missing.md>x</a>', "<img src='docs/missing.png'>", '[x](C:docs/missing.md)', '[x](docs/a(1).md)',
+])
+def test_every_commonmark_link_form_is_checked_or_fails_closed(documented: Path, link: str) -> None:
+    readme = documented / 'README.md'
+    readme.write_text(readme.read_text(encoding='utf-8') + link + '\n', encoding='utf-8')
+    assert checks(documented)['setup_paths'] is False
+
+
+def test_links_to_files_written_after_materialization_fail(documented: Path) -> None:
+    inventory = frozenset(path.relative_to(documented).as_posix() for path in documented.rglob('*') if path.is_file())
+    (documented / 'frontend/.npmrc').write_text('verifier-written\n', encoding='utf-8')
+    readme = documented / 'README.md'
+    readme.write_text(readme.read_text(encoding='utf-8') + '[rc](frontend/.npmrc) [ok]( backend/.env.example "T")\n', encoding='utf-8')
+    result = documentation_checks(documented, contracts_passed=True, inventory=inventory)
+    assert result['setup_paths'] is False
+    readme.write_text(readme.read_text(encoding='utf-8').replace('[rc](frontend/.npmrc) ', ''), encoding='utf-8')
+    assert documentation_checks(documented, contracts_passed=True, inventory=inventory)['setup_paths'] is True
+
+
+def test_reference_style_links_are_checked(documented: Path) -> None:
+    readme = documented / 'README.md'
+    readme.write_text(readme.read_text(encoding='utf-8') + '[guide]: docs/missing-guide.md\n', encoding='utf-8')
+    assert checks(documented)['setup_paths'] is False
 
 
 @pytest.mark.parametrize(('failed', 'key'), [('recovery_codes', 'recovery_codes'), ('ui_recovery', 'recovery_codes'), ('migration_restore', 'migration_restore')])

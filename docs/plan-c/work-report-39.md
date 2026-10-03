@@ -167,3 +167,88 @@ A corresponding mutation during D39 would correctly fail the tracked-source gate
 the pinned operational lane has not been run, so this is a candidate-side build
 reproducibility issue to investigate, not a waived check or a claimed operational
 failure. Fixing frozen candidate behavior requires a separately authorized successor.
+
+## Second review corrections (2026-10-03)
+
+Base: `42c0683` on `codex/d39-review-fixes`. A second independent review (Claude,
+maximum effort) reported 15 findings against the first correction round. The
+corrections are specified under `D39 second review amendments (2026-10-03)` in
+`docs/DTD.md`. Readiness remains **Not ready**; this round is tooling only.
+
+| Finding | Status | Regression coverage / qualification |
+|---|---|---|
+| Hard-linked group leaves made every real cleanup fail (uv hardlink mode, pnpm store) | Fixed | `test_m4_group_deletes_hardlinked_leaves_without_touching_other_links`; measured on this host: 399/400 venv and 398/400 pnpm files had `nlink > 1`. Runtime files still require one link. |
+| Group root replaced before anchoring could be adopted | Fixed | `test_m2_root_replaced_before_anchor_is_never_adopted`. |
+| Group deleted after an unconfirmed scope close | Fixed | `_close_group` retains the group and reports cleanup `failed`. |
+| Media PATH prepended for every command / shim directories | Fixed | `test_m7_shim_directory_with_other_programs_is_refused`; PATH copy for backend_pytest only, after the sandbox interpreter. |
+| Secret scan read working-tree bytes | Fixed | `test_i1_scan_reads_committed_blobs_not_working_tree_encoding`, `test_i1_scan_ignores_replace_refs_that_hide_tracked_files`. |
+| pnpm worker/builtin config unbound | Fixed | m10 test parametrized over `pnpm.cjs`, `worker.js`, `pnpmrc`. |
+| PID-reuse orphans adopted into the owned tree; broken agent ancestry | Fixed | `test_b1_pid_reuse_orphans_are_never_adopted`, `test_b1_declared_agent_root_needs_no_name_match`; `D39_AGENT_PID` operator declaration. |
+| Memory samples queued behind hashing work; 1 s administrative stop wait | Fixed | `test_l4_quick_command_settlement_samples_job_peak`; dedicated sampler thread; stop waits `HOST_TEARDOWN_SECONDS`. |
+| Relaxed browser POST/negation/migration checks | Fixed | Exactly two accepted POSTs per journey, 2.5 s negation sampling, 600 ms settled state, migration alert must carry stop-the-app guidance. |
+| Counter middleware lost updates under concurrent POSTs | Fixed | Unique temporary per POST and bounded `os.replace` retry. |
+| `publication_bound` ignored job failure | Fixed | Requires job status `completed`. |
+| Documentation checks: Node range parsing, optional manifest fields, false limitation contradictions, links | Fixed | npm node-semver semantics (2180 generated cases, 0 mismatches against semver 7.7.3), optional-but-consistent `packageManager`/`engines`, sentence-level limitation analysis, inline/reference/HTML links, case-exact inventory matching; new tests in `test_d39_review_documentation.py`. |
+| Contract tests skipped without symlink privilege counted as passing | Fixed | Smoke refuses before any stage without symlink creation; summaries record skip counts. |
+| Trailing-dot / trailing-space path aliases | Fixed | `test_trailing_dot_component_cannot_alias_a_junction`. |
+| Node compile cache writes outside the group | Fixed | `NODE_DISABLE_COMPILE_CACHE=1` in group environments. |
+
+A targeted read-only re-review of these corrections (one reviewer, high effort)
+reported ten further items; all but one are fixed in the same delivery:
+
+| Re-review item | Status | Regression coverage / qualification |
+|---|---|---|
+| Retried counter replacement could move the POST count backwards and hide a duplicate | Fixed | Publications serialized under one lock, each writing the latest count (structural; exercised by the browser journey tests). |
+| `limitation_boundary` passed reversed-order, both-placement, double-verb and "not distinct" contradictions | Fixed | Four reviewer sentences plus a curly-apostrophe variant added to `test_appended_contradictions_fail_limitation_boundary`. |
+| Spaced/titled/HTML-unquoted links unparsed; `C:x` treated as a scheme; links matched the live group tree | Fixed | `test_every_commonmark_link_form_is_checked_or_fails_closed`, `test_links_to_files_written_after_materialization_fail`; inventory now comes from the materialized record. |
+| `D39_AGENT_PID` could undercount or could not serve a broken chain | Fixed | `test_b1_declared_agent_tree_only_adds_accounting`, `test_b1_declared_agent_below_detected_root_cannot_undercount`. |
+| Invalid `D39_AGENT_PID` leaked a group/output directory | Fixed | `test_b1_invalid_agent_pid_refuses_before_any_group_exists`; scope constructed before any owned directory. |
+| Serial child stops could exhaust the shared teardown budget | Fixed | Concurrent stops; gate waits keep a quarter of the budget for termination (existing L1–L4 lifecycle tests). |
+| Docstrings, function names and module constants satisfied coverage | Fixed | Three new cases in `test_passing_but_uncovering_contract_tests_fail_the_key`. |
+| Empty media `-version` output crashed the smoke with `IndexError` | Fixed | Refused as `ValueError` (mapped to "D39 smoke refused"). |
+| Group directory swapped between `mkdir` and first `lstat` could be adopted | **Not fixed (residual)** | Needs a create-and-open primitive; requires a same-user racer that learns the random 64-hex name. Recorded in handoff. |
+
+`test_frozen_readme_documentation_gate_is_failed_not_waived` now asserts the
+complete expected result for the full frozen D35 tree (only `locked_versions`
+fails), so the stricter fail-closed parsing is proven not to reject D35's real
+links, coverage and limitation text.
+
+Documentation probes on real trees: the full frozen D35 tree fails only
+`locked_versions`; the allowlisted 378-file D35 group fails `setup_paths` and
+`locked_versions` (expected); a README-only successor passes every key.
+
+Residual, not fixed in this round (recorded for the next review): the narrow
+venv-redirector/administrative-stop race; `target.json` remains producer-written
+rather than independently attested; the `FileDispositionInfoEx` fallback path;
+cross-command consistency is re-checked in D40 rather than D39; `packaging` is used
+without a declared direct dependency; `_probe_json` depends on the shared parser's
+exact error text.
+
+### Second-round verification record
+
+All runs were sequential (one process group at a time). The aggregate peak is a
+conservative host-wide sum of every `claude`, `python`, `node`, `git` and `uv`
+working set sampled each second (baseline before the full run: 1418.8 MiB).
+
+| Run | Result | Notes |
+|---|---|---|
+| All D39 files, before the re-review fixes | 348 passed, 1 failed, 3 skipped | Failure: installed Node 24.13.0 vs required 24.11.1 |
+| Node-origin test with official Node 24.11.1 (zip SHA-256 verified against `SHASUMS256.txt`) first on PATH | 1 passed | Pin mismatch was the only cause; later runs use 24.11.1 first on PATH |
+| Documentation regressions after re-review fixes | 49 passed | |
+| All D39 files after re-review fixes | 370 passed, 3 skipped | 589 s |
+| Full backend after LF normalization | 2377 passed, 2 failed, 26 skipped, 1 warning; 2603 s | Peak 2079 MiB. Failures: D36 CLI clean-tooling check on the uncommitted tree (see below) and the native Chrome test after a cold Chrome start exceeded its 15 s discovery deadline and then reported `teardown_failed` |
+| Native Chrome test in isolation | 1 failed, then 5 passed (first pass 13.6 s cold, then ~1.6 s) | The teardown failure led to giving termination at least half of the shared close budget |
+| D39 lifecycle files after the budget change | 70 passed, 1 skipped | |
+| D37 runner + all D39 files after the budget change | 590 passed, 14 skipped | 982 s; skips are symlink-permission and POSIX-only cases |
+| Backend Ruff | All checks passed | |
+| Frontend test (pnpm 10.18.3, Node 24.11.1, one worker) | 157 passed in 17 files | |
+| Frontend build / lint | Passed / passed | No tracked frontend file changed |
+| D36 CLI test on the committed tree | Pending: runs after the implementation commit (needs a clean tree); recorded in the follow-up documentation commit | |
+
+The complete backend suite was not repeated after the teardown-budget change; that
+change only affects `blinded_runtime`, whose importing test modules (D37 runner and
+all D39 files) were rerun in full. The 26 full-run skips are symlink-permission,
+POSIX/Linux-only and Windows no-delete-anchor cases; none is counted as passed.
+During this round, scripted edits briefly wrote CRLF working bytes into four
+files; they were normalized back to exact LF (committed blobs contain no CR)
+before the full run, as the LF attestation requires.

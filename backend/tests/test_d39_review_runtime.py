@@ -163,6 +163,24 @@ def test_l4_settlement_checks_job_peak_after_quiet_monitor(monkeypatch: pytest.M
     assert scope._memory_lost.is_set() and scope._failed
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows Job peak settlement')
+def test_l4_quick_command_settlement_samples_job_peak(tmp_path: Path, synthetic_agent: None,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    # The resident monitor is silenced, so only the settlement-time Job peak
+    # sample (not the 100 ms monitor or close()) can latch this command.
+    async def quiet(self: runtime.OwnedProcessScope) -> None:
+        return None
+    monkeypatch.setattr(runtime.OwnedProcessScope, '_monitor_memory', quiet)
+    real_query = runtime._query_job
+    def query(handle: int, kind: int, result: object) -> None:
+        real_query(handle, kind, result)
+        if kind == 9:
+            result.peak_job_memory_used = 1 << 40  # type: ignore[attr-defined]
+    monkeypatch.setattr(runtime, '_query_job', query)
+    result = asyncio.run(runtime.run_owned_command(**_arguments(tmp_path, sys.executable, '-c', 'pass')))
+    assert result.outcome == 'memory_limit'
+
+
 @pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='installed native media required')
 def test_m7_backend_path_selects_real_bound_media(tmp_path: Path) -> None:
     from types import SimpleNamespace
@@ -171,14 +189,32 @@ def test_m7_backend_path_selects_real_bound_media(tmp_path: Path) -> None:
     fingerprint = release._native_file(executable, 'tools/python_sandbox')
     tools = release._ToolSet(executable, None, (release.ToolExecutionBinding(role='python', version='3.12.12', executable=fingerprint, launcher=None),), ((executable, fingerprint),))
     env = release.build_group_environment(tmp_path, python_executable=executable, node_executable=None)
+    shared_path = env['PATH']
     async def exercise() -> None:
         async with runtime.OwnedProcessScope() as scope:
-            bound = await release._backend_media(scope, SimpleNamespace(root=tmp_path, assert_owned=lambda: None), tools, env)
+            bound, command_env = await release._backend_media(scope, SimpleNamespace(root=tmp_path, assert_owned=lambda: None), tools, env)
             assert tuple(binding.role for binding in bound.media_bindings) == ('ffmpeg', 'ffprobe')
             bound.verify()
+            # Only backend_pytest's copy sees media; the sandbox directory stays first.
+            assert env['PATH'] == shared_path
+            assert command_env['PATH'].split(os.pathsep)[0] == shared_path.split(os.pathsep)[0]
             for role, (path, _) in zip(('ffmpeg', 'ffprobe'), bound.files[-2:], strict=True):
-                assert Path(shutil.which(role, path=env['PATH'])).resolve() == path
+                assert Path(shutil.which(role, path=command_env['PATH'])).resolve() == path
     asyncio.run(exercise())
+
+
+def test_m7_shim_directory_with_other_programs_is_refused(tmp_path: Path) -> None:
+    from evaluation import release_verification as release
+    suffix = '.exe' if os.name == 'nt' else ''
+    for name in ('ffmpeg', 'ffprobe', 'python', 'npx'):
+        path = tmp_path / (name + suffix)
+        path.write_bytes(b'MZ shim' if os.name == 'nt' else b'#!/bin/sh\n')
+        path.chmod(0o755)
+    with pytest.raises(ValueError, match='unbound programs'):
+        release._dedicated_media_directory(tmp_path)
+    for name in ('python', 'npx'):
+        (tmp_path / (name + suffix)).unlink()
+    release._dedicated_media_directory(tmp_path)
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX session teardown')

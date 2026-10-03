@@ -17,6 +17,25 @@ unchanged. LF checkout, pinned lane, D36 controls, prerequisite documentation,
 secret scan and independent review remain required. Readiness is **Not ready**.
 Automated evidence is not human acceptance. Real held-out execution is external.
 
+## D39 second review correction checkpoint — 2026-10-03
+
+A second independent review found that the first corrections made every real group
+cleanup fail (uv/pnpm hard links), that documentation checks could never pass for a
+standard dependency tree and misjudged D35's conforming limitation wording, and that
+several gates had been relaxed. The corrections are recorded under `D39 second
+review amendments (2026-10-03)` in `docs/DTD.md` and in `work-report-39.md`: hard
+links are deleted through verified handles, unconfirmed teardown retains the group,
+the secret scan reads committed blobs, media PATH exposure is per-command and
+dedicated, PID-reuse orphans are never adopted, POST/negation/migration browser
+checks are restored or strengthened, job completion binds media publication, and
+the smoke refuses early without symlink creation. For frozen D35 in the real
+allowlisted group the expected documentation result is two failed keys
+(`setup_paths`, `locked_versions`). A targeted re-review of these corrections found
+nine further defects (counter ordering, documentation false passes, agent-PID
+accounting, teardown budget, media version handling), fixed in the same delivery;
+one narrow same-user directory-swap race is recorded as residual. Readiness remains
+**Not ready**.
+
 ## D31–D40 hardening, blinded evaluation, and release-readiness design
 
 The user selected sequential gated delivery and approved

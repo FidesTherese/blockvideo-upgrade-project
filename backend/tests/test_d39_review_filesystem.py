@@ -65,7 +65,7 @@ def test_m3_cleaned_runtime_cannot_hide_dangling_junction(publication: tuple[Pat
         root.rmdir()
 
 
-def test_m4_group_never_changes_attributes_of_hardlinked_leaf(tmp_path: Path) -> None:
+def test_m4_group_deletes_hardlinked_leaves_without_touching_other_links(tmp_path: Path) -> None:
     work, source, record = _inputs(tmp_path)
     group = release._ExecutionGroup(work, source, record)
     outside = tmp_path / 'outside.txt'
@@ -73,18 +73,51 @@ def test_m4_group_never_changes_attributes_of_hardlinked_leaf(tmp_path: Path) ->
     leaf = group.root / 'hardlink.txt'
     os.link(outside, leaf)
     os.chmod(outside, stat.S_IREAD)
+    # uv/pnpm-style in-group links: a cache file linked into an installed tree.
+    cache, env = group.root / 'uv-cache', group.root / 'env'
+    cache.mkdir()
+    env.mkdir()
+    (cache / 'module.py').write_bytes(b'cached')
+    os.link(cache / 'module.py', env / 'module.py')
+    os.chmod(cache / 'module.py', stat.S_IREAD)
     try:
-        with pytest.raises(ValueError):
-            group.cleanup()
+        group.cleanup()
+        assert not os.path.lexists(group.root)
+        assert outside.read_bytes() == b'outside'
         assert outside.stat().st_mode & stat.S_IWRITE == 0
-        assert leaf.exists()
+        assert outside.stat().st_nlink == 1
     finally:
         os.chmod(outside, stat.S_IREAD | stat.S_IWRITE)
-        if leaf.exists():
-            leaf.unlink()
         if group.anchor is not None:
             release.freeze._close_directory_anchor(group.anchor)
         release.freeze._close_directory_anchor(group.work_anchor)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows trailing-dot path normalization')
+def test_trailing_dot_component_cannot_alias_a_junction(tmp_path: Path) -> None:
+    alias = material._fs_path(tmp_path / 'docs.')
+    alias.mkdir()
+    try:
+        with pytest.raises(ValueError, match='unsafe'):
+            material._directory(tmp_path / 'docs.')
+    finally:
+        alias.rmdir()
+
+
+def test_m2_root_replaced_before_anchor_is_never_adopted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work, source, record = _inputs(tmp_path)
+    original = material._open_anchor
+    def swap(path: Path) -> object:
+        if path.name.startswith('group-'):
+            path.rename(path.with_name('moved-' + path.name))
+            path.mkdir()
+            (path / 'foreign.txt').write_bytes(b'foreign')
+        return original(path)
+    monkeypatch.setattr(material, '_open_anchor', swap)
+    with pytest.raises(release._GroupCleanupFailed):
+        release._ExecutionGroup(work, source, record)
+    impostor = next(path for path in work.iterdir() if path.name.startswith('group-'))
+    assert (impostor / 'foreign.txt').read_bytes() == b'foreign'
 
 
 def test_l11_first_marker_write_failure_cleans_owned_root(publication: tuple[Path, Path, Path, Path],

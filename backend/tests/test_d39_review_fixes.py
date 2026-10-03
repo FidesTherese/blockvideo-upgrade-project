@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -62,7 +62,10 @@ def test_b1_only_controller_agent_and_owned_memory(monkeypatch: pytest.MonkeyPat
     table = {1: (0, 'explorer'), 10: (1, agent or 'unrecognized'), 11: (10, 'renderer'),
              20: (10, 'pwsh'), 30: (20, 'python'), 40: (1, 'node'),
              41: (1, 'git'), 42: (1, 'powershell'), 43: (0, 'wslservice')}
+    created = {1: 1, 10: 2, 11: 3, 20: 3, 30: 4, 40: 2, 41: 2, 42: 2, 43: 0}
     monkeypatch.setattr(runtime, '_windows_process_table', lambda: table)
+    monkeypatch.setattr(runtime, '_windows_creation_time', created.get)
+    monkeypatch.delenv('D39_AGENT_PID', raising=False)
     monkeypatch.setattr(runtime.os, 'getpid', lambda: 30)
     sampled = []
     def resident(pid: int) -> int:
@@ -75,6 +78,73 @@ def test_b1_only_controller_agent_and_owned_memory(monkeypatch: pytest.MonkeyPat
     assert group == 0
     assert outside == (40 if agent else 10 + 1024 ** 3)
     assert not {1, 40, 41, 42, 43}.intersection(sampled)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows process table seam')
+def test_b1_pid_reuse_orphans_are_never_adopted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 50 and 51 are old orphans whose dead parents' PIDs were reused by the
+    # controller (30) and its agent ancestor (10); 31 is the controller's real child.
+    table = {1: (0, 'explorer'), 10: (1, 'claude'), 30: (10, 'python'), 31: (30, 'git'),
+             50: (30, 'svchost'), 51: (10, 'wininit')}
+    created = {1: 1, 10: 5, 30: 10, 31: 11, 50: 3, 51: 4}
+    monkeypatch.setattr(runtime, '_windows_process_table', lambda: table)
+    monkeypatch.setattr(runtime, '_windows_creation_time', created.get)
+    monkeypatch.delenv('D39_AGENT_PID', raising=False)
+    monkeypatch.setattr(runtime.os, 'getpid', lambda: 30)
+    sampled: list[int] = []
+    def resident(pid: int) -> int:
+        sampled.append(pid)
+        if pid in (50, 51):
+            raise OSError('SYSTEM access denied')
+        return 10
+    monkeypatch.setattr(runtime, '_windows_resident', resident)
+    group, outside = runtime._owned_memory_sample()
+    assert (group, outside) == (0, 30)
+    assert sorted(sampled) == [10, 30, 31]
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows process table seam')
+def test_b1_declared_agent_tree_only_adds_accounting(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 10 is an unrecognized agent; 11 its worker; 40 a detached agent helper outside the chain.
+    table = {1: (0, 'explorer'), 10: (1, 'custom-agent'), 11: (10, 'worker'), 20: (10, 'pwsh'), 30: (20, 'python'),
+             40: (1, 'helper')}
+    monkeypatch.setattr(runtime, '_windows_process_table', lambda: table)
+    monkeypatch.setattr(runtime, '_windows_creation_time', {1: 1, 10: 2, 11: 3, 20: 3, 30: 4, 40: 2}.get)
+    monkeypatch.setattr(runtime, '_windows_resident', lambda pid: 10)
+    monkeypatch.setattr(runtime.os, 'getpid', lambda: 30)
+    reserve = 1024 ** 3
+    monkeypatch.setenv('D39_AGENT_PID', '10')
+    assert runtime._owned_memory_sample(runtime.OwnedProcessScope()) == (0, 40 + reserve)
+    monkeypatch.setenv('D39_AGENT_PID', '40')  # broken chain: not an ancestor, still counted
+    assert runtime._owned_memory_sample(runtime.OwnedProcessScope()) == (0, 20 + reserve)
+    monkeypatch.setenv('D39_AGENT_PID', '99')
+    with pytest.raises(ValueError, match='live process'):
+        runtime._owned_memory_sample(runtime.OwnedProcessScope())
+
+
+@pytest.mark.parametrize('value', ['abc', '0', '-1'])
+def test_b1_invalid_agent_pid_refuses_before_any_group_exists(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str) -> None:
+    monkeypatch.setenv('D39_AGENT_PID', value)
+    monkeypatch.setattr(release, '_inventory_boundary', lambda *args: None)
+    created: list[object] = []
+    monkeypatch.setattr(release, '_ExecutionGroup', lambda *args: created.append(args))
+    with pytest.raises(ValueError, match='D39_AGENT_PID'):
+        asyncio.run(release._run_inventory(candidate=tmp_path, runtime=tmp_path, work=tmp_path, path=tmp_path, digest='0' * 64,
+                                           record=None, tool_root=tmp_path, attestation=None, commands=[], frozen_path=tmp_path))
+    assert created == []
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows process table seam')
+def test_b1_declared_agent_below_detected_root_cannot_undercount(monkeypatch: pytest.MonkeyPatch) -> None:
+    table = {1: (0, 'explorer'), 10: (1, 'claude'), 12: (10, 'subagent'), 20: (10, 'pwsh'), 30: (20, 'python')}
+    monkeypatch.setattr(runtime, '_windows_process_table', lambda: table)
+    monkeypatch.setattr(runtime, '_windows_creation_time', {1: 1, 10: 2, 12: 3, 20: 3, 30: 4}.get)
+    monkeypatch.setattr(runtime, '_windows_resident', lambda pid: 10)
+    monkeypatch.setattr(runtime.os, 'getpid', lambda: 30)
+    monkeypatch.delenv('D39_AGENT_PID', raising=False)
+    baseline = runtime._owned_memory_sample(runtime.OwnedProcessScope())
+    monkeypatch.setenv('D39_AGENT_PID', '20')
+    assert runtime._owned_memory_sample(runtime.OwnedProcessScope()) == baseline == (0, 40)
 
 
 @pytest.mark.parametrize('text', [
@@ -214,6 +284,46 @@ def test_i1_scan_includes_tracked_excluded_paths(tmp_path: Path) -> None:
     assert counts['tracked_generated_state'] >= 1
 
 
+def _scan_repo(tmp_path: Path) -> tuple[Path, Callable[..., str]]:
+    repo = tmp_path / 'scan-repo'
+    repo.mkdir()
+    def git(*args: str, data: bytes | None = None) -> str:
+        return subprocess.run(['git', '-C', str(repo), *args], check=True, input=data,
+                              capture_output=True).stdout.decode('utf-8').strip()
+    git('init', '-q')
+    git('config', 'user.email', 'fixture@example.invalid')
+    git('config', 'user.name', 'Fixture')
+    git('config', 'core.autocrlf', 'false')
+    return repo, git
+
+
+def test_i1_scan_reads_committed_blobs_not_working_tree_encoding(tmp_path: Path) -> None:
+    repo, git = _scan_repo(tmp_path)
+    token = 'sk-' + 'A1b2' * 6  # synthetic credential shape, assembled at runtime
+    (repo / '.gitattributes').write_bytes(b'*.txt text working-tree-encoding=UTF-16LE eol=lf\n')
+    (repo / 'notes.txt').write_bytes(('note ' + token + '\n').encode('utf-16-le'))
+    git('add', '.')
+    git('commit', '-q', '-m', 'fixture')
+    assert token.encode('ascii') in subprocess.run(['git', '-C', str(repo), 'cat-file', '-p', 'HEAD:notes.txt'],
+                                                   check=True, capture_output=True).stdout
+    assert release.scan_candidate_commit(repo, git('rev-parse', 'HEAD'), ())['credential_token'] == 1
+
+
+def test_i1_scan_ignores_replace_refs_that_hide_tracked_files(tmp_path: Path) -> None:
+    repo, git = _scan_repo(tmp_path)
+    (repo / 'readme.txt').write_bytes(b'public\n')
+    (repo / '.env.prod').write_bytes(b'setting\n')
+    git('add', '.')
+    git('commit', '-q', '-m', 'fixture')
+    tree = git('rev-parse', 'HEAD^{tree}')
+    readme = git('rev-parse', 'HEAD:readme.txt')
+    hidden = git('mktree', data=('100644 blob ' + readme + '\treadme.txt\n').encode('ascii'))
+    git('replace', tree, hidden)
+    assert '.env.prod' not in git('ls-tree', '-r', '--name-only', 'HEAD')
+    assert release.scan_candidate_commit(repo, git('rev-parse', 'HEAD'), ())['tracked_private_state'] == 1
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='PE (MZ) native fixtures; POSIX requires ELF/Mach-O binaries')
 @pytest.mark.parametrize('changed', ['pyvenv.cfg', 'base.exe'])
 def test_m1_sandbox_binds_config_and_native_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str) -> None:
     base = tmp_path / 'base.exe'
@@ -246,7 +356,9 @@ def test_m1_sandbox_binds_config_and_native_base(tmp_path: Path, monkeypatch: py
         result.verify()
 
 
-def test_m10_pnpm_implementation_is_rehashed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.skipif(os.name != 'nt', reason='PE (MZ) native fixtures; POSIX requires ELF/Mach-O binaries')
+@pytest.mark.parametrize('changed', ['pnpm.cjs', 'worker.js', 'pnpmrc'])
+def test_m10_pnpm_implementation_is_rehashed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str) -> None:
     node = tmp_path / 'native/node.exe'
     node.parent.mkdir()
     node.write_bytes(b'MZnative fixture')
@@ -261,6 +373,8 @@ def test_m10_pnpm_implementation_is_rehashed(tmp_path: Path, monkeypatch: pytest
     (pnpm / 'bin/pnpm.cjs').write_text("require('../dist/pnpm.cjs')")
     implementation = pnpm / 'dist/pnpm.cjs'
     implementation.write_text('fixture')
+    (pnpm / 'dist/worker.js').write_text('worker fixture')
+    (pnpm / 'dist/pnpmrc').write_text('builtin fixture')
     (tmp_path / 'source/frontend').mkdir(parents=True)
     async def probe(scope: Any, group: Any, argv: tuple[str, ...], env: Any) -> bytes:
         if '-e' in argv:
@@ -268,7 +382,8 @@ def test_m10_pnpm_implementation_is_rehashed(tmp_path: Path, monkeypatch: pytest
         return b'10.18.3' if '-y' in argv or 'pnpm.cjs' in argv[1] else b'11.6.2'
     monkeypatch.setattr(release, '_probe', probe)
     tools = asyncio.run(release._frontend_tools(None, SimpleNamespace(root=tmp_path, source=tmp_path / 'source'), {}, node))
-    implementation.write_text('changed')
+    tools.verify()
+    (pnpm / 'dist' / changed).write_text('changed')
     with pytest.raises(ValueError):
         tools.verify()
 
@@ -292,12 +407,15 @@ def test_m11_shared_verification_rejects_different_smoke_producer() -> None:
                              runtime_instance_id='a' * 64, runtime_source_sha256='a' * 64)
     smoke = _synthetic_smoke(record, 'a' * 64)
     payload = dict(schema_version=1, **record.__dict__, materialization_sha256='a' * 64,
-                   verifier_tool_sha256='c' * 64, status='failed', commands=[], smoke_manifest=smoke,
+                   verifier_tool_sha256=smoke['producer_tool_sha256'], status='failed', commands=[], smoke_manifest=smoke,
                    smoke_manifest_sha256=hashlib.sha256(_bytes(smoke)).hexdigest(), secret_scan_passed=False,
                    candidate_clean_before=True, candidate_clean_after=True, candidate_snapshot_before_sha256='a' * 64,
                    candidate_snapshot_after_sha256='a' * 64, runtime_snapshot_after_sha256='a' * 64, cleanup_status='completed')
+    # Positive control: the same smoke from the same tool revision is accepted.
+    VerificationManifest.model_validate_json(_bytes(payload))
+    assert smoke['producer_tool_sha256'] != 'c' * 64
     with pytest.raises(ValueError, match='producer'):
-        VerificationManifest.model_validate_json(_bytes(payload))
+        VerificationManifest.model_validate_json(_bytes(payload | {'verifier_tool_sha256': 'c' * 64}))
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Windows ancestor junction rejection')

@@ -2192,6 +2192,86 @@ and 12 GiB target. This is an authorized policy amendment, not evidence that the
 4 GiB lane passed. Earlier measurements and incomplete synthetic-agent runs remain
 historical; the work report distinguishes them from actual-host 16 GiB reruns.
 
+#### D39 second review amendments (2026-10-03)
+
+A second independent review of the corrections found new and residual defects.
+These amendments refine the mechanisms above; they waive no gate and change no
+pin, cap or threshold.
+
+- **Group cleanup and hard links:** uv (`hardlink` link mode on Windows) and pnpm
+  link group-local caches into installed trees, so group leaves may have several
+  links. A verified group leaf is deleted through its identity-checked handle
+  (one name only, attributes untouched); additional links are not refused.
+  Materialized runtime files still require exactly one link. After an
+  unconfirmed scope teardown the group is retained and cleanup is `failed`; it is
+  never deleted while an owned descendant may survive. The group root anchor must
+  equal the identity created by `mkdir`; a replacement is never adopted.
+- **Secret scan:** path rules cover every tracked path of the bound commit, and
+  content rules read the committed blob bytes through
+  `git --no-replace-objects cat-file --batch` (never working-tree bytes, so
+  `working-tree-encoding`, filters and replace refs cannot hide content). Caps fail
+  closed. Committed test literals are still counted.
+- **M7 refinement:** media directories are added to a per-command environment copy
+  for backend_pytest only, after the sandbox interpreter directory. A directory
+  holding any executable other than ffmpeg/ffprobe/ffplay (package-manager shims,
+  `/usr/bin`) is refused as a prerequisite failure.
+- **B1 refinement:** the operator may declare an additional agent process tree
+  with `D39_AGENT_PID` (any live process, ancestor or not, so a broken parent
+  chain can still be counted). The declaration only adds memory: the
+  automatically detected agent tree is still counted, and the 1 GiB unknown-agent
+  reserve is removed only when an agent root is detected automatically, so a
+  wrong declaration can never undercount. An invalid value refuses before any
+  group or output directory exists; a dead PID refuses at sampling. Ancestry
+  and descendant trees accept a link only when the child's creation time is not
+  earlier than its parent's, so PID-reuse orphans are never adopted. Samples run
+  on a dedicated scope thread, never behind the drivers' hashing executor.
+- **Administrative stop:** after the stop request, wait up to the confirmed
+  teardown budget (`HOST_TEARDOWN_SECONDS`) for the gate's terminal record instead
+  of a fixed 1 s; the record is written without fsync (same-host observation).
+  Scope close stops all children concurrently, and inside close each gate wait
+  leaves at least half of the remaining shared budget for confirmed Job/session
+  termination (a browser tree holds the gate pipes until every process is gone).
+- **Browser observations:** POST counters are read after a 1 s quiet period; the
+  server serializes counter publications and each writes the latest count, so a
+  retried replacement never moves the counter backwards. The
+  whole journey must add exactly one accepted POST per viewport (two total) or
+  the receipt fails. Negated checks sample for 2.5 s (longer than the 2 s UI
+  refetch); controls must stay unchanged for 600 ms. `migration_failed_ok`
+  requires the migration-failed alert itself to carry the stop-the-app guidance.
+- **I3 refinement:** `publication_bound` additionally requires the generation job
+  to have ended `completed`.
+- **Documentation checks:** Node ranges use npm node-semver semantics for release
+  versions (spaced operators, `v` prefixes, x-ranges, hyphen ranges, prerelease
+  bounds); unknown syntax fails closed. `packageManager`/`engines.node` must agree
+  with the lane when present and may be absent. README inline (spaced, bracketed
+  and titled destinations), reference and HTML (`src`/`href`, any quoting) links
+  must be case-exact, forward-slash relative paths to regular files named in the
+  materialized record's inventory, never files the verifier wrote into the group
+  afterwards (`/x` means repository root; drive prefixes including `C:x` and
+  backslashes are refused). Any `](` that is not a parsed inline link fails the
+  key. Coverage keys also require the committed D34/D35 tests to reference
+  live-lease rejection, backup restore and the three recovery codes as exact
+  names, attributes or non-docstring string constants inside `test*` functions or
+  their decorators (comments, docstrings, function names and module-level values do
+  not count) and the UI test to name the three codes. `limitation_boundary` is
+  sentence-level and fails closed: a sentence naming automated evidence and human
+  acceptance (either order) with exactly one equating verb must deny the equation
+  (odd count of negations, including `distinct`/`separate`/`different`/`rather
+  than`/`instead of`); several equating verbs, an even count, or a held-out
+  sentence placing execution both inside and outside fails the key, as does any
+  affirming contradiction. Expected frozen-D35 result in the real
+  allowlisted group: `setup_paths` (README links to non-inventoried documents) and
+  `locked_versions` (README prerequisites) fail; the other four keys pass.
+- **Smoke prerequisite:** the D34 contract tests need symlink creation (Windows:
+  SeCreateSymbolicLinkPrivilege or Developer Mode). The smoke refuses before any
+  stage when it is unavailable; contract summaries record skip counts and a skip
+  is never a passed contract test.
+- **Pinned pnpm binding:** also rehash `dist/worker.js` (install worker) and
+  `dist/pnpmrc` (builtin config) around every frontend command; groups set
+  `NODE_DISABLE_COMPILE_CACHE=1`.
+- **Windows path aliases:** directory validation refuses components ending in `.`
+  or a space, so a validated `name.` cannot alias a `name` junction.
+
 #### D39 implementation checkpoint after review amendments
 
 At the earlier Task 1 checkpoint, the pure contracts, separate materializer/cleanup

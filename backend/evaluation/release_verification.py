@@ -132,6 +132,18 @@ def _scan_stream(stream: BinaryIO, counts: dict[str, int], maximum: int) -> int:
     return size
 
 
+def _count_path_rules(relative: str, counts: dict[str, int]) -> None:
+    FileFingerprint(path=relative, size=0, sha256="0" * 64)
+    parsed = PurePosixPath(relative.lower())
+    name = parsed.name
+    public_example = PurePosixPath(relative).name == ".env.example"
+    private = bool(PRIVATE_COMPONENTS.intersection(parsed.parts) or name in PRIVATE_FILENAMES or (not public_example and (name == ".env" or name.startswith(".env."))))
+    if private and relative not in PUBLIC_SYNTHETIC_PATHS:
+        counts["tracked_private_state"] = min(_MAX_SCAN_COUNT, counts["tracked_private_state"] + 1)
+    if GENERATED_COMPONENTS.intersection(parsed.parts) or parsed.suffix in GENERATED_SUFFIXES:
+        counts["tracked_generated_state"] = min(_MAX_SCAN_COUNT, counts["tracked_generated_state"] + 1)
+
+
 def scan_public_files(root: Path, paths: tuple[str, ...], metadata: tuple[bytes, ...]) -> dict[str, int]:
     """Count four bounded rules in explicit tracked files and bounded public metadata."""
     if len(paths) > 8192 or len(set(paths)) != len(paths) or len(metadata) > 16:
@@ -139,15 +151,7 @@ def scan_public_files(root: Path, paths: tuple[str, ...], metadata: tuple[bytes,
     counts = dict.fromkeys(SCAN_RULE_IDS, 0)
     total = 0
     for relative in paths:
-        FileFingerprint(path=relative, size=0, sha256="0" * 64)
-        parsed = PurePosixPath(relative.lower())
-        name = parsed.name
-        public_example = PurePosixPath(relative).name == ".env.example"
-        private = bool(PRIVATE_COMPONENTS.intersection(parsed.parts) or name in PRIVATE_FILENAMES or (not public_example and (name == ".env" or name.startswith(".env."))))
-        if private and relative not in PUBLIC_SYNTHETIC_PATHS:
-            counts["tracked_private_state"] = min(_MAX_SCAN_COUNT, counts["tracked_private_state"] + 1)
-        if GENERATED_COMPONENTS.intersection(parsed.parts) or parsed.suffix in GENERATED_SUFFIXES:
-            counts["tracked_generated_state"] = min(_MAX_SCAN_COUNT, counts["tracked_generated_state"] + 1)
+        _count_path_rules(relative, counts)
         path = root / relative
         materialization._directory(path.parent)
         descriptor = materialization._file_descriptor(path)
@@ -167,6 +171,12 @@ def scan_public_files(root: Path, paths: tuple[str, ...], metadata: tuple[bytes,
             os.close(descriptor)
         if total > _MAX_TOTAL_BYTES:
             raise ValueError("public scan total limit exceeded")
+    return _scan_metadata(metadata, counts, total)
+
+
+def _scan_metadata(metadata: tuple[bytes, ...], counts: dict[str, int], total: int) -> dict[str, int]:
+    if len(metadata) > 16:
+        raise ValueError("public scan inventory limit exceeded")
     for blob in metadata:
         if type(blob) is not bytes or len(blob) > _MAX_METADATA_BYTES:
             raise ValueError("public scan metadata limit exceeded")
@@ -176,11 +186,35 @@ def scan_public_files(root: Path, paths: tuple[str, ...], metadata: tuple[bytes,
     return counts
 
 
+class _BlobReader:
+    """Expose exactly one `cat-file --batch` blob body as a bounded stream."""
+
+    def __init__(self, stream: BinaryIO, size: int) -> None:
+        self._stream = stream
+        self._remaining = size
+
+    def read(self, size: int = -1) -> bytes:
+        if self._remaining <= 0:
+            return b""
+        wanted = self._remaining if size < 0 else min(size, self._remaining)
+        chunk = self._stream.read(wanted)
+        if len(chunk) != wanted:
+            raise ValueError("public scan blob truncated")
+        self._remaining -= len(chunk)
+        return chunk
+
+
 def scan_candidate_commit(root: Path, commit: str, metadata: tuple[bytes, ...]) -> dict[str, int]:
-    """Scan the bound commit's entire tracked inventory, including freeze exclusions."""
+    """Scan the bound commit's committed blobs, including freeze exclusions.
+
+    Bytes come from Git objects, not the working tree, so attributes such as
+    working-tree-encoding or filters cannot hide committed content, and
+    replace refs are ignored for both the tree listing and the blobs.
+    """
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise ValueError("public scan commit invalid")
-    process = subprocess.Popen(("git", "-c", "core.longpaths=true", "-C", str(root), "ls-tree", "-r", "-z", "--full-tree", commit),
+    prefix = ("git", "--no-replace-objects", "-c", "core.longpaths=true", "-C", str(root))
+    process = subprocess.Popen((*prefix, "ls-tree", "-r", "-z", "--full-tree", commit),
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     timer = threading.Timer(30, process.kill)
     timer.daemon = True
@@ -199,18 +233,54 @@ def scan_candidate_commit(root: Path, commit: str, metadata: tuple[bytes, ...]) 
         process.wait(timeout=10)
         if process.stdout is not None:
             process.stdout.close()
-    paths: list[str] = []
+    entries: list[tuple[str, bytes]] = []
     for entry in raw.split(b"\0"):
         if not entry:
             continue
         fields, name = entry.split(b"\t", 1)
-        mode, kind, _ = fields.split()
-        if mode not in {b"100644", b"100755"} or kind != b"blob":
+        mode, kind, oid = fields.split()
+        if mode not in {b"100644", b"100755"} or kind != b"blob" or re.fullmatch(rb"[0-9a-f]{40}", oid) is None:
             raise ValueError("public tracked file must be regular")
-        paths.append(name.decode("utf-8", errors="strict"))
-        if len(paths) > 8192:
+        entries.append((name.decode("utf-8", errors="strict"), oid))
+        if len(entries) > 8192:
             raise ValueError("public scan inventory limit exceeded")
-    return scan_public_files(root, tuple(paths), metadata)
+    if len({path for path, _ in entries}) != len(entries):
+        raise ValueError("public scan inventory duplicated")
+    counts = dict.fromkeys(SCAN_RULE_IDS, 0)
+    total = 0
+    blobs = subprocess.Popen((*prefix, "cat-file", "--batch"), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    timer = threading.Timer(300, blobs.kill)
+    timer.daemon = True
+    timer.start()
+    try:
+        assert blobs.stdin is not None and blobs.stdout is not None
+        for relative, oid in entries:
+            _count_path_rules(relative, counts)
+            blobs.stdin.write(oid + b"\n")
+            blobs.stdin.flush()
+            header = blobs.stdout.readline(128).split()
+            if len(header) != 3 or header[:2] != [oid, b"blob"] or not header[2].isdigit():
+                raise ValueError("public scan blob header invalid")
+            size = int(header[2])
+            total += size
+            if size > _MAX_SOURCE_BYTES or total > _MAX_TOTAL_BYTES:
+                raise ValueError("public scan file limit exceeded")
+            if _scan_stream(_BlobReader(blobs.stdout, size), counts, _MAX_SOURCE_BYTES) != size:  # type: ignore[arg-type]
+                raise ValueError("public scan blob truncated")
+            if blobs.stdout.read(1) != b"\n":
+                raise ValueError("public scan blob framing invalid")
+        blobs.stdin.close()
+        if blobs.wait(timeout=30) != 0:
+            raise ValueError("public scan blobs unavailable")
+    finally:
+        timer.cancel()
+        if blobs.poll() is None:
+            blobs.kill()
+        blobs.wait(timeout=10)
+        for stream in (blobs.stdin, blobs.stdout):
+            if stream is not None and not stream.closed:
+                stream.close()
+    return _scan_metadata(metadata, counts, total)
 
 
 def build_group_environment(root: Path, *, python_executable: Path, node_executable: Path | None) -> dict[str, str]:
@@ -238,7 +308,8 @@ def build_group_environment(root: Path, *, python_executable: Path, node_executa
         "NPM_CONFIG_USERCONFIG": str(root / "npm-user.conf"), "NPM_CONFIG_GLOBALCONFIG": str(root / "npm-global.conf"),
         "UV_PYTHON": str(python_executable.absolute()), "UV_CONCURRENT_DOWNLOADS": "2", "UV_CONCURRENT_BUILDS": "1", "UV_CONCURRENT_INSTALLS": "1",
         "UV_PYTHON_DOWNLOADS": "never", "UV_NO_CONFIG": "1", "UV_NO_PROGRESS": "1",
-        "NODE_OPTIONS": "--max-old-space-size=512", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+        "NODE_OPTIONS": "--max-old-space-size=512", "NODE_DISABLE_COMPILE_CACHE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
         "PYTEST_ADDOPTS": "-o " + shlex.quote("cache_dir=" + (root / "pytest-cache").as_posix()),
         "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1", "RAYON_NUM_THREADS": "1",
         "NPM_CONFIG_UPDATE_NOTIFIER": "false", "NPM_CONFIG_AUDIT": "false", "NPM_CONFIG_FUND": "false",
@@ -266,11 +337,19 @@ class _ExecutionGroup:
         self.source = self.root / "source"
         self.record = record
         created: tuple[int, int] | None = None
+        replaced = False
         try:
             materialization._assert_directory(self.work, self.work_anchor)
             materialization._fs_path(self.root).mkdir(mode=0o700)
             created = materialization._identity(materialization._fs_path(self.root).lstat())
-            self.anchor = materialization._open_anchor(self.root)
+            anchor = materialization._open_anchor(self.root)
+            if anchor.identity != created:
+                # The created root was swapped before anchoring: never adopt or
+                # delete the replacement; the original is reported as lost.
+                freeze._close_directory_anchor(anchor)
+                replaced = True
+                raise ValueError("group root replaced before anchoring")
+            self.anchor = anchor
             materialization._fs_path(self.source).mkdir(mode=0o700)
             tree = materialization._OwnedTree(self.source)
             try:
@@ -282,6 +361,8 @@ class _ExecutionGroup:
                 tree.close()
         except BaseException:
             try:
+                if replaced:
+                    raise ValueError("group root ownership lost")
                 if self.anchor is not None:
                     self.cleanup()
                 elif created is not None:
@@ -366,8 +447,9 @@ def _remove_group_directory(path: Path, anchor: freeze._DirectoryAnchor, *, _par
                 named = materialization._fs_path(child).lstat()
                 if (materialization._identity(named), stat.S_IFMT(named.st_mode), blinded_io.is_reparse(named)) != expected:
                     raise ValueError("group leaf identity or type lost")
-                if stat.S_ISREG(before.st_mode) and not blinded_io.is_reparse(before) and named.st_nlink != 1:
-                    raise ValueError("group leaf has an unowned hardlink")
+                # uv/pnpm hardlink group-local caches into the group. Deleting this
+                # verified name through its handle never changes the shared file's
+                # attributes or another link, so additional links are not refused.
                 check()
                 if descriptor >= 0:
                     os.close(descriptor)
@@ -893,11 +975,19 @@ async def _frontend_tools(scope: blinded_runtime.OwnedProcessScope, group: _Exec
     implementation_fp = await asyncio.to_thread(_tool_file, implementation, "tools/pnpm_implementation")
     if (await _probe(scope, group, (str(executable), str(pnpm), "--version"), env)).strip() != TOOL_RULES["pnpm"][0].encode("ascii"):
         raise ValueError("pinned pnpm native launcher failed")
+    # Other executed/read parts of pinned pnpm live in the group-writable npm
+    # cache: the install worker (tarball extraction/integrity) and the builtin
+    # rc file loaded on every run. They are rehashed around every command too.
+    extras = []
+    for name, alias in (("worker.js", "tools/pnpm_worker"), ("pnpmrc", "tools/pnpm_builtin_rc")):
+        path = pnpm_package.parent / "dist" / name
+        extras.append((path, await asyncio.to_thread(_tool_file, path, alias)))
     result = _ToolSet(executable, npx, (
         ToolExecutionBinding(role="node", version=TOOL_RULES["node"][0], executable=node, launcher=None),
         ToolExecutionBinding(role="npx", version=str(npm["version"]), executable=node, launcher=launcher),
         ToolExecutionBinding(role="pnpm", version=TOOL_RULES["pnpm"][0], executable=node, launcher=pnpm_launcher),
-    ), (*initial, (pnpm, pnpm_launcher), (implementation, implementation_fp), (pnpm_package, await asyncio.to_thread(_tool_file, pnpm_package, "tools/pnpm_package"))))
+    ), (*initial, (pnpm, pnpm_launcher), (implementation, implementation_fp), *extras,
+        (pnpm_package, await asyncio.to_thread(_tool_file, pnpm_package, "tools/pnpm_package"))))
     await asyncio.to_thread(result.verify)
     return result
 
@@ -937,14 +1027,17 @@ async def _close_group(group: _ExecutionGroup, scope: blinded_runtime.OwnedProce
                 await asyncio.shield(scope.close())
         except (OSError, ValueError):
             failed = True
+        if failed:
+            # DTD: generated entries are removed only after confirmed scope
+            # teardown. An unconfirmed descendant may still use the group, so
+            # the group is retained and cleanup is reported as failed.
+            raise ValueError('owned scope cleanup failed')
         try:
             await asyncio.to_thread(group.assert_source)
         except (OSError, ValueError) as error:
             source_error = error
         finally:
             await asyncio.to_thread(group.cleanup)
-        if failed:
-            raise ValueError('owned scope cleanup failed')
     except (OSError, ValueError):
         raise _GroupCleanupFailed('owned group cleanup failed') from None
     finally:
@@ -955,7 +1048,29 @@ async def _close_group(group: _ExecutionGroup, scope: blinded_runtime.OwnedProce
         raise source_error
 
 
-async def _backend_media(scope: blinded_runtime.OwnedProcessScope, group: _ExecutionGroup, tools: _ToolSet, env: dict[str, str]) -> _ToolSet:
+_MEDIA_PROGRAMS: frozenset[str] = frozenset({"ffmpeg", "ffprobe", "ffplay"})
+_EXECUTABLE_SUFFIXES: frozenset[str] = frozenset({".exe", ".com", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msc"})
+
+
+def _dedicated_media_directory(directory: Path) -> None:
+    """Refuse shim/system directories that would expose other host programs."""
+    with os.scandir(directory) as entries:
+        for count, entry in enumerate(entries):
+            if count >= 4096:
+                raise ValueError("backend media directory inventory exceeded")
+            if entry.is_dir(follow_symlinks=False):
+                continue
+            stem, suffix = os.path.splitext(entry.name.lower())
+            if os.name == "nt":
+                executable = suffix in _EXECUTABLE_SUFFIXES
+            else:
+                executable = bool(entry.stat(follow_symlinks=True).st_mode & 0o111)
+            if executable and (stem if os.name == "nt" else entry.name) not in _MEDIA_PROGRAMS:
+                raise ValueError("backend media directory exposes unbound programs")
+
+
+async def _backend_media(scope: blinded_runtime.OwnedProcessScope, group: _ExecutionGroup, tools: _ToolSet, env: dict[str, str]) -> tuple[_ToolSet, dict[str, str]]:
+    """Bind real FFmpeg for backend_pytest only, in a per-command environment copy."""
     files = list(tools.files)
     bindings = []
     directories = []
@@ -964,17 +1079,22 @@ async def _backend_media(scope: blinded_runtime.OwnedProcessScope, group: _Execu
         if found is None:
             raise ValueError('backend media coverage prerequisite missing')
         executable = await asyncio.to_thread(_native_path, Path(found))
+        await asyncio.to_thread(_dedicated_media_directory, executable.parent)
         fingerprint = await asyncio.to_thread(_native_file, executable, 'tools/' + role)
-        version = (await _probe(scope, group, (str(executable), '-version'), env)).decode('utf-8').splitlines()[0]
-        bindings.append(ToolExecutionBinding(role=role, version=version, executable=fingerprint, launcher=None))
+        lines = (await _probe(scope, group, (str(executable), '-version'), env)).decode('utf-8').splitlines()
+        if not lines:
+            raise ValueError('backend media version unavailable')
+        bindings.append(ToolExecutionBinding(role=role, version=lines[0][:512], executable=fingerprint, launcher=None))
         files.append((executable, fingerprint))
         directories.append(str(executable.parent))
-    env['PATH'] = os.pathsep.join((*dict.fromkeys(directories), env['PATH']))
+    # The sandbox interpreter directory stays first; media directories follow it.
+    first, *rest = env['PATH'].split(os.pathsep)
+    command_env = {**env, 'PATH': os.pathsep.join((first, *dict.fromkeys(directories), *rest))}
     for role, (executable, _) in zip(('ffmpeg', 'ffprobe'), files[-2:], strict=True):
-        selected = shutil.which(role, path=env['PATH'])
+        selected = shutil.which(role, path=command_env['PATH'])
         if selected is None or _native_path(Path(selected)) != executable:
             raise ValueError('backend media PATH binding mismatch')
-    return replace(tools, files=tuple(files), media_bindings=tuple(bindings))
+    return replace(tools, files=tuple(files), media_bindings=tuple(bindings)), command_env
 
 
 def _command_target(index: int, tools: _ToolSet) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1030,8 +1150,10 @@ async def _run_inventory(*, candidate: Path, runtime: Path, work: Path, path: Pa
         await asyncio.to_thread(_inventory_boundary, candidate, runtime, work, path, digest, record, tool_root, attestation, frozen_path)
     for indices in (range(0, 5), range(5, 9)):
         await boundary()
-        group = await asyncio.to_thread(_ExecutionGroup, work, runtime, record)
+        # Constructed before the group: an invalid D39_AGENT_PID refuses without
+        # leaving a group behind.
         scope = blinded_runtime.OwnedProcessScope()
+        group = await asyncio.to_thread(_ExecutionGroup, work, runtime, record)
         entered = False
         try:
             python = await asyncio.to_thread(_native_path, Path(getattr(sys, "_base_executable", sys.executable)))
@@ -1045,8 +1167,8 @@ async def _run_inventory(*, candidate: Path, runtime: Path, work: Path, path: Pa
                 assert node is not None
                 tools = await _frontend_tools(scope, group, env, node)
             for index in indices:
-                selected = await _backend_media(scope, group, tools, env) if index == 2 else tools
-                result = await _execute_command(index=index, group=group, scope=scope, tools=selected, env=env, commands=commands)
+                selected, command_env = await _backend_media(scope, group, tools, env) if index == 2 else (tools, env)
+                result = await _execute_command(index=index, group=group, scope=scope, tools=selected, env=command_env, commands=commands)
                 if result.outcome != "completed" or result.exit_code != 0:
                     raise ValueError("verification command failed")
                 if index == 0:

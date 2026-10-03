@@ -1,5 +1,25 @@
 # Plan C Handoff — D39 review corrections; operational acceptance pending
 
+## D39 second review correction handoff — 2026-10-03
+
+Read `D39 second review amendments (2026-10-03)` in `docs/DTD.md` and the second
+section of `work-report-39.md`. New operator facts:
+
+- The smoke host needs symlink creation (Windows Developer Mode or
+  SeCreateSymbolicLinkPrivilege); without it the smoke refuses before any stage.
+- FFmpeg/FFprobe must come from a dedicated directory (no package-manager shim
+  directory and no `/usr/bin` with other programs on it).
+- `D39_AGENT_PID` may declare an additional live agent process tree for memory
+  accounting (for example when an MSYS wrapper breaks the controller's parent
+  chain). It only adds memory; the 1 GiB unknown-agent reserve stays unless the
+  agent root is detected automatically. Invalid values refuse before any group.
+- Residual (recorded, not fixed): a same-user process that swaps the random group
+  directory between `mkdir` and its first `lstat` could be adopted; closing this
+  needs a create-and-open primitive (`NtCreateFile`/`openat`).
+- Frozen D35 is expected to fail `setup_paths` and `locked_versions` in the real
+  allowlisted smoke group; its tracked credential-shaped test literals still fail
+  the secret scan; its frontend build rewrites tracked `frontend/vite.config.js`.
+
 ## D39 review correction handoff — 2026-10-02
 
 Read `work-report-39.md` and the dated D39 review amendments in `docs/DTD.md` before

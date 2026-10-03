@@ -369,9 +369,11 @@ def test_observed_nonzero_probe_emits_failed_receipt_instead_of_fabricated_pass(
 
 def test_frozen_readme_documentation_gate_is_failed_not_waived(pinned_source: Path) -> None:
     producer = _api('evaluation.scripts.d39_smoke')
-    checks = producer.documentation_checks(pinned_source, contracts_passed=True)
-    assert set(checks) == set(DOC_KEYS)
-    assert checks['locked_versions'] is False
+    inventory = frozenset(path.relative_to(pinned_source).as_posix() for path in pinned_source.rglob('*') if path.is_file())
+    checks = producer.documentation_checks(pinned_source, contracts_passed=True, inventory=inventory)
+    # Full frozen tree: only the README prerequisite mismatch fails; the stricter
+    # fail-closed link, coverage and limitation parsing accept D35's real text.
+    assert checks == dict.fromkeys(DOC_KEYS, True) | {'locked_versions': False}
 
 
 @pytest.mark.parametrize('mutated', [False, True])
@@ -503,6 +505,12 @@ def test_synthetic_smoke_driver_failure_keeps_actual_prefix_and_cleans_only_grou
     monkeypatch.setattr(verification, '_probe', probe)
     monkeypatch.setattr(producer, '_candidate_action', action)
     monkeypatch.setattr(producer, 'fake_providers', provider)
+    # Host symlink privilege is a separate documented prerequisite (own test).
+    monkeypatch.setattr(producer, '_symlink_prerequisite', lambda root: None)
+    shared_preflight: list[Path] = []
+    async def frontend_preflight(scope: Any, group: Any, tools: Any, env: Any) -> None:
+        shared_preflight.append(group.root)
+    monkeypatch.setattr(verification, '_frontend_preflight', frontend_preflight)
     output = tools_repo / 'evidence/smoke'
     try:
         with pytest.raises(ValueError, match='no complete smoke evidence'):
@@ -510,6 +518,8 @@ def test_synthetic_smoke_driver_failure_keeps_actual_prefix_and_cleans_only_grou
                                          materialization_path=publication[3], expected_materialization_sha256=digest,
                                          work_root=publication[2], output_dir=output)
         assert closed == [True]
+        # The smoke's own frontend group runs the shared local-pnpm guard (M9).
+        assert shared_preflight == groups
         assert groups and not any(path.exists() for path in groups)
         assert runtime.exists() and list(publication[2].iterdir()) == [runtime]
         assert not (output / 'smoke-manifest.json').exists()

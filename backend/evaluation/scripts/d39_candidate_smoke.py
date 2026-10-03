@@ -361,6 +361,8 @@ def _serve(config: dict[str, Any]) -> None:
         # Observation only: bind owned listener and count fixed operation POSTs.
         from starlette.responses import JSONResponse
         counts = {'operation_posts': 0}
+        published = {'sequence': 0}
+        publish = asyncio.Lock()
         counter = Path(config['summary_path'])
         with counter.open('xb') as stream:
             stream.write(_canonical(counts))
@@ -370,12 +372,25 @@ def _serve(config: dict[str, Any]) -> None:
                 return JSONResponse({'owner': config['owner_token']})
             if request.method == 'POST' and request.url.path == '/api/operations/execute':
                 counts['operation_posts'] += 1
-                temporary = counter.with_suffix('.count-tmp')
-                with temporary.open('xb') as stream:
-                    stream.write(_canonical(counts))
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, counter)
+                # Publications are serialized and each writes the latest count, so a
+                # retried replacement can never move the counter backwards.
+                async with publish:
+                    published['sequence'] += 1
+                    temporary = counter.with_suffix('.count-tmp-' + str(published['sequence']))
+                    with temporary.open('xb') as stream:
+                        stream.write(_canonical(counts))
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    # The browser helper may hold the counter open for a moment (no
+                    # share-delete on Windows); retry the atomic replacement briefly.
+                    for attempt in range(100):
+                        try:
+                            os.replace(temporary, counter)
+                            break
+                        except PermissionError:
+                            if attempt == 99:
+                                raise
+                            await asyncio.sleep(0.01)
             return await next_call(request)
         uvicorn.run(app, host='127.0.0.1', port=config['port'], workers=1, reload=False, log_level='warning')
 
@@ -459,7 +474,9 @@ def _ffmpeg(config: dict[str, Any]) -> dict[str, Any]:
                 code, duration = _probe_duration(config['ffprobe'], video, probe_path)
                 Path(config['summary_path']).with_suffix('.media.json').write_bytes(_canonical({'project_id': project_id, 'video': video.relative_to(storage).as_posix(), 'subtitle': subtitle.relative_to(storage).as_posix(), 'manifest': manifest}))
                 return observed | dict(ffprobe_exit_code=code, video_present=video.is_file(), subtitle_present=subtitle.is_file(),
-                            publication_bound=current.current_artifact_id == artifact.id and detail.get('output_video_path') == artifact.video_path and artifact.revision == detail['revision'] and manifest.get('job_id') == artifact.job_id and manifest.get('revision') == artifact.revision and manifest.get('input_fingerprint') == artifact.input_fingerprint, duration_ms=duration)
+                            # The observed exits do not replace the job's own completion:
+                            # a publication is bound only for a job that ended 'completed'.
+                            publication_bound=detail.get('status') == 'completed' and current.current_artifact_id == artifact.id and detail.get('output_video_path') == artifact.video_path and artifact.revision == detail['revision'] and manifest.get('job_id') == artifact.job_id and manifest.get('revision') == artifact.revision and manifest.get('input_fingerprint') == artifact.input_fingerprint, duration_ms=duration)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -477,13 +494,17 @@ def main(argv: list[str] | None = None) -> int:
             class Results:
                 def __init__(self) -> None:
                     self.results: dict[str, list[bool]] = {'migration_restore': [], 'recovery_codes': []}
+                    self.skipped: dict[str, int] = {'migration_restore': 0, 'recovery_codes': 0}
                 def pytest_runtest_logreport(self, report: Any) -> None:
                     if report.when == 'call' or report.failed or report.skipped:
                         key = 'migration_restore' if 'test_d34_migrations.py' in report.nodeid else 'recovery_codes'
+                        # A skip is recorded separately and is never a passed contract test.
                         self.results[key].append(report.passed)
+                        self.skipped[key] += bool(report.skipped)
             results = Results()
             status = pytest.main(['tests/test_d34_migrations.py', 'tests/test_d35_startup_recovery_api.py', '-q', '-p', 'no:cacheprovider'], plugins=[results])
-            summary = {key: bool(values) and all(values) and int(status) in (0, 1) for key, values in results.results.items()}
+            summary: dict[str, bool | int] = {key: bool(values) and all(values) and int(status) in (0, 1) for key, values in results.results.items()}
+            summary.update({key + '_skipped': count for key, count in results.skipped.items()})
             Path(config['summary_path']).write_bytes(_canonical(summary))
             return 0
         actions = {'build_index': _build_index, 'legacy_migration': _migration, 'restore': _restore,
