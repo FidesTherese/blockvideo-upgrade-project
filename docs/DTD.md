@@ -4,16 +4,16 @@
 
 ### Document control
 
-- **Status:** D38 tooling independently approved; D39 implemented with review corrections; D40 pending
+- **Status:** D38 tooling independently approved; D39 implemented with two review-correction rounds; D40 tooling implemented, independent review pending
 - **Delivery mode:** High-Risk for D31 security, D32 concurrency, D34 migration,
   and D37–D40 tooling integrity, privacy, and resource ownership
 - **Specification:** `specification.md`, `docs/plan-c/work-unit-31.md` through
   `docs/plan-c/work-unit-40.md`
 - **DTD:** `docs/DTD.md`
-- **Updated:** 2026-10-02 (D39 review corrections)
+- **Updated:** 2026-10-03 (D39 second review corrections; D40 implementation)
 - **Scope:** sequential hardening, blinded evaluation, and release-readiness decision.
   D38 aggregate import and D39 verification/smoke tooling are implemented with
-  synthetic verification; D40 remains pending. No real aggregate acceptance or readiness approval is inferred.
+  synthetic verification; D40 decision tooling is implemented with synthetic verification only. No real aggregate acceptance or readiness approval is inferred.
 - **Blocked facts:** D39 clean extras installation and its native launcher/browser
   roundtrip remain unverified. D37 already proved pinned-D35 synthetic stateful/worker
   behavior; that historical proof is not D39 fresh-sandbox or 4 GiB acceptance.
@@ -3132,6 +3132,78 @@ only these exact keys for successfully loaded inputs: `freeze_manifest`,
 `ReadinessDecision.decision_tool_sha256` equals only the independently regenerated
 and detached-expected-validated decision attestation aggregate. Output contains no held-out text,
 private paths, Git/network/publication/deployment side effects.
+
+#### D40 implementation amendments (2026-10-03)
+
+These amendments make the D40 contract above executable; they waive no gate and
+change no threshold, pin or source inventory.
+
+- **Loader failures reach the engine as fixed reasons only.** `decide_readiness`
+  takes one additional keyword, `input_failures: dict[str, str] | None = None`,
+  whose keys are `INPUT_KEYS` and whose values are the fixed reasons `missing`,
+  `digest_missing`, `digest_malformed`, `digest_mismatch`, `invalid` and `binding`.
+  Loaders raise `DecisionInputError(failures)` (a `ValueError`) naming every refused
+  sibling at once; the CLI collects them so each mandatory input is still its own
+  named blocker. No path, content or exception text enters the decision. A second
+  keyword, `d36_tool_attestation: ToolAttestation | None = None`, carries the freeze
+  publication's own D36 tool attestation from `load_freeze`, which now returns
+  `(FreezeManifest, freeze_sha256, ToolAttestation)`.
+- **Freeze refusal.** A missing or invalid D36 publication refuses without output
+  (exit 2) instead of becoming a named blocker: without it no decision can name a
+  candidate, and `freeze_manifest` is therefore always a passing row when present.
+- **Fixed gate order (27 rows).** `decision_tool_attestation`, `freeze_manifest`,
+  `d38_accepted_result`, `d38_validation`, `d38_tool_attestation`,
+  `d38_upstream_identity`, `d39_verification_manifest`,
+  `d39_verifier_tool_attestation`, `d39_candidate_binding`, `d39_command_inventory`,
+  `d39_smoke_receipts`, `d39_integrity`, `upstream_tool_sources`, `protocol_coverage`,
+  then for `all_tools` and
+  `stateful` in that order `_completion`, `_quality`, `_category_completion`,
+  `_category_quality`, `_safety`, then `human_operation`, `independent_review` and
+  `non_safety_limitations`. `blockers` are exactly the failed rows in this order.
+  `ReadinessDecision` itself rejects an outcome inconsistent with its gates and
+  limitations.
+- **Additional bindings.** `d38_upstream_identity` also requires
+  `bundle.d36_trial_tool_sha256` to equal the publication's
+  `d36_candidate_freezer_and_trial_host` attestation aggregate.
+  `d39_candidate_binding` also requires `runtime_source_sha256` to equal the freeze
+  `aggregate_sha256` (the verified runtime was materialized from exactly the frozen
+  bytes). `upstream_tool_sources` requires every D38 importer and D39 verifier
+  attested file that is also in `DECISION_SOURCE_PATHS` to equal the rehashed
+  current decision-source fingerprint, so evidence produced by stale shared tooling
+  (for example a pre-change `evidence_json.py`) cannot pass.
+- **Coverage is re-derived, not trusted.** `protocol_coverage` re-checks token order,
+  counts, bindings, the partition, derived category denominators, mode/category
+  sums and per-row bounds (`task_complete <= completed <= included`, every safety
+  count `<= included`). If it fails, every mode gate fails as "protocol coverage or
+  accounting invalid"; no ratio is evaluated on an unusable topology.
+- **Review records** are canonical JSON (`ReviewEvidence`, at most 64 KiB) without a
+  detached digest; their canonical hash is recorded under `human_operation` /
+  `independent_review`. A review of the wrong kind or candidate fails its gate.
+- **Output location.** Attestation and decision outputs must be outside the
+  repository root or strictly below its Git-ignored `release-evidence/` directory,
+  decided lexically and again after resolving the deepest existing ancestor and the
+  parent, without Git; no directory is created through a link into tracked source.
+  Files are published with the shared no-replace `publish_immutable`. The decision
+  output directory must be new or contain only this run's decision-tool attestation,
+  so a decision can never be added to (and thereby invalidate) an input publication
+  or replace prior evidence. If `decision.md` cannot be published, the
+  `decision.json` written by the same call is removed.
+- **Pre/post source binding.** The decision CLI rehashes the fixed source inventory
+  before loading any evidence and again after deciding, and both times requires every
+  loaded closure module (including the CLI itself) to be the attested file under
+  `--repo-root`; a byte-identical decoy tree cannot lend its aggregate to other
+  running code. Any failure refuses without output. Exit status is 0 only for `Ready` / `Conditionally ready`; `Not ready` and
+  every refusal exit 2.
+- **Import closure.** The engine, both CLIs and their transitive imports load only
+  files in `DECISION_SOURCE_PATHS` (namespace packages `evaluation.scripts` and
+  `scripts` have no initializer). Regression tests enforce this in a fresh
+  interpreter and statically over every import statement, including function-local
+  imports and package initializers.
+- **Shared parser change.** `parse_canonical_typed` lives in
+  `evaluation/evidence_json.py`, which is also in the D38 and D39 source
+  inventories. Their attestation aggregates therefore change with this commit;
+  D38/D39 evidence must be produced by the final committed tooling, never by an
+  earlier attested aggregate.
 
 ### Internal HTTP APIs
 

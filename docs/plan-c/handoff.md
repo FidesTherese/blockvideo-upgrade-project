@@ -1,4 +1,24 @@
-# Plan C Handoff — D39 review corrections; operational acceptance pending
+# Plan C Handoff — D40 decision tooling; operational acceptance pending
+
+## D40 readiness decision handoff — 2026-10-03
+
+Read `D40 implementation amendments (2026-10-03)` in `docs/DTD.md` and
+`work-report-40.md`. The decision tooling exists; no decision has been made.
+
+- Operator order: commit and push final tooling; run
+  `python -m evaluation.scripts.attest_release_decision --repo-root .. --output <evidence>/decision-tool-attestation.json --expected-sha256 <aggregate>`
+  from `backend/` on the clean checkout; then run
+  `python -m scripts.decide_release_readiness` with the D36 publication's
+  `freeze-manifest.json`, the D38 triplet and D39 manifest/attestation (each with
+  its detached SHA-256), both review records and optional limitations.
+- Outputs go outside the repository or under the ignored `release-evidence/`; the
+  decision never replaces an existing `decision.json`/`decision.md`.
+- Missing evidence yields a named Not-ready decision (exit 2), never an inferred
+  pass. Real D37/D38/D39 evidence and both reviews do not exist yet, so the
+  actual result for the frozen candidate is **Not ready**.
+- `evidence_json.py` changed, so D38/D39 attestation aggregates change: produce
+  their evidence with the final committed tooling.
+- D40 never tags, publishes, deploys or creates a release.
 
 ## D39 second review correction handoff — 2026-10-03
 
