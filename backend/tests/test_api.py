@@ -70,7 +70,7 @@ def test_secret_summary_masks_keys(client):
         "source_script": "本文",
         "use_fake_providers": False,
         "providers": {
-            "llm_api_key": "sk-proj-abcdefghijklmnop",
+            "llm_api_key": "sk-" "proj-abcdefghijklmnop",
             "llm_base_url": "https://api.openai.com/v1",
             "llm_model": "gpt-4o-mini",
         },
@@ -84,4 +84,4 @@ def test_secret_summary_masks_keys(client):
     r2 = client.get(f"/api/projects/{pid}")
     assert r2.status_code == 200
     body = r2.text
-    assert "sk-proj-abcdefghijklmnop" not in body
+    assert "sk-" "proj-abcdefghijklmnop" not in body

@@ -217,8 +217,8 @@ python -m uv run python -m scripts.probe_language_dialogue --model blockvideo-d1
 
 | | 用途 | 備考 |
 |---|---|---|
-| Python 3.13+ / [uv](https://docs.astral.sh/uv/) | バックエンド | |
-| Node.js 20+ / pnpm | フロントエンド | |
+| Python 3.12.12+ / [uv](https://docs.astral.sh/uv/) 0.12.15 | バックエンド | |
+| Node.js 24.11.1+ / pnpm 10.18.3 | フロントエンド | |
 | [ffmpeg](https://ffmpeg.org/) | 動画の書き出し | `ffmpeg` と `ffprobe` の両方 |
 | [VOICEVOX Engine](https://voicevox.hiroshiba.jp/) | 音声合成 | 起動しておく（既定 `http://127.0.0.1:50021`） |
 | OpenAI 互換 API キー | 台本の分割 | OpenAI / OpenRouter など。無くても後述の Fake モードで動作 |
