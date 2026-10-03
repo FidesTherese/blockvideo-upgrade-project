@@ -37,7 +37,7 @@ def _api(name: str) -> Any:
     return getattr(release, name)
 
 
-def _synthetic_smoke(record: Any, digest: str) -> dict[str, object]:
+def _synthetic_smoke(record: Any, digest: str, *, tool_hash: str = "a" * 64) -> dict[str, object]:
     stages = ("legacy_migration", "restore", "all_tools_startup", "stateful_startup", "browser", "ffmpeg")
     binding = {key: getattr(record, key) for key in ("candidate_id", "git_commit", "freeze_sha256", "runtime_instance_id", "runtime_source_sha256")}
     binding["materialization_sha256"] = digest
@@ -56,7 +56,7 @@ def _synthetic_smoke(record: Any, digest: str) -> dict[str, object]:
         selected.update({"chrome", "websockets"} if stage == "browser" else {"ffmpeg", "ffprobe"} if stage == "ffmpeg" else set())
         receipt["tools"] = [{"role": role, "version": roles[role][0], "executable": _fingerprint("tools/" + roles[role][1]), "launcher": None if roles[role][2] is None else _fingerprint("tools/" + roles[role][2])} for role in sorted(selected)]
         receipts.append(receipt)
-    return {"schema_version": 1, **binding, "stage_receipts": receipts, **{stage + "_sha256": hashlib.sha256(_bytes(receipt)).hexdigest() for stage, receipt in zip(stages, receipts, strict=True)}}
+    return {"schema_version": 1, "producer_tool_sha256": tool_hash, **binding, "stage_receipts": receipts, **{stage + "_sha256": hashlib.sha256(_bytes(receipt)).hexdigest() for stage, receipt in zip(stages, receipts, strict=True)}}
 
 
 def _git(root: Path, *args: str) -> bytes:
@@ -344,7 +344,7 @@ def test_generated_leaf_inventory_replacement_is_not_adopted(publication: tuple[
                 raise
 
     def replace_after_inventory(path: Path) -> Any:
-        return ReplacingInventory() if path == group.root and replacement_id is None else scandir(path)
+        return ReplacingInventory() if path in (group.root, materialization._fs_path(group.root)) and replacement_id is None else scandir(path)
 
     try:
         with monkeypatch.context() as patch:
@@ -487,6 +487,7 @@ def test_python_origin_check_rejects_global_optional_packages(tmp_path: Path) ->
     with pytest.raises(ValueError):
         check(data, executable=exe, base_executable=baseexe, environment=sandbox, required=("numpy",))
     data["origins"]["numpy"] = str(sandbox / "Lib/site-packages/numpy/__init__.py")
+    data.update(locations={'numpy': []}, versions={'numpy': '2.0.0'})
     check(data, executable=exe, base_executable=baseexe, environment=sandbox, required=("numpy",))
     data["base_executable"] = str(base / "other.exe")
     with pytest.raises(ValueError):
@@ -655,7 +656,7 @@ def test_wrong_tool_binding_is_rejected_before_target_instruction(publication: t
     group = release._ExecutionGroup(publication[2], runtime, materialized)
     exe = Path(sys._base_executable)
     fingerprint = release._native_file(exe, "tools/python_sandbox")
-    binding = release.ToolExecutionBinding(role="python", version="3.12.11", executable=fingerprint, launcher=None)
+    binding = release.ToolExecutionBinding.model_construct(role="python", version="3.12.11", executable=fingerprint, launcher=None)
     tools = release._ToolSet(exe, None, (binding,), ((exe, fingerprint),))
     env = release.build_group_environment(group.root, python_executable=exe, node_executable=None)
     main = group.source / "backend/app/main.py"
@@ -727,10 +728,17 @@ def _inventory_fixture(monkeypatch: pytest.MonkeyPatch, *, fail_index: int | Non
     async def esbuild(scope: Any, group: Any, tools: Any, env: dict[str, str]) -> None:
         if fail_index == 9:
             raise ValueError("synthetic missing native esbuild")
+    async def media(scope: Any, group: Any, tools: Any, env: dict[str, str]) -> Any:
+        # This driver fixture already substitutes tool/version resolution. The
+        # native target, stdout/stderr, process ownership and cleanup stay real.
+        from dataclasses import replace
+        bindings = tuple(release.ToolExecutionBinding(role=role, version='synthetic-1', executable=release._native_file(tools.executable, 'tools/' + role), launcher=None) for role in ('ffmpeg', 'ffprobe'))
+        return replace(tools, media_bindings=bindings), dict(env)
     monkeypatch.setattr(release, "_bootstrap_python", backend)
     monkeypatch.setattr(release, "_sandbox_python", sandbox)
     monkeypatch.setattr(release, "_frontend_tools", frontend)
     monkeypatch.setattr(release, "_esbuild_preflight", esbuild)
+    monkeypatch.setattr(release, "_backend_media", media)
     monkeypatch.setattr(release, "_installed_node", lambda: Path(sys._base_executable))
     monkeypatch.setattr(blinded_runtime, "run_owned_command", native_fixture)
     return directories
@@ -743,7 +751,7 @@ def test_inventory_driver_real_native_outcomes_prefix_and_two_fresh_groups(publi
     monkeypatch.setattr(release, "_trusted_tool_root", lambda: tools_repo)
     smoke_path = tools_repo / "evidence/smoke/smoke-manifest.json"
     smoke_path.parent.mkdir()
-    smoke_path.write_bytes(_bytes(_synthetic_smoke(materialized, digest)))
+    smoke_path.write_bytes(_bytes(_synthetic_smoke(materialized, digest, tool_hash=release._attest_verifier(tools_repo).aggregate_sha256)))
     output = tools_repo / "evidence/verification"
     result = release.verify_release_candidate(candidate_root=publication[0], freeze_manifest_path=publication[1], runtime_root=runtime, materialization_path=publication[3], expected_materialization_sha256=digest, work_root=publication[2], output_dir=output, smoke_manifest_path=smoke_path)
     assert len(result.commands) == length and result.status == status
@@ -767,9 +775,10 @@ def test_freeze_metadata_changed_after_commands_cannot_pass(publication: tuple[P
     monkeypatch.setattr(release, "_trusted_tool_root", lambda: tools_repo)
     smoke_path = tools_repo / "evidence/smoke/smoke-manifest.json"
     smoke_path.parent.mkdir()
-    smoke_path.write_bytes(_bytes(_synthetic_smoke(materialized, digest)))
+    smoke_path.write_bytes(_bytes(_synthetic_smoke(materialized, digest, tool_hash=release._attest_verifier(tools_repo).aggregate_sha256)))
     result = release.verify_release_candidate(candidate_root=publication[0], freeze_manifest_path=publication[1], runtime_root=runtime, materialization_path=publication[3], expected_materialization_sha256=digest, work_root=publication[2], output_dir=tools_repo / "evidence/verification", smoke_manifest_path=smoke_path)
     assert result.status == "failed" and len(result.commands) == 9
+    assert not result.candidate_clean_after
     assert result.cleanup_status == "completed" and not runtime.exists()
 
 
@@ -811,7 +820,7 @@ def test_group_cleanup_failure_is_not_erased_by_successful_runtime_cleanup(publi
     monkeypatch.setattr(release, "_trusted_tool_root", lambda: tools_repo)
     smoke_path = tools_repo / "evidence/smoke/smoke-manifest.json"
     smoke_path.parent.mkdir()
-    smoke_path.write_bytes(_bytes(_synthetic_smoke(materialized, digest)))
+    smoke_path.write_bytes(_bytes(_synthetic_smoke(materialized, digest, tool_hash=release._attest_verifier(tools_repo).aggregate_sha256)))
     result = release.verify_release_candidate(candidate_root=publication[0], freeze_manifest_path=publication[1], runtime_root=runtime, materialization_path=publication[3], expected_materialization_sha256=digest, work_root=publication[2], output_dir=tools_repo / "evidence/verification", smoke_manifest_path=smoke_path)
     assert result.status == "failed" and result.cleanup_status == "failed"
     assert len(result.commands) == 5 and not runtime.exists()
@@ -859,7 +868,7 @@ def test_generated_child_replacement_is_reported_as_cleanup_failed(publication: 
             patch.setattr(release, "_trusted_tool_root", lambda: tools_repo)
             smoke_path = tools_repo / "evidence/smoke/smoke-manifest.json"
             smoke_path.parent.mkdir()
-            smoke_path.write_bytes(_bytes(_synthetic_smoke(materialized, digest)))
+            smoke_path.write_bytes(_bytes(_synthetic_smoke(materialized, digest, tool_hash=release._attest_verifier(tools_repo).aggregate_sha256)))
             output = tools_repo / "evidence/verification"
             result = release.verify_release_candidate(candidate_root=publication[0], freeze_manifest_path=publication[1], runtime_root=runtime, materialization_path=publication[3], expected_materialization_sha256=digest, work_root=publication[2], output_dir=output, smoke_manifest_path=smoke_path)
             assert result.status == "failed" and result.cleanup_status == "failed"

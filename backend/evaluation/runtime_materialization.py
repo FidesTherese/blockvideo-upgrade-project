@@ -1,11 +1,14 @@
 """Streamed immutable candidate copies with physical, marker-bound cleanup."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import re
 import secrets
 import stat
+import subprocess
+import threading
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator
@@ -14,23 +17,121 @@ from evaluation import blinded_io
 from evaluation.evidence_json import parse_canonical_model
 from evaluation.release_candidate import freeze
 from evaluation.release_candidate.contracts import CandidateControl, FreezeManifest
-from evaluation.release_candidate.fingerprints import fingerprint_files
+from evaluation.release_candidate import fingerprints as candidate_fingerprints
 from evaluation.smoke_contracts import (
     OwnedPathIdentity,
     RuntimeCleanupReceipt,
     RuntimeMaterialization,
     RuntimeOwnership,
 )
-from evaluation.tool_attestation import FileFingerprint, aggregate_fingerprints, canonical_json_bytes
+from evaluation.tool_attestation import FileFingerprint, aggregate_fingerprints, canonical_json_bytes, validate_git_repository
 
-MAX_MATERIALIZATION_BYTES = 16 * 1024 * 1024
-MAX_OWNERSHIP_BYTES = 4096
+MAX_MATERIALIZATION_BYTES: int = 16 * 1024 * 1024
+MAX_OWNERSHIP_BYTES: int = 4096
 _MAX_FILE_BYTES = 8 * 1024 * 1024
 _MAX_TOTAL_BYTES = 512 * 1024 * 1024
+_VERIFIED_BLOBS: dict[tuple[str, tuple[FileFingerprint, ...]], None] = {}
 
 
 def _identity(metadata: os.stat_result) -> tuple[int, int]:
     return metadata.st_dev, metadata.st_ino
+
+
+def _fs_path(path: Path) -> Path:
+    """Use extended paths only at OS boundaries; retain logical root aliases."""
+    if os.name != "nt":
+        return path
+    value = str(path.absolute())
+    if value.startswith("\\\\?\\"):
+        return Path(value)
+    return Path("\\\\?\\UNC\\" + value[2:] if value.startswith("\\\\") else "\\\\?\\" + value)
+
+
+def _delete_owned_path(path: Path, identity: tuple[int, int], *, directory: bool,
+                       reparse: bool = False, parent_descriptor: int | None = None) -> None:
+    """Delete the verified native object; never chmod or delete a replacement."""
+    if os.name == "nt":
+        create = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+        create.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        create.restype = ctypes.c_void_p
+        handle = create(str(_fs_path(path)), 0x10000 | 0x80, 0x7, None, 3, 0x02200000, None)
+        if handle in (None, ctypes.c_void_p(-1).value):
+            raise OSError(ctypes.get_last_error(), "owned deletion handle unavailable")
+        try:
+            information = freeze._ByHandleFileInformation()
+            query = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandle
+            query.argtypes = [ctypes.c_void_p, ctypes.POINTER(freeze._ByHandleFileInformation)]
+            query.restype = ctypes.c_int
+            if not query(handle, ctypes.byref(information)):
+                raise OSError("owned deletion identity unavailable")
+            if (bool(information.file_attributes & 0x10) != directory
+                    or bool(information.file_attributes & 0x400) != reparse
+                    or _native_identity(int(handle)) != identity):
+                raise ValueError("owned deletion identity or type lost")
+            flags = ctypes.c_uint32(0x1 | 0x2 | 0x10)
+            setter = ctypes.WinDLL("kernel32", use_last_error=True).SetFileInformationByHandle
+            setter.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+            setter.restype = ctypes.c_int
+            if not setter(handle, 21, ctypes.byref(flags), ctypes.sizeof(flags)):
+                raise OSError(ctypes.get_last_error(), "owned handle deletion refused")
+        finally:
+            freeze._windows_close_handle(int(handle))
+        return
+    anchor = None
+    if parent_descriptor is None:
+        anchor = _open_anchor(path.parent)
+        parent_descriptor = anchor.descriptor
+    try:
+        if parent_descriptor is None:
+            raise ValueError("owned parent descriptor unavailable")
+        before = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if _identity(before) != identity or stat.S_ISDIR(before.st_mode) != directory:
+            raise ValueError("owned deletion identity lost")
+        # Nothing slow occurs between fstatat and unlinkat/rmdir at this anchor.
+        if directory:
+            os.rmdir(path.name, dir_fd=parent_descriptor)
+        else:
+            os.unlink(path.name, dir_fd=parent_descriptor)
+    finally:
+        if anchor is not None:
+            freeze._close_directory_anchor(anchor)
+
+
+def _windows_readonly(handle: int) -> None:
+    class BasicInfo(ctypes.Structure):
+        _fields_ = [("creation", ctypes.c_int64), ("access", ctypes.c_int64),
+                    ("write", ctypes.c_int64), ("change", ctypes.c_int64), ("attributes", ctypes.c_uint32)]
+    value = BasicInfo()
+    query = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandleEx
+    query.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    query.restype = ctypes.c_int
+    setter = ctypes.WinDLL("kernel32", use_last_error=True).SetFileInformationByHandle
+    setter.argtypes = query.argtypes
+    setter.restype = ctypes.c_int
+    if not query(handle, 0, ctypes.byref(value), ctypes.sizeof(value)):
+        raise OSError("owned attributes unavailable")
+    value.attributes |= 1
+    if not setter(handle, 0, ctypes.byref(value), ctypes.sizeof(value)):
+        raise OSError("owned readonly attributes refused")
+
+
+def _make_directory_readonly(path: Path, anchor: freeze._DirectoryAnchor) -> None:
+    _assert_directory(path, anchor)
+    if anchor.descriptor is not None:
+        os.fchmod(anchor.descriptor, 0o500)
+        return
+    create = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    create.restype = ctypes.c_void_p
+    handle = create(str(_fs_path(path)), 0x80 | 0x100, 0x3, None, 3, 0x02200000, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        raise OSError("owned attribute handle unavailable")
+    try:
+        if _native_identity(int(handle)) != anchor.identity:
+            raise ValueError("owned directory changed before readonly")
+        _windows_readonly(int(handle))
+    finally:
+        freeze._windows_close_handle(int(handle))
 
 
 def _descriptor_stat(descriptor: int) -> os.stat_result:
@@ -67,7 +168,7 @@ def _native_identity(handle: int) -> tuple[int, int]:
 
 
 def _open_anchor(path: Path) -> freeze._DirectoryAnchor:
-    anchor = freeze._open_directory_anchor(path)
+    anchor = freeze._open_directory_anchor(_fs_path(path))
     if anchor.handle is not None:
         anchor.identity = _native_identity(anchor.handle)
     return anchor
@@ -91,12 +192,14 @@ def _directory_identity(path: Path) -> tuple[int, int]:
 def _directory(path: Path) -> Path:
     absolute = path.absolute()
     current = Path(absolute.anchor)
-    blinded_io.validate_directory(current, "root alias")
+    blinded_io.validate_directory(_fs_path(current), "root alias")
     for part in absolute.parts[1:]:
-        if part in {".", ".."}:
+        # On Windows '\\?\' validation sees a literal 'name.' while unprefixed
+        # consumers normalize it to 'name' (possibly a junction): refuse aliases.
+        if part in {".", ".."} or os.name == "nt" and part.endswith((".", " ")):
             raise ValueError("unsafe root alias")
         current /= part
-        blinded_io.validate_directory(current, "root alias")
+        blinded_io.validate_directory(_fs_path(current), "root alias")
     return current
 
 
@@ -105,7 +208,7 @@ def _disjoint(*paths: Path) -> None:
         for right in paths[index + 1:]:
             if left == right or left in right.parents or right in left.parents:
                 raise ValueError("root aliases must be disjoint")
-            if _identity(left.lstat()) == _identity(right.lstat()):
+            if _identity(_fs_path(left).lstat()) == _identity(_fs_path(right).lstat()):
                 raise ValueError("root aliases must be physically distinct")
 
 
@@ -117,7 +220,7 @@ def _file_descriptor(path: Path, *, create: bool = False, writable: bool = False
         create_file.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
         create_file.restype = ctypes.c_void_p
         access = 0x80000000 | (0x40000000 if writable else 0)
-        handle = create_file(str(path), access, 0x3, None, 1 if create else 3, 0x00200000, None)
+        handle = create_file(str(_fs_path(path)), access, 0x3, None, 1 if create else 3, 0x00200000, None)
         if handle in (None, ctypes.c_void_p(-1).value):
             raise OSError(ctypes.get_last_error(), "owned file open failed")
         try:
@@ -133,7 +236,7 @@ def _file_descriptor(path: Path, *, create: bool = False, writable: bool = False
 
 def _assert_file(path: Path, descriptor: int, expected: tuple[int, int]) -> os.stat_result:
     opened = _descriptor_stat(descriptor)
-    named = path.lstat()
+    named = _fs_path(path).lstat()
     if any(not stat.S_ISREG(item.st_mode) or blinded_io.is_reparse(item) or item.st_nlink != 1 or _identity(item) != expected for item in (opened, named)):
         raise ValueError("owned file identity lost")
     return opened
@@ -239,25 +342,26 @@ def _inventory(root: Path) -> tuple[OwnedPathIdentity, ...]:
     values: list[OwnedPathIdentity] = []
     def visit(directory: Path) -> None:
         _directory(directory)
-        with os.scandir(directory) as entries:
+        with os.scandir(_fs_path(directory)) as entries:
             for entry in entries:
-                metadata = Path(entry.path).lstat()
+                child = directory / entry.name
+                metadata = _fs_path(child).lstat()
                 if blinded_io.is_reparse(metadata) or stat.S_ISLNK(metadata.st_mode):
                     raise ValueError("runtime contains a link or reparse")
                 kind = "directory" if stat.S_ISDIR(metadata.st_mode) else "file"
                 if kind == "file" and not stat.S_ISREG(metadata.st_mode):
                     raise ValueError("runtime contains a special file")
-                values.append(OwnedPathIdentity(path=Path(entry.path).relative_to(root).as_posix(), kind=kind, device=metadata.st_dev, inode=metadata.st_ino))
+                values.append(OwnedPathIdentity(path=child.relative_to(root).as_posix(), kind=kind, device=metadata.st_dev, inode=metadata.st_ino))
                 if len(values) > 8192:
                     raise ValueError("runtime inventory exceeds its limit")
                 if kind == "directory":
-                    visit(Path(entry.path))
+                    visit(child)
     visit(root)
     return tuple(sorted(values, key=lambda item: item.path))
 
 
 def _readonly(path: Path, *, directory: bool) -> None:
-    metadata = path.lstat()
+    metadata = _fs_path(path).lstat()
     if os.name == "nt" and directory:
         if not metadata.st_file_attributes & 1:
             raise ValueError("runtime directory permission drift")
@@ -277,9 +381,9 @@ def _verify_tree(root: Path, owned: tuple[OwnedPathIdentity, ...], files: tuple[
         if readonly:
             _readonly(path, directory=item.kind == "directory")
         if item.kind == "file":
-            if path.lstat().st_nlink != 1:
+            if _fs_path(path).lstat().st_nlink != 1:
                 raise ValueError("runtime file has an unowned hardlink alias")
-            size, digest = blinded_io.fingerprint_regular(path, maximum=_MAX_FILE_BYTES)
+            size, digest = blinded_io.fingerprint_regular(_fs_path(path), maximum=_MAX_FILE_BYTES)
             expected = fingerprints.get(item.path)
             if expected is not None and (size, digest) != (expected.size, expected.sha256):
                 raise ValueError("runtime source content drift")
@@ -304,8 +408,15 @@ class _OwnedTree:
             if not anchor.closed and (required is None or relative in required):
                 _assert_directory(self.root / relative, anchor)
         for relative, (descriptor, identity) in self.files.items():
-            if descriptor >= 0 and (target is None or relative == target):
-                _assert_file(self.root / relative, descriptor, identity)
+            if target is None or relative == target:
+                if descriptor >= 0:
+                    _assert_file(self.root / relative, descriptor, identity)
+                else:
+                    current = _file_descriptor(self.root / relative)
+                    try:
+                        _assert_file(self.root / relative, current, identity)
+                    finally:
+                        os.close(current)
 
     def close(self) -> None:
         for relative, (descriptor, identity) in tuple(self.files.items()):
@@ -327,7 +438,7 @@ class _OwnedTree:
             if relative == "." or relative in self.directories:
                 continue
             self.assert_owned(relative)
-            (self.root / relative).mkdir(mode=0o700)
+            _fs_path(self.root / relative).mkdir(mode=0o700)
             self.directories[relative] = _open_anchor(self.root / relative)
         self.assert_owned(expected.path)
         _directory((candidate / expected.path).parent)
@@ -363,15 +474,28 @@ class _OwnedTree:
             self.assert_owned(expected.path)
         finally:
             os.close(source)
+            if descriptor >= 0:
+                os.close(descriptor)
+                if expected.path in self.files:
+                    self.files[expected.path] = (-1, self.files[expected.path][1])
 
     def make_readonly(self) -> None:
         self.assert_owned()
         for relative in self.files:
             self.assert_owned(relative)
-            os.chmod(self.root / relative, stat.S_IREAD)
+            descriptor = _file_descriptor(self.root / relative, writable=os.name == "nt")
+            try:
+                _assert_file(self.root / relative, descriptor, self.files[relative][1])
+                if os.name == "nt":
+                    import msvcrt
+                    _windows_readonly(msvcrt.get_osfhandle(descriptor))
+                else:
+                    os.fchmod(descriptor, 0o400)
+            finally:
+                os.close(descriptor)
         for relative in sorted(self.directories, key=lambda value: value.count("/"), reverse=True):
             self.assert_owned(relative)
-            os.chmod(self.root / relative, stat.S_IREAD | stat.S_IEXEC)
+            _make_directory_readonly(self.root / relative, self.directories[relative])
         self.assert_owned()
 
     def remove(self) -> None:
@@ -383,14 +507,15 @@ class _OwnedTree:
             self.assert_owned(relative)
             descriptor, identity = self.files[relative]
             path = self.root / relative
+            if descriptor < 0:
+                descriptor = _file_descriptor(path)
+                self.files[relative] = (descriptor, identity)
             _assert_file(path, descriptor, identity)
             expected = self.fingerprints.get(relative)
-            size, digest = blinded_io.fingerprint_regular(path, maximum=_MAX_FILE_BYTES)
+            size, digest = blinded_io.fingerprint_regular(_fs_path(path), maximum=_MAX_FILE_BYTES)
             if expected is not None and (size, digest) != (expected.size, expected.sha256):
                 raise ValueError("owned file content changed before removal")
-            if os.name == "nt":
-                os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-            else:
+            if os.name != "nt":
                 parent = relative.rpartition("/")[0]
                 anchor = self.directories[parent]
                 assert anchor.descriptor is not None
@@ -398,36 +523,99 @@ class _OwnedTree:
             _assert_file(path, descriptor, identity)
             os.close(descriptor)
             self.files[relative] = (-1, identity)
-            if _identity(path.lstat()) != identity:
-                raise ValueError("owned file identity lost before unlink")
             parent = relative.rpartition("/")[0]
             parent_anchor = self.directories[parent]
             _assert_directory(path.parent, parent_anchor)
-            if parent_anchor.descriptor is not None:
-                os.unlink(path.name, dir_fd=parent_anchor.descriptor)
-            else:
-                os.unlink(path)
+            _delete_owned_path(path, identity, directory=False, parent_descriptor=parent_anchor.descriptor)
             del self.files[relative]
         for relative in sorted(self.directories, key=lambda value: (value.count("/"), value), reverse=True):
             self.assert_owned(relative)
             path = self.root / relative
             anchor = self.directories[relative]
             _assert_directory(path, anchor)
-            if os.listdir(anchor.descriptor if anchor.descriptor is not None else path):
+            if os.listdir(anchor.descriptor if anchor.descriptor is not None else _fs_path(path)):
                 raise ValueError("owned directory is not empty")
             if relative and os.name != "nt":
                 parent = relative.rpartition("/")[0]
                 parent_anchor = self.directories[parent]
                 assert parent_anchor.descriptor is not None
                 os.fchmod(parent_anchor.descriptor, 0o700)
-            if os.name == "nt":
-                os.chmod(path, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
-                _assert_directory(path, anchor)
             freeze._close_directory_anchor(anchor)
-            if _directory_identity(path) != anchor.identity:
-                raise ValueError("owned directory identity lost before removal")
-            path.rmdir()
+            _delete_owned_path(path, anchor.identity, directory=True)
             del self.directories[relative]
+
+
+def _verify_committed_inventory(candidate: Path, manifest: FreezeManifest) -> None:
+    """Check immutable Git blobs once; every boundary still streams live bytes."""
+    key = (manifest.git_commit, tuple(manifest.files))
+    if key in _VERIFIED_BLOBS:
+        return
+    prefix = ('git', '--no-replace-objects', '-c', 'core.longpaths=true', '-C', str(candidate))
+    with subprocess.Popen((*prefix, 'ls-tree', '-r', '-z', '--full-tree', manifest.git_commit), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as tree:
+        timer = threading.Timer(60, tree.kill)
+        timer.start()
+        try:
+            assert tree.stdout is not None
+            raw = tree.stdout.read(MAX_MATERIALIZATION_BYTES + 1)
+            if len(raw) > MAX_MATERIALIZATION_BYTES or tree.wait(timeout=60) != 0:
+                raise ValueError('candidate Git inventory unavailable')
+        finally:
+            timer.cancel()
+            if tree.poll() is None:
+                tree.kill()
+    entries: dict[str, bytes] = {}
+    tracked = set()
+    for line in raw.split(b'\0'):
+        if not line:
+            continue
+        fields, name = line.split(b'\t', 1)
+        path = name.decode('utf-8', errors='strict')
+        tracked.add(path)
+        if len(tracked) > 8192:
+            raise ValueError('candidate tracked inventory exceeded')
+        if candidate_fingerprints._is_allowlisted(path):
+            mode, kind, oid = fields.split()
+            if mode not in (b'100644', b'100755') or kind != b'blob' or re.fullmatch(rb'[0-9a-f]{40}', oid) is None:
+                raise ValueError('candidate committed source type invalid')
+            entries[path] = oid
+    if not candidate_fingerprints._REQUIRED_FILES <= tracked or tuple(sorted(entries)) != tuple(item.path for item in manifest.files):
+        raise ValueError('candidate committed source inventory mismatch')
+    with subprocess.Popen((*prefix, 'cat-file', '--batch'), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+        timer = threading.Timer(120, process.kill)
+        timer.start()
+        try:
+            assert process.stdin is not None and process.stdout is not None
+            total = 0
+            for expected in manifest.files:
+                process.stdin.write(entries[expected.path] + b'\n')
+                process.stdin.flush()
+                header = process.stdout.readline(128).split()
+                if len(header) != 3 or header[:2] != [entries[expected.path], b'blob'] or not header[2].isdigit():
+                    raise ValueError('candidate blob header invalid')
+                size = int(header[2])
+                total += size
+                if size != expected.size or size > _MAX_FILE_BYTES or total > _MAX_TOTAL_BYTES:
+                    raise ValueError('candidate committed byte limit exceeded')
+                digest = hashlib.sha256()
+                remaining = size
+                while remaining:
+                    chunk = process.stdout.read(min(65536, remaining))
+                    if not chunk:
+                        raise ValueError('candidate blob truncated')
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if process.stdout.read(1) != b'\n' or digest.hexdigest() != expected.sha256:
+                    raise ValueError('candidate committed fingerprint mismatch')
+            process.stdin.close()
+            if process.wait(timeout=10) != 0:
+                raise ValueError('candidate blob reader failed')
+        finally:
+            timer.cancel()
+            if process.poll() is None:
+                process.kill()
+    if len(_VERIFIED_BLOBS) >= 8:
+        _VERIFIED_BLOBS.pop(next(iter(_VERIFIED_BLOBS)))
+    _VERIFIED_BLOBS[key] = None
 
 
 def _freeze_inputs(candidate: Path, frozen: Path) -> tuple[FreezeManifest, str, str]:
@@ -441,9 +629,15 @@ def _freeze_inputs(candidate: Path, frozen: Path) -> tuple[FreezeManifest, str, 
     control = CandidateControl(schema_version=1, git_commit=manifest.git_commit, git_commit_subject=freeze.CANDIDATE_COMMIT_SUBJECT, git_tree_clean=True)
     freeze._candidate_identity(candidate, control)
     snapshot = freeze._snapshot_tree(candidate)
-    files = fingerprint_files(candidate)
+    validate_git_repository(candidate, expected_commit=manifest.git_commit)
+    _verify_committed_inventory(candidate, manifest)
+    files = []
+    for expected in manifest.files:
+        _directory((candidate / expected.path).parent)
+        size, digest = blinded_io.fingerprint_regular(_fs_path(candidate / expected.path), maximum=_MAX_FILE_BYTES)
+        files.append(FileFingerprint(path=expected.path, size=size, sha256=digest))
     if files != manifest.files or aggregate_fingerprints(files) != manifest.aggregate_sha256:
-        raise ValueError("candidate committed source mismatch")
+        raise ValueError("candidate committed bytes mismatch; require exact LF checkout")
     if freeze._snapshot_tree(candidate) != snapshot:
         raise ValueError("candidate snapshot changed during verification")
     return manifest, hashlib.sha256(raw).hexdigest(), snapshot
@@ -459,7 +653,7 @@ def materialize_candidate_runtime(*, candidate_root: Path, freeze_manifest_path:
     _disjoint(candidate, work, evidence, publication)
     marker_path = _marker_path(output)
     for path in (output, marker_path, output.with_name(output.name + ".cleanup.json")):
-        if path.exists() or path.is_symlink():
+        if os.path.lexists(_fs_path(path)):
             raise ValueError("materialization evidence must be new")
     manifest, freeze_digest, snapshot = _freeze_inputs(candidate, freeze_manifest_path.absolute())
     if sum(item.size for item in manifest.files) > _MAX_TOTAL_BYTES:
@@ -473,15 +667,15 @@ def materialize_candidate_runtime(*, candidate_root: Path, freeze_manifest_path:
     root_created = False
     try:
         _assert_directory(work, work_anchor)
-        root.mkdir(mode=0o700)
+        _fs_path(root).mkdir(mode=0o700)
         root_created = True
         tree = _OwnedTree(root)
         with _locked_marker(marker_path, create=True) as descriptor:
-            marker_entered = True
             root_id = tree.directories[""].identity
             marker_id = _identity(_descriptor_stat(descriptor))
             marker = RuntimeOwnership(schema_version=1, runtime_instance_id=instance, runtime_device=root_id[0], runtime_inode=root_id[1], marker_device=marker_id[0], marker_inode=marker_id[1], work_root_alias="work", runtime_root_alias="runtime", materialization_sha256=None, state="building")
             _write_descriptor(descriptor, canonical_json_bytes(marker) + b"\n")
+            marker_entered = True
             digest: str | None = None
             try:
                 def guard() -> None:
@@ -612,14 +806,14 @@ def cleanup_candidate_runtime(*, runtime_root: Path, work_root: Path, materializ
         with _locked_marker(marker_path) as descriptor:
             marker = _bound_marker(marker_path, descriptor, result, expected_materialization_sha256)
             if marker.state == "cleaned":
-                if runtime.exists() or runtime.is_symlink():
+                if os.path.lexists(_fs_path(runtime)):
                     raise ValueError("cleaned runtime has reappeared")
                 _receipt(output, result.runtime_instance_id, expected_materialization_sha256, "completed")
                 return
             try:
                 if marker.state not in {"active", "cleaning"}:
                     raise ValueError("runtime ownership cannot be cleaned")
-                if marker.state == "cleaning" and not runtime.exists() and not runtime.is_symlink():
+                if marker.state == "cleaning" and not os.path.lexists(_fs_path(runtime)):
                     _assert_directory(work, work_anchor)
                     _assert_directory(evidence, evidence_anchor)
                     _marker_update(marker_path, descriptor, marker, state="cleaned", digest=expected_materialization_sha256)
@@ -639,8 +833,11 @@ def cleanup_candidate_runtime(*, runtime_root: Path, work_root: Path, materializ
                             raise ValueError("owned directory changed before cleanup")
                     else:
                         file_descriptor = _file_descriptor(path)
-                        tree.files[item.path] = (file_descriptor, (item.device, item.inode))
-                        _assert_file(path, file_descriptor, (item.device, item.inode))
+                        try:
+                            _assert_file(path, file_descriptor, (item.device, item.inode))
+                        finally:
+                            os.close(file_descriptor)
+                        tree.files[item.path] = (-1, (item.device, item.inode))
                 tree.fingerprints = {item.path: item for item in result.files if item.path in tree.files}
                 def guard() -> None:
                     _assert_directory(work, work_anchor)

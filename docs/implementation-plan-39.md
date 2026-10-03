@@ -1,5 +1,12 @@
 # D39 Exact-Candidate Verification Implementation Plan
 
+> 2026-10-02 follow-up: D39 code and review corrections are implemented on
+> `codex/d39-review-fixes`. Consult `docs/plan-c/work-report-39.md` for the per-finding
+> status and measured verification results; the historical task checklist below is
+> the original implementation plan, not operational acceptance. The dated DTD
+> amendments govern shared schemas and new evidence. The user authorized
+> 16 GiB for both development and D39 operations. D35 remains Not ready.
+
 > Implementation checkpoint: Tasks 1/2 are independently source-approved. Task 3 source and 34 focused checks are implemented, but review and fresh/browser/full-unit gates are blocked or pending. The original design-audit commands below are not evidence that they ran. `specification.md` records current results; unchecked acceptance items remain obligations. Use canonical `docs/DTD.md` and never waive a failed prerequisite.
 
 **Goal:** Verify immutable D35 `522775516c0797abdb313e3432339a3a444b7ae2` through external tooling, with installation, regression, migration/restore, both-mode, browser/media, automated documentation and secret-scan evidence. No release approval is inferred.
@@ -13,14 +20,14 @@
 - D38 and shared strict parser/host/index prerequisites precede this unit. D39 imports pure shared evidence/smoke contracts, never forks D37 result/protocol models or calls private evaluation.
 - Fresh extras install, native launcher/esbuild availability and browser protocol/ownership roundtrip are pending. D37 already proved exact-D35 synthetic index/worker behavior; it is not D39 fresh-sandbox or new-budget acceptance. Pinned README advertises Python 3.13+/Node 20+ rather than the audited lane: the mandatory documentation check has a known blocker. No candidate edit, stack substitution or silent gate waiver is authorized; a successor candidate or explicit policy revision requires separate user scope. Absent runtime support fails rather than silently skipping or downloading weights.
 - Candidate/runtime contain no venv, node_modules, caches, build output, database, media, profile, logs or evidence. All writable state is group-local outside both roots. No candidate source/config/lock mutation, real data or cloud spend.
-- Hard aggregate project RAM <=4 GiB, target <=3 GiB; start no nontrivial job at >=3.5 GiB. Include agent runtime and all owned descendants; sample before/during checks and reserve headroom. One execution group/command at a time, one test/build worker and one NumPy/ONNX thread. Use bounded reads/output; stop only owned work before the cap. Earlier larger-budget gates do not establish 4 GiB compliance.
+- Hard aggregate project RAM <=16 GiB, target <=12 GiB; start no nontrivial job at >=14 GiB. Include agent runtime and all owned descendants; sample before/during checks and reserve headroom. One execution group/command at a time, one test/build worker and one NumPy/ONNX thread. Use bounded reads/output; stop only owned work before the cap. Earlier larger-budget gates do not establish current-budget compliance.
 - Preserve published evidence. A candidate behavior defect requires a new candidate and D36 boundary; a tooling-only correction requires a new source attestation and new evidence/run ID. Final evaluation waits for the final committed tooling closure.
-- This unit cannot tag, push a release, publish, deploy or decide readiness. Future tooling delivery follows the repository workflow; this audit specifically does not push.
+- This unit cannot tag, push a release, publish, deploy or decide readiness. Future tooling delivery follows the repository workflow; the original design audit did not push. The 2026-10-02 review-correction task explicitly authorizes committing and pushing its tooling branch.
 
 The DTD's D39 implementation-precision section fixes RuntimeMaterialization,
 ownership/cleanup fields and in-place marker lifecycle, per-child identities,
 OwnedProcessScope/run_owned_command/long-lived child APIs, role/alias/version maps,
-4 GiB group accounting, failed summary/null semantics and four bounded scan rules.
+16 GiB group accounting, failed summary/null semantics and four bounded scan rules.
 Implement those contracts verbatim; no identity-blind cleanup or guessed fields.
 D40's shared canonical typed-array API belongs to evidence_json, preserving its
 existing model parser; compact gate families evaluate every category without

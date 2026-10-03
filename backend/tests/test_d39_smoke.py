@@ -38,7 +38,7 @@ def _api(module: str) -> Any:
 def test_browser_documentation_schema_requires_six_individual_raw_checks() -> None:
     with pytest.raises(ValidationError):
         BrowserSummary.model_validate(_browser(documentation_checks=True))
-    assert BrowserSummary.model_validate(_browser()).documentation_checks == dict.fromkeys(DOC_KEYS, True)
+    assert BrowserSummary.model_validate(_browser()).documentation_checks.model_dump() == dict.fromkeys(DOC_KEYS, True)
 
 
 @pytest.mark.parametrize('drift', ['missing', 'extra', 'int', 'false'])
@@ -161,8 +161,8 @@ def _child(pinned_source: Path, group: Path, action: str, *, provider_url: str =
     summary = group / (action + '.summary.json')
     config = dict(group_root=str(group), source_root=str(pinned_source), storage=str(storage or group / 'storage'),
                   frontend=str(frontend), profile=str(profile), index=str(group / 'index'),
-                  provider_url=provider_url, model='synthetic-d39-chat', port=18761, summary_path=str(summary),
-                  scenario='normal', owner_token='a' * 64, **{role: str(Path(found).resolve(strict=True)) if (found := shutil.which(role)) else None for role in ('ffmpeg', 'ffprobe')})
+                  provider_url=provider_url, model='synthetic-d39-chat', port=producer._port(), summary_path=str(summary),
+                  scenario='stateful' if action == 'stateful_startup' else 'normal', owner_token='a' * 64, **{role: str(Path(found).resolve(strict=True)) if (found := shutil.which(role)) else None for role in ('ffmpeg', 'ffprobe')})
     # Source is a verified archive alongside the state root; the real production
     # sandbox contains both. Use its common parent as the owned root in this test.
     config['group_root'] = str(group.parent)
@@ -174,8 +174,37 @@ def _child(pinned_source: Path, group: Path, action: str, *, provider_url: str =
     output = group / (action + '.out')
     error = group / (action + '.err')
     with output.open('wb') as stdout, error.open('wb') as stderr:
-        result = subprocess.run([sys.executable, '-B', '-c', producer._BOOTSTRAP, str(script), '--action', action, '--configuration', str(path)],
-                                cwd=pinned_source / 'backend', env=env, stdout=stdout, stderr=stderr, timeout=120)
+        server = None
+        try:
+            if action.endswith('_startup') or action == 'seed_browser':
+                import httpx
+                import time
+                serve_path = group / (action + '.serve.json')
+                serve_path.write_bytes(canonical_json_bytes(config | {'summary_path': str(group / (action + '.counter.json'))}) + b'\n')
+                server = subprocess.Popen([sys.executable, '-B', '-c', producer._BOOTSTRAP, str(script), '--action', 'serve', '--configuration', str(serve_path)],
+                                          cwd=pinned_source / 'backend', env=env, stdout=stdout, stderr=stderr)
+                with httpx.Client(trust_env=False, timeout=2) as client:
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        assert server.poll() is None, error.read_bytes().decode(errors='replace')
+                        try:
+                            response = client.get(f"http://127.0.0.1:{config['port']}/__d39-owned")
+                            if response.status_code == 200 and response.json() == {'owner': config['owner_token']}:
+                                break
+                        except httpx.HTTPError:
+                            pass
+                        time.sleep(0.05)
+                    else:
+                        pytest.fail('pinned owned server readiness deadline exceeded')
+            bootstrap = producer._BOOTSTRAP
+            if action == 'seed_browser':
+                bootstrap = "import runpy,sys; from pathlib import Path; m=runpy.run_path(sys.argv[1]); c=m['read_configuration'](Path(sys.argv[-1])); Path(c['summary_path']).write_bytes(m['_canonical'](m['_seed_browser'](c)))"
+            result = subprocess.run([sys.executable, '-B', '-c', bootstrap, str(script), '--action', action, '--configuration', str(path)],
+                                    cwd=pinned_source / 'backend', env=env, stdout=stdout, stderr=stderr, timeout=120)
+        finally:
+            if server is not None:
+                server.terminate()
+                server.wait(timeout=10)
     assert result.returncode == 0, error.read_bytes()[:8192].decode('utf-8', errors='replace')
     return json.loads(summary.read_bytes())
 
@@ -209,6 +238,25 @@ def test_pinned_candidate_index_and_both_startup_modes_use_fake_loopback_provide
         assert counts == {'chat': 2, 'embedding': 1}
 
 
+def test_pinned_candidate_owned_serve_and_seed_register_all_models(pinned_source: Path) -> None:
+    group = pinned_source.parent / 'seed-group'
+    group.mkdir()
+    producer = _api('evaluation.scripts.d39_smoke')
+    with producer.fake_providers() as (url, _):
+        result = _child(pinned_source, group, 'seed_browser', provider_url=url)
+    assert set(result) == {'waiting', 'safe_retry', 'safe_retry_wide', 'unknown_remote'}
+    assert len(set(result.values())) == 4
+
+
+def test_pinned_d35_tracked_credential_literals_still_fail_secret_scan(pinned_source: Path) -> None:
+    from evaluation import release_verification as verification
+    from tests.d37_pinned_support import PINNED_D35
+    raw = subprocess.check_output(['git', '-C', str(Path(__file__).parents[2]), 'ls-tree', '-r', '-z', '--name-only', PINNED_D35])
+    paths = tuple(path.decode('utf-8') for path in raw.split(b'\0') if path)
+    counts = verification.scan_public_files(pinned_source, paths, ())
+    assert counts['credential_token'] > 0
+
+
 @pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='native pinned-candidate media requires installed FFmpeg/ffprobe; no downloads')
 def test_pinned_candidate_fake_provider_generation_has_real_bound_media_and_probe(pinned_source: Path) -> None:
     group = pinned_source.parent / 'media-group'
@@ -233,7 +281,21 @@ def test_administrative_server_stop_does_not_poison_reusable_scope_but_exit_fail
         child = runtime.OwnedProcess(scope, deadline_seconds=30)
         class Process:
             returncode = prior_exit
+        terminal = ('exited', prior_exit, False) if prior_exit is not None else ('running', None, False)
+        class Stdin:
+            def is_closing(self) -> bool:
+                return False
+            def write(self, raw: bytes) -> None:
+                nonlocal terminal
+                assert raw == b'2'
+                if prior_exit is None:
+                    terminal = ('exited', -9, True)
+            async def drain(self) -> None:
+                pass
         child._process = Process()
+        child._process.stdin = Stdin()
+        child._observation = lambda: terminal
+        child._readers = tuple(asyncio.create_task(asyncio.sleep(0)) for _ in range(2))
         async def terminate() -> None:
             if child._process.returncode is None:
                 child._process.returncode = -9
@@ -256,7 +318,19 @@ def test_administrative_stop_preserves_late_guard_failures(failure: str) -> None
         child = runtime.OwnedProcess(scope, deadline_seconds=30)
         class Process:
             returncode = None
+        terminal = ('running', None, False)
+        class Stdin:
+            def is_closing(self) -> bool:
+                return False
+            def write(self, raw: bytes) -> None:
+                nonlocal terminal
+                terminal = ('exited', -9, True)
+            async def drain(self) -> None:
+                pass
         child._process = Process()
+        child._process.stdin = Stdin()
+        child._observation = lambda: terminal
+        child._readers = tuple(asyncio.create_task(asyncio.sleep(0)) for _ in range(2))
         calls = 0
         async def terminate() -> None:
             nonlocal calls
@@ -295,9 +369,11 @@ def test_observed_nonzero_probe_emits_failed_receipt_instead_of_fabricated_pass(
 
 def test_frozen_readme_documentation_gate_is_failed_not_waived(pinned_source: Path) -> None:
     producer = _api('evaluation.scripts.d39_smoke')
-    checks = producer.documentation_checks(pinned_source, contracts_passed=True)
-    assert set(checks) == set(DOC_KEYS)
-    assert checks['locked_versions'] is False
+    inventory = frozenset(path.relative_to(pinned_source).as_posix() for path in pinned_source.rglob('*') if path.is_file())
+    checks = producer.documentation_checks(pinned_source, contracts_passed=True, inventory=inventory)
+    # Full frozen tree: only the README prerequisite mismatch fails; the stricter
+    # fail-closed link, coverage and limitation parsing accept D35's real text.
+    assert checks == dict.fromkeys(DOC_KEYS, True) | {'locked_versions': False}
 
 
 @pytest.mark.parametrize('mutated', [False, True])
@@ -347,7 +423,7 @@ def test_owned_health_requires_listener_nonce_before_trusting_health(matching: b
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        probe = producer._http_health(server.server_port, owner_token='a' * 64, child=SimpleNamespace(outcome=None, pid=123), deadline=time.monotonic() + 0.3)
+        probe = producer._http_health(server.server_port, owner_token='a' * 64, child=SimpleNamespace(is_running=lambda: True), deadline=time.monotonic() + 2)
         if matching:
             asyncio.run(probe)
             assert visits == ['/__d39-owned', '/api/health']
@@ -429,6 +505,12 @@ def test_synthetic_smoke_driver_failure_keeps_actual_prefix_and_cleans_only_grou
     monkeypatch.setattr(verification, '_probe', probe)
     monkeypatch.setattr(producer, '_candidate_action', action)
     monkeypatch.setattr(producer, 'fake_providers', provider)
+    # Host symlink privilege is a separate documented prerequisite (own test).
+    monkeypatch.setattr(producer, '_symlink_prerequisite', lambda root: None)
+    shared_preflight: list[Path] = []
+    async def frontend_preflight(scope: Any, group: Any, tools: Any, env: Any) -> None:
+        shared_preflight.append(group.root)
+    monkeypatch.setattr(verification, '_frontend_preflight', frontend_preflight)
     output = tools_repo / 'evidence/smoke'
     try:
         with pytest.raises(ValueError, match='no complete smoke evidence'):
@@ -436,6 +518,8 @@ def test_synthetic_smoke_driver_failure_keeps_actual_prefix_and_cleans_only_grou
                                          materialization_path=publication[3], expected_materialization_sha256=digest,
                                          work_root=publication[2], output_dir=output)
         assert closed == [True]
+        # The smoke's own frontend group runs the shared local-pnpm guard (M9).
+        assert shared_preflight == groups
         assert groups and not any(path.exists() for path in groups)
         assert runtime.exists() and list(publication[2].iterdir()) == [runtime]
         assert not (output / 'smoke-manifest.json').exists()

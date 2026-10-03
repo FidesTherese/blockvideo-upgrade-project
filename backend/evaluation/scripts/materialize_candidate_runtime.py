@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 from typing import Sequence
 
@@ -42,7 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = materialize_candidate_runtime(candidate_root=arguments.candidate_root, freeze_manifest_path=arguments.freeze_manifest, work_root=arguments.work_root, output_path=arguments.output)
             print("materialized " + result.runtime_instance_id)
         return 0
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         print("materialization rejected")
         return 2
 
