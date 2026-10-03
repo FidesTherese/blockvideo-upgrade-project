@@ -196,3 +196,22 @@ evidence. No D40 finding was raised.
 | Documentation file + frozen-D35 test | 123 passed; frozen D35 README still parses 32 links |
 | All D39 files + D40 file | 514 passed, 3 skipped (POSIX-only) in 559 s, including the native Chrome tests |
 | Backend Ruff / frontend test, build, lint | All checks passed / 157 passed, passed, passed |
+
+### Review outcome (GPT-6.1 Sol, 2026-10-03)
+
+The confirmation of `3e572a8` returned **Approve with conditions** with no new
+finding: R-11 and R-12 resolved; the link extraction and its seven regular
+expressions match `ec23739` exactly; the R-09 fix and the teardown implementation
+are unchanged; the frozen D35 documentation results are unchanged (full tree: only
+`locked_versions` fails; allowlist: `setup_paths` and `locked_versions` fail; 32
+README links in both).
+
+Condition (accepted, to be kept in operation): the README scan does not exclude
+code, so a missing target shown as code (an indented `[setup]: docs/missing.md`, a
+fenced `[bad](docs/missing.md)`, or the same link in a multi-line code span) fails
+`setup_paths`; examples pointing at existing files pass. This is the documented
+fail-closed over-rejection in `docs/DTD.md`, not a waiver.
+
+This approval covers the reviewed tooling only. Real D36/D37/D38/D39 evidence,
+human-operation and independent-review records, the pinned Python 3.12.12 lane and
+the open native Chrome cold-start item remain pending; readiness is **Not ready**.

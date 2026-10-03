@@ -24,8 +24,9 @@ Read `D40 implementation amendments (2026-10-03)` in `docs/DTD.md` and
   including the D39 ones because D39 was already merged; see the "Independent
   review corrections" sections of `work-report-39.md` and `work-report-40.md`. The
   follow-up review of those corrections raised R-01 to R-06, and its confirmation
-  raised R-07 and R-08 (documentation parsing); all are fixed. A final confirmation
-  is still pending before PR #2 is merged.
+  raised R-07 to R-13 (documentation parsing); all are fixed. The final GPT-6.1 Sol
+  confirmation of `3e572a8` returned Approve with conditions: keep the documented
+  fail-closed over-rejection of missing targets shown as code in README examples.
 - Open, environment-dependent: after a cold Chrome start slower than 15 s the native
   CDP test can report `teardown_failed` (fail-closed). It passes on warm starts. The
   reviewer's hypothesis (gate exit record later than the stop wait while the tree is
