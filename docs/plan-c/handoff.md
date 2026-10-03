@@ -30,8 +30,11 @@ Read `D40 implementation amendments (2026-10-03)` in `docs/DTD.md` and
 - Open, environment-dependent: after a cold Chrome start slower than 15 s the native
   CDP test can report `teardown_failed` (fail-closed). It passes on warm starts. The
   reviewer's hypothesis (gate exit record later than the stop wait while the tree is
-  confirmed gone) is reproduced synthetically; the error now names the failing step
-  in `teardown_details`, so the next real occurrence shows whether it is this path.
+  confirmed gone) is reproduced synthetically. The pre-merge full run hit the flake
+  and the diagnostics showed a different path: process-tree termination itself was
+  unconfirmed. The detail now names the sub-step (Job active count, gate process
+  wait, session, pipe drain) and the remaining budget; investigate with it.
+  The test now waits 180 s for a cold Chrome start (production still 30 s).
 
 ## D39 second review correction handoff — 2026-10-03
 

@@ -215,3 +215,27 @@ fail-closed over-rejection in `docs/DTD.md`, not a waiver.
 This approval covers the reviewed tooling only. Real D36/D37/D38/D39 evidence,
 human-operation and independent-review records, the pinned Python 3.12.12 lane and
 the open native Chrome cold-start item remain pending; readiness is **Not ready**.
+
+### Pre-merge full verification (2026-10-03)
+
+| Run | Result |
+|---|---|
+| Full backend suite on clean `2ec9c0f` (Node 24.11.1 first on PATH) | 2522 passed, 1 failed, 26 skipped, 1 warning in 1913 s; aggregate peak 4166.9 MiB (host-wide claude/python/node/git/uv) |
+| Failure | Native `test_real_owned_chrome_tab_enter_and_version`: Chrome startup exceeded the 15 s discovery deadline, then the scope reported `teardown_failed (child stop raised ValueError; child: process tree termination unconfirmed)` |
+| Teardown diagnostics refined (no outcome change): the detail now names the sub-step (Job termination with the active count, gate process wait, session confirmation, pipe drain) and the budget left | D37 runner + all D39 files: 668 passed, 14 skipped in 745 s |
+
+The real occurrence was **not** the gate-record path reproduced by the reviewer:
+process-tree termination itself was not confirmed within the shared budget. The
+Job does not permit breakaway, so the unconfirmed step is one of Job emptiness, the
+gate process wait or the pipe drain; the next occurrence will name it. The outcome
+is fail-closed (no false pass) and this remains an open, environment-dependent item.
+The 26 skips are symlink-permission, POSIX/Linux-only and Windows
+no-delete-anchor cases and are not counted as passed.
+
+Follow-up on the user's request: the native Chrome test now waits up to 180 s
+(was 15 s) for the DevTools endpoint and allows the owned Chrome process 240 s (was
+30 s), so a slow cold start no longer fails the test by itself. Production is
+unchanged (30 s discovery inside the 180 s browser command); extending it would be
+a contract change, to be revisited only if the slow start appears in a real smoke
+run. The teardown-confirmation issue after a failed start remains open. The
+observation file passed 3 of 3 runs after the change (7 tests each, 10-22 s).

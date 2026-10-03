@@ -1096,7 +1096,7 @@ async def _terminate_job_confirmed(handle: int, *, deadline: float | None = None
         if information.active == 0:
             return
         if time.monotonic() >= until:
-            raise ValueError("owned Job descendant teardown_failed")
+            raise ValueError(f"owned Job descendant teardown_failed (active={information.active})")
         await asyncio.sleep(0.02)
 
 
@@ -1212,6 +1212,7 @@ class OwnedProcess:
                 deadline = min(deadline, self.scope._teardown_deadline)
             confirmed = True
             process = self._process
+            step = "Job termination"
             try:
                 if self._job is not None:
                     await _terminate_job_confirmed(self._job, deadline=deadline)
@@ -1220,14 +1221,20 @@ class OwnedProcess:
                 elif process is not None and process.returncode is None:
                     process.kill()
                 if process is not None:
+                    step = "gate process wait"
                     await asyncio.wait_for(process.wait(), timeout=max(0.01, deadline - time.monotonic()))
                 if os.name == "posix" and process is not None:
+                    step = "session confirmation"
                     await _confirm_session_gone(process.pid, deadline)
                     self.scope._sessions.discard(process.pid)
                 if self._readers:
+                    step = "pipe drain"
                     await asyncio.wait_for(asyncio.gather(*self._readers), timeout=max(0.01, deadline - time.monotonic()))
             except BaseException as error:
                 confirmed = False
+                # Diagnostic only: which step could not be confirmed, with the budget left.
+                left = round(deadline - time.monotonic(), 2)
+                self.teardown_detail = f"process tree termination unconfirmed at {step}: {error or type(error).__name__} (budget left {left}s)"
                 for task in self._readers:
                     task.cancel()
                 await asyncio.gather(*self._readers, return_exceptions=True)
