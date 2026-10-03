@@ -168,3 +168,17 @@ in `work-report-39.md`). No new D40 finding was raised.
 | Documentation file + frozen-D35 test + stop-race test | 103 passed |
 | All D39 files + D40 file | 489 passed, 1 failed, 3 skipped (POSIX-only) in 479 s. The failure is the native `test_real_owned_chrome_tab_enter_and_version`: a cold Chrome start exceeded its 15 s discovery deadline and teardown was then reported unconfirmed (fail-closed). The file passed 3 of 3 reruns (7 tests each); closing a scope during Chrome startup was confirmed cleanly in 7 of 7 forced cases; the slow-start teardown has not been reproduced and remains an open environment-dependent item |
 | Backend Ruff / frontend test, build, lint | All checks passed / 157 passed, passed, passed |
+
+### Fourth review round (Astra, 2026-10-03)
+
+The confirmation of `ec23739` raised R-09 and R-10 (D39 documentation checks,
+recorded in `work-report-39.md`) and no D40 finding; the stop-race test change was
+judged not to weaken its intent.
+
+| Run | Result |
+|---|---|
+| Reversion check: R-09 token check, R-10 indented code / fences / code spans / list continuation, teardown diagnostic | 6 of 6 detected |
+| Documentation file + frozen-D35 test | 115 passed (before the inline-in-indented-code case was added) |
+| Frozen D35 README | still 32 links parsed; full-tree result unchanged (only `locked_versions` fails) |
+| D37 runner + all D39 files + D40 file | 727 passed, 14 skipped (symlink-permission and POSIX-only) in 706 s, including the native Chrome tests |
+| Backend Ruff / frontend test, build, lint | All checks passed / 157 passed, passed, passed |

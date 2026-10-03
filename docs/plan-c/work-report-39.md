@@ -302,3 +302,20 @@ was a test-precondition race: the test waited for a marker file written *before*
 the target exits, so under load the stop could arrive while the target was still
 alive and correctly kill it. The test now waits for the gate's own `exited` record,
 which is the precondition its comment states; runtime behaviour is unchanged.
+
+### Fourth review round (Astra, 2026-10-03)
+
+The confirmation of `ec23739` resolved R-07, judged R-08 partial and raised:
+
+| ID | Gap | Fix | Regression |
+|---|---|---|---|
+| R-09 (Medium, introduced by the R-08 fix) | `re.ASCII` cut a README token such as `Node.js 24.11.\u0669` to `24.11`, which then matched | The whole token after the tool name is taken with Unicode digits and must be ASCII and fully match the version pattern; Japanese text directly after a version still works | `test_readme_version_tokens_are_never_cut_short` |
+| R-10 (Low, introduced by the R-07 fix) | An indented code example `    [setup]: docs/missing.md` was treated as a definition | A CommonMark-aware scan removes container markers, de-indents list continuation (also inside quotes and nested lists) and blanks fenced/indented code and code spans | `test_code_examples_are_not_links_but_container_definitions_are` (code examples allowed; quoted and nested list definitions still checked) |
+
+The reviewer's hypothesis for the open native Chrome item was reproduced: when the
+gate's exit record is delayed beyond the stop wait, the process tree is confirmed
+gone but the outcome is `teardown_failed`, because an administrative stop without
+the gate's record has no truthful exit status. The outcome stays fail-closed; the
+scope now names the failing step (`teardown_details`, also in the error), pinned by
+`test_late_gate_exit_record_names_the_failed_teardown_step`. Whether the real
+cold-start failure is this path remains to be confirmed by its next occurrence.

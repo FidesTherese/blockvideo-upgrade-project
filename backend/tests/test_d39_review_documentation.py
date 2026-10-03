@@ -138,6 +138,18 @@ def test_locked_versions_with_non_ascii_digits_are_refused(documented: Path) -> 
     assert checks(documented)['locked_versions'] is False
 
 
+@pytest.mark.parametrize(('old', 'new', 'accepted'), [
+    ('Node.js 24.11.1', 'Node.js 24.11.\u0669', False), ('Node.js 24.11.1', 'Node.js 24.\u0661', False),
+    ('Python 3.12.12', 'Python 3.12.1\u0662', False), ('pnpm 10.18.3', 'pnpm 10.18.\u0663', False),
+    ('Python 3.12.12', 'Python 3.12.12rc1', False), ('Node.js 24.11.1', 'Node.js 24.11.1\u4ee5\u4e0a', True),
+    ('Node.js 24.11.1', 'Node.js 24', True), ('Python 3.12.12', 'Python 3.12+', True),
+])
+def test_readme_version_tokens_are_never_cut_short(documented: Path, old: str, new: str, accepted: bool) -> None:
+    readme = documented / 'README.md'
+    readme.write_text(readme.read_text(encoding='utf-8').replace(old, new), encoding='utf-8')
+    assert checks(documented)['locked_versions'] is accepted
+
+
 def test_optional_manifest_fields_may_be_absent(documented: Path) -> None:
     package = documented / 'frontend/package.json'
     data = json.loads(package.read_text(encoding='utf-8'))
@@ -198,6 +210,22 @@ def test_reference_definitions_inside_containers_are_checked(documented: Path, c
     readme = documented / 'README.md'
     body = '[guide][setup]\n\n- item\n\n' if container == '    ' else '[guide][setup]\n\n'
     readme.write_text(readme.read_text(encoding='utf-8') + body + f'{container}[setup]: {destination}\n', encoding='utf-8')
+    assert checks(documented)['setup_paths'] is accepted
+
+
+@pytest.mark.parametrize(('body', 'accepted'), [
+    ('Intro text.\n\n    [setup]: docs/missing.md\n', True),
+    ('Intro text.\n\n    [x](docs/missing.md)\n', True),
+    ('[guide][setup]\n\n[setup]: docs/missing.md\n', False),
+    ('```\n[setup]: docs/missing.md\n[x](docs/missing.md)\n```\n', True),
+    ('Use `[x](docs/missing.md)` as an example.\n', True),
+    ('- a\n\n        [setup]: docs/missing.md\n', True),
+    ('> - a\n>\n>     [setup]: docs/missing.md\n', False),
+    ('- a\n  - b\n\n      [setup]: docs/missing.md\n', False),
+])
+def test_code_examples_are_not_links_but_container_definitions_are(documented: Path, body: str, accepted: bool) -> None:
+    readme = documented / 'README.md'
+    readme.write_text(readme.read_text(encoding='utf-8') + body, encoding='utf-8')
     assert checks(documented)['setup_paths'] is accepted
 
 

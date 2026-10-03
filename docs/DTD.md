@@ -2233,6 +2233,9 @@ pin, cap or threshold.
   Scope close stops all children concurrently, and inside close each gate wait
   leaves at least half of the remaining shared budget for confirmed Job/session
   termination (a browser tree holds the gate pipes until every process is gone).
+  A `teardown_failed` scope names the failing step in its error and in
+  `teardown_details` (for example `gate exit record missing (state=running,
+  tree_confirmed=True)`); this is diagnostic only and changes no outcome.
 - **Browser observations:** POST counters are read after a 1 s quiet period; the
   server serializes counter publications and each writes the latest count, so a
   retried replacement never moves the counter backwards. The
@@ -2247,7 +2250,9 @@ pin, cap or threshold.
   bounds); unknown syntax fails closed. Every `||` alternative is parsed before any
   is evaluated, numeric identifiers reject leading zeros, comparators must be
   whitespace-separated, numeric identifiers and the checked version use ASCII
-  digits only (Unicode digits such as U+0664 are refused, as npm does), build
+  digits only (Unicode digits such as U+0664 are refused, as npm does; a README
+  version statement is the whole token after the tool name and must fully match an
+  ASCII version, so it is never cut short), build
   metadata consists of non-empty dot-separated identifiers, and a hyphen upper bound with a prerelease excludes that release
   (`0 - 24.11.1-rc.1` rejects 24.11.1). Cross-checked against npm's semver 7.7.3 on
   3120 cases; the only differences are rejections of nonstandard spacing such as
@@ -2261,10 +2266,11 @@ pin, cap or threshold.
   key, and so does any reference-definition label without a parsed destination
   (labels may span lines and contain backslash escapes, and a destination on the
   following line is parsed, as CommonMark allows; a label crossing a blank line is
-  refused). Block-quote and list-item markers are stripped per line before
-  definitions are found, and definitions are recognized at any indentation, so a
-  definition inside `>`, `-`, `1.` or nested containers is checked; detection inside
-  code blocks only over-detects and fails closed). Coverage keys also require the committed D34/D35 tests to reference
+  refused). Links and definitions are found in the README as CommonMark renders
+  it: block-quote and list-item markers are removed, list-item continuation is
+  de-indented (also inside quotes and nested lists), and fenced code blocks, indented
+  code blocks and code spans are blanked. A definition inside `>`, `-`, `1.` or
+  nested containers is checked; a link or definition shown as code is not a link). Coverage keys also require the committed D34/D35 tests to reference
   live-lease rejection, backup restore and the three recovery codes as exact
   names, attributes or non-docstring string constants inside `test*` functions or
   their decorators (comments, docstrings, function names and module-level values do

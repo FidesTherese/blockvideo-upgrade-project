@@ -951,6 +951,7 @@ class OwnedProcessScope:
         self.committed_memory_limit: int = 0
         self.peak_aggregate_resident: int = 0
         self.teardown_confirmed: bool = False
+        self.teardown_details: tuple[str, ...] = ()
 
     async def _sample(self) -> tuple[int, int]:
         if self._sampler is None:
@@ -1048,6 +1049,7 @@ class OwnedProcessScope:
             await asyncio.gather(self._monitor, return_exceptions=True)
         self._stop_sampler()
         confirmed = True
+        details: list[str] = []
         children = tuple(self._children)
         # Stop children concurrently so they share, rather than serially exhaust,
         # the one confirmed teardown budget. Any stop failure is unconfirmed.
@@ -1055,14 +1057,17 @@ class OwnedProcessScope:
         for child, result in zip(children, results, strict=True):
             if isinstance(result, BaseException):
                 confirmed = False
+                details.append("child stop raised " + type(result).__name__)
             if child.outcome is not None and child.outcome.outcome == "teardown_failed":
                 confirmed = False
+                details.append("child: " + (child.teardown_detail or "teardown_failed"))
         if self._job is not None:
             try:
                 self._sample_job_peak()
                 await _terminate_job_confirmed(self._job, deadline=self._teardown_deadline)
             except (OSError, ValueError):
                 confirmed = False
+                details.append("scope Job termination unconfirmed")
             finally:
                 _windows_close_handle(self._job)
                 self._job = None
@@ -1072,10 +1077,12 @@ class OwnedProcessScope:
                     await _confirm_session_gone(session, self._teardown_deadline)
                 except (OSError, ValueError):
                     confirmed = False
+                    details.append("session teardown unconfirmed")
         self.teardown_confirmed = confirmed
+        self.teardown_details = tuple(details)
         self._closed = True
         if not confirmed:
-            raise ValueError("owned scope teardown_failed")
+            raise ValueError("owned scope teardown_failed (" + "; ".join(details or ["unconfirmed"]) + ")")
 
 
 async def _terminate_job_confirmed(handle: int, *, deadline: float | None = None) -> None:
@@ -1134,6 +1141,8 @@ class OwnedProcess:
         self._terminate_lock = asyncio.Lock()
         self._terminated = False
         self._tree_confirmed = False
+        # Diagnostic only (never evidence): why this child ended teardown_failed.
+        self.teardown_detail: str | None = None
 
     def _observation(self) -> tuple[str, int | None, bool]:
         if self._control_path is None:
@@ -1268,6 +1277,7 @@ class OwnedProcess:
                 break
             if any(task.done() and task.exception() is not None for task in self._readers):
                 reason = "teardown_failed"
+                self.teardown_detail = "pipe reader failed"
                 break
             await asyncio.sleep(0.02)
         try:
@@ -1275,6 +1285,7 @@ class OwnedProcess:
             await self._terminate()
         except (OSError, ValueError):
             reason = "teardown_failed"
+            self.teardown_detail = self.teardown_detail or "process tree termination unconfirmed"
         latched = (reason, self._stop_reason)
         if "teardown_failed" in latched:
             reason = "teardown_failed"
@@ -1290,6 +1301,9 @@ class OwnedProcess:
         self._administrative_stop = stopped and not self.scope._failed
         if reason == "completed" and state != "exited":
             reason = "launch_failed" if state == "launch_failed" else "teardown_failed"
+            if reason == "teardown_failed":
+                self.teardown_detail = self.teardown_detail or (
+                    f"gate exit record missing (state={state}, tree_confirmed={self._tree_confirmed})")
         if reason != "completed" or (code != 0 and not self._administrative_stop):
             self.scope._failed = True
             for child in self.scope._children:

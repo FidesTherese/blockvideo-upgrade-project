@@ -27,8 +27,10 @@ Read `D40 implementation amendments (2026-10-03)` in `docs/DTD.md` and
   raised R-07 and R-08 (documentation parsing); all are fixed. A final confirmation
   is still pending before PR #2 is merged.
 - Open, environment-dependent: after a cold Chrome start slower than 15 s the native
-  CDP test can report `teardown_failed` (fail-closed). It passes on warm starts and was
-  not reproducible by closing a scope during startup; investigate if it recurs.
+  CDP test can report `teardown_failed` (fail-closed). It passes on warm starts. The
+  reviewer's hypothesis (gate exit record later than the stop wait while the tree is
+  confirmed gone) is reproduced synthetically; the error now names the failing step
+  in `teardown_details`, so the next real occurrence shows whether it is this path.
 
 ## D39 second review correction handoff — 2026-10-03
 

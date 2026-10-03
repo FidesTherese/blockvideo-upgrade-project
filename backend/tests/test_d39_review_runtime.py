@@ -225,3 +225,23 @@ def test_m6_descendant_new_process_group_cannot_survive(tmp_path: Path, syntheti
     code = "import os,time; pid=os.fork(); os.setpgid(0,0) if pid==0 else None; time.sleep(30)"
     result = asyncio.run(runtime.run_owned_command(**(_arguments(tmp_path, sys.executable, '-c', code) | {'deadline_seconds': 1})))
     assert result.outcome == 'timeout'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows Job teardown diagnostics')
+def test_late_gate_exit_record_names_the_failed_teardown_step(tmp_path: Path, synthetic_agent: None,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    # Reviewer hypothesis for the cold-start Chrome flake: the tree is gone but the
+    # gate's exit record never arrives. The outcome stays fail-closed; the message
+    # now says which step failed so a real occurrence can be told apart.
+    marker = "record({'state':'exited','pid':target.pid,'code':code,'stopped':stopped})"
+    assert runtime._OWNED_GATE.count(marker) == 1
+    monkeypatch.setattr(runtime, '_OWNED_GATE', runtime._OWNED_GATE.replace(marker, 'time.sleep(30)\n' + marker))
+    async def exercise() -> None:
+        scope = runtime.OwnedProcessScope()
+        await scope.__aenter__()
+        await runtime.start_owned_process(scope=scope, **_arguments(tmp_path, sys.executable, '-c', 'import time; time.sleep(30)'))
+        await asyncio.sleep(0.3)
+        with pytest.raises(ValueError, match=r'teardown_failed \(child: gate exit record missing \(state=running, tree_confirmed=True\)\)'):
+            await scope.close()
+        assert scope.teardown_details == ('child: gate exit record missing (state=running, tree_confirmed=True)',)
+    asyncio.run(exercise())
