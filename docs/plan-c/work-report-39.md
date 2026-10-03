@@ -243,7 +243,7 @@ working set sampled each second (baseline before the full run: 1418.8 MiB).
 | Backend Ruff | All checks passed | |
 | Frontend test (pnpm 10.18.3, Node 24.11.1, one worker) | 157 passed in 17 files | |
 | Frontend build / lint | Passed / passed | No tracked frontend file changed |
-| D36 CLI test on the committed tree | Pending: runs after the implementation commit (needs a clean tree); recorded in the follow-up documentation commit | |
+| D36 CLI test on the committed tree | 1 passed on clean implementation commit `04cdb3f` (6.2 s); the full-run failure was the uncommitted working tree | |
 
 The complete backend suite was not repeated after the teardown-budget change; that
 change only affects `blinded_runtime`, whose importing test modules (D37 runner and
