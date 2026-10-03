@@ -76,7 +76,8 @@ aggregate peak is a conservative host-wide sum of every `claude`, `python`, `nod
 | `python -m scripts.decide_release_readiness` / `python -m evaluation.scripts.attest_release_decision` with refused inputs | exit 2, fixed refusal text, no output | |
 | Backend Ruff | All checks passed | |
 | Frontend test / build / lint (pnpm 10.18.3) | 157 passed in 17 files / passed / passed | No tracked frontend file changed |
-| D36 CLI test on the committed tree | Pending: runs after the implementation commit (needs a clean tree); recorded in the follow-up documentation commit | |
+| D36 CLI test on the committed tree | 1 passed on clean implementation commit `2593e6d` | The full-run failure was the uncommitted working tree |
+| Real attestation smoke on clean `2593e6d` (output outside the repository) | Published; `load_decision_tool_attestation` rehash matched | Aggregate `0f65fc5f13231686a62e9e83fe33577b101241fcb328d52dcdb8c41287cc5be4` for that commit; a tooling check, not readiness evidence |
 
 The complete backend suite was not repeated after the D40-only fixes: those edits
 touch only D40 files (imported solely by `test_d40_readiness_decision.py`) and
