@@ -2266,11 +2266,13 @@ pin, cap or threshold.
   key, and so does any reference-definition label without a parsed destination
   (labels may span lines and contain backslash escapes, and a destination on the
   following line is parsed, as CommonMark allows; a label crossing a blank line is
-  refused). Links and definitions are found in the README as CommonMark renders
-  it: block-quote and list-item markers are removed, list-item continuation is
-  de-indented (also inside quotes and nested lists), and fenced code blocks, indented
-  code blocks and code spans are blanked. A definition inside `>`, `-`, `1.` or
-  nested containers is checked; a link or definition shown as code is not a link). Coverage keys also require the committed D34/D35 tests to reference
+  refused). The scan never hides README text: block-quote and list-item markers
+  are removed per line and definitions are recognized at any indentation, so a
+  definition inside `>`, `-`, `1.` or nested containers is checked. Code blocks and
+  code spans are deliberately not excluded (a mis-parsed code region could hide a
+  real link, as two review rounds showed), so a link or definition shown as code is
+  still checked: this can over-reject a missing target in an example (accepted
+  condition, fail closed) but never passes one). Coverage keys also require the committed D34/D35 tests to reference
   live-lease rejection, backup restore and the three recovery codes as exact
   names, attributes or non-docstring string constants inside `test*` functions or
   their decorators (comments, docstrings, function names and module-level values do

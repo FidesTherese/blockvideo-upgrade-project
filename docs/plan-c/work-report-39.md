@@ -319,3 +319,20 @@ the gate's record has no truthful exit status. The outcome stays fail-closed; th
 scope now names the failing step (`teardown_details`, also in the error), pinned by
 `test_late_gate_exit_record_names_the_failed_teardown_step`. Whether the real
 cold-start failure is this path remains to be confirmed by its next occurrence.
+
+### Fifth review round (GPT-6.1 Sol, 2026-10-03)
+
+The confirmation of `83dd4a2` resolved R-09 and found that the R-10 code-aware
+scanner itself introduced two false passes: R-11 (a fence inside a block quote was
+never closed, hiding every later link) and R-12 (unequal backtick runs treated as a
+code span, hiding the link). It also listed R-13 (a multi-line code span rejected)
+as an over-rejection condition.
+
+Fix: the code-aware scanner is removed and README link extraction is restored to
+the never-hide scan the previous round confirmed (byte-identical to `ec23739`).
+Code is no longer excluded, so R-11 and R-12 cannot hide anything; R-10 and R-13
+become documented fail-closed over-rejections of missing targets shown as code (an
+example pointing at an existing file still passes). `test_code_never_hides_a_link_or_definition`
+covers both reproductions, code examples with missing and existing targets, and
+container definitions; reintroducing code-span, fence or indentation hiding makes it
+fail (3 of 3). The R-09 fix and the teardown diagnostics are unchanged.

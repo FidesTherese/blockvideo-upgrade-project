@@ -182,3 +182,17 @@ judged not to weaken its intent.
 | Frozen D35 README | still 32 links parsed; full-tree result unchanged (only `locked_versions` fails) |
 | D37 runner + all D39 files + D40 file | 727 passed, 14 skipped (symlink-permission and POSIX-only) in 706 s, including the native Chrome tests |
 | Backend Ruff / frontend test, build, lint | All checks passed / 157 passed, passed, passed |
+
+### Fifth review round (GPT-6.1 Sol, 2026-10-03)
+
+The confirmation of `83dd4a2` raised R-11 and R-12 (false passes from the R-10 code
+scanner) and R-13 (over-rejection), all D39 documentation checks recorded in
+`work-report-39.md`; it found that the teardown diagnostics change no outcome or
+evidence. No D40 finding was raised.
+
+| Run | Result |
+|---|---|
+| Hiding reintroduced in place (code spans, fences, indented definitions) | 3 of 3 detected |
+| Documentation file + frozen-D35 test | 123 passed; frozen D35 README still parses 32 links |
+| All D39 files + D40 file | 514 passed, 3 skipped (POSIX-only) in 559 s, including the native Chrome tests |
+| Backend Ruff / frontend test, build, lint | All checks passed / 157 passed, passed, passed |

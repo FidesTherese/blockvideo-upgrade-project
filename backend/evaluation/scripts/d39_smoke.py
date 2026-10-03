@@ -367,78 +367,29 @@ _HTML_LINK = re.compile(r'\b(?:src|href)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s"\
 # A reference definition's destination may follow on the next line (CommonMark
 # allows one line ending); every definition label must yield a parsed destination.
 _REFERENCE_LABEL = r'\[(?:[^\[\]\\]|\\.){1,999}\]'
-_REFERENCE_START = re.compile(r'^ {0,3}' + _REFERENCE_LABEL + ':', re.MULTILINE | re.DOTALL)
-_REFERENCE_LINK = re.compile(r'^ {0,3}' + _REFERENCE_LABEL + r':[ \t]*(?:\r?\n[ \t]*)?(?:<([^<>\n]*)>|([^\s<>]\S*))',
+_REFERENCE_START = re.compile(r'^[ \t]*' + _REFERENCE_LABEL + ':', re.MULTILINE | re.DOTALL)
+_REFERENCE_LINK = re.compile(r'^[ \t]*' + _REFERENCE_LABEL + r':[ \t]*(?:\r?\n[ \t]*)?(?:<([^<>\n]*)>|([^\s<>]\S*))',
                              re.MULTILINE | re.DOTALL)
-_QUOTE_MARKER = re.compile(r' {0,3}>[ ]?')
-_LIST_MARKER = re.compile(r' {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?: +|$)', re.ASCII)
-_FENCE = re.compile(r' {0,3}(`{3,}|~{3,})')
-_CODE_SPAN = re.compile(r'(`+)(?:(?!\1).)+?\1')
-
-
-def _indent(text: str) -> int:
-    return len(text) - len(text.lstrip(' '))
-
-
-def _markdown_text(readme: str) -> str:
-    """README as rendered text: block-quote and list markers removed, list-item
-    continuation de-indented, and fenced/indented code blocks and code spans blanked,
-    so links and definitions are found where CommonMark renders them and not in code."""
-    lines: list[str] = []
-    fence: str | None = None
-    list_depth: int | None = None  # quote depth of the open list item
-    list_column = 0  # content column of the open list item at that depth
-    previous_blank = previous_code = True
-    for raw in readme.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
-        text = raw.expandtabs(4)
-        depth = 0
-        while (quote := _QUOTE_MARKER.match(text)) is not None and fence is None:
-            text, depth = text[quote.end():], depth + 1
-        if fence is not None:
-            closing = _FENCE.match(text)
-            if closing is not None and closing.group(1)[0] == fence[0] and len(closing.group(1)) >= len(fence):
-                fence = None
-            lines.append('')
-            continue
-        blank = not text.strip()
-        continued = False
-        if list_depth is not None and (depth < list_depth or (depth == list_depth and not blank and previous_blank
-                                                              and _indent(text) < list_column and not _LIST_MARKER.match(text))):
-            list_depth = None  # the list item ended
-        if list_depth == depth and not blank and _indent(text) >= list_column:
-            text, continued = text[list_column:], True
-        while (item := _LIST_MARKER.match(text)) is not None:
-            # A new (possibly nested) list item; quotes may follow inside it.
-            list_depth, list_column = depth, (list_column if continued else 0) + item.end()
-            text = text[item.end():]
-            while (quote := _QUOTE_MARKER.match(text)) is not None:
-                text, depth = text[quote.end():], depth + 1
-            continued = True
-        opening = _FENCE.match(text)
-        if opening is not None:
-            fence = opening.group(1)
-            lines.append('')
-            continue
-        if not blank and _indent(text) >= 4 and (previous_blank or previous_code):
-            lines.append('')  # indented code block
-            previous_code, previous_blank = True, False
-            continue
-        previous_code, previous_blank = False, blank
-        lines.append(_CODE_SPAN.sub(' ', text))
-    return '\n'.join(lines)
+# The scan never hides README text. Block-quote and list-item markers are removed
+# (they are container syntax, so a definition inside `> `, `- `, `1. ` or nested
+# containers is still found) and definitions are recognized at any indentation.
+# Code blocks and code spans are deliberately NOT excluded: a mis-parsed code
+# region could otherwise hide a real link, so a link or definition shown as code is
+# still checked. That can only over-reject (fail closed), never pass a missing file.
+_CONTAINER_PREFIX = re.compile(r'^(?:[ \t]*(?:>[ \t]?|[-+*][ \t]+|[0-9]{1,9}[.)][ \t]+))+', re.MULTILINE | re.ASCII)
 
 
 def _readme_links(readme: str) -> list[str] | None:
-    text = _markdown_text(readme)
-    inline = _INLINE_LINK.findall(text)
-    references = _REFERENCE_LINK.findall(text)
-    starts = _REFERENCE_START.findall(text)
+    inline = _INLINE_LINK.findall(readme)
+    flattened = _CONTAINER_PREFIX.sub('', readme)
+    references = _REFERENCE_LINK.findall(flattened)
+    starts = _REFERENCE_START.findall(flattened)
     # A blank line ends a label, so a "label" spanning one is not a definition here;
     # refusing it keeps unparsed definitions from being silently skipped.
-    if (len(inline) != text.count('](') or len(references) != len(starts)
+    if (len(inline) != readme.count('](') or len(references) != len(starts)
             or any(re.search(r'\n[ \t\r]*\n', start) for start in starts)):
         return None
-    groups = [*inline, *_HTML_LINK.findall(text), *references]
+    groups = [*inline, *_HTML_LINK.findall(readme), *references]
     return [next((item for item in group if item), '') for group in groups]
 
 

@@ -214,16 +214,29 @@ def test_reference_definitions_inside_containers_are_checked(documented: Path, c
 
 
 @pytest.mark.parametrize(('body', 'accepted'), [
-    ('Intro text.\n\n    [setup]: docs/missing.md\n', True),
-    ('Intro text.\n\n    [x](docs/missing.md)\n', True),
+    # Code never hides a link or definition: a missing target shown as code is still
+    # refused (documented fail-closed over-rejection); an existing one passes.
+    ('Intro text.\n\n    [setup]: docs/missing.md\n', False),
+    ('Intro text.\n\n    [x](docs/missing.md)\n', False),
+    ('```\n[setup]: docs/missing.md\n[x](docs/missing.md)\n```\n', False),
+    ('Use `[x](docs/missing.md)` as an example.\n', False),
+    ('- a\n\n        [setup]: docs/missing.md\n', False),
+    ('```\n[x](backend/.env.example)\n```\n', True),
+    ('Use `[x](backend/.env.example)` as an example.\n', True),
+    # Real definitions in containers are checked.
     ('[guide][setup]\n\n[setup]: docs/missing.md\n', False),
-    ('```\n[setup]: docs/missing.md\n[x](docs/missing.md)\n```\n', True),
-    ('Use `[x](docs/missing.md)` as an example.\n', True),
-    ('- a\n\n        [setup]: docs/missing.md\n', True),
     ('> - a\n>\n>     [setup]: docs/missing.md\n', False),
     ('- a\n  - b\n\n      [setup]: docs/missing.md\n', False),
+    # R-11: a fence inside a block quote must not hide a later real link.
+    ('> ```\n> example\n> ```\n\n[bad](docs/missing.md)\n', False),
+    ('> ```\n> example\n\n[bad](docs/missing.md)\n', False),
+    # R-12: unequal backtick runs are not a code span and must not hide the link.
+    ('``[bad](docs/missing.md)`\n', False),
+    ('`[bad](docs/missing.md)``\n', False),
+    # R-13: a multi-line code span is still scanned (over-rejection only).
+    ('`example\n[bad](docs/missing.md)`\n', False),
 ])
-def test_code_examples_are_not_links_but_container_definitions_are(documented: Path, body: str, accepted: bool) -> None:
+def test_code_never_hides_a_link_or_definition(documented: Path, body: str, accepted: bool) -> None:
     readme = documented / 'README.md'
     readme.write_text(readme.read_text(encoding='utf-8') + body, encoding='utf-8')
     assert checks(documented)['setup_paths'] is accepted
