@@ -16,6 +16,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from evaluation.blinded_runner import case_to_unlabeled
+from evaluation.case_normalization import normalize_case
 from evaluation.blinded_scoring import score_trial
 from evaluation.corpus import load_cases
 from evaluation.unlabeled_contracts import MAX_REVISION, UnlabeledTrialCase, canonical_case_sha256
@@ -2005,7 +2006,8 @@ def test_d24_d029_shaped_switch_replays_original_target_end_to_end(tmp_path: Pat
         thread.join(timeout=5)
         server.server_close()
 
-    score = score_trial(case, observation.model_dump(mode="json"))
+    # The runner scores the same normalized reading it projected.
+    score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
     assert observation.replay.state_unchanged is True
     assert observation.replay.same_response is True
     assert observation.replay.response == observation.response
