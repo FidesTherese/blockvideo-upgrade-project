@@ -64,7 +64,9 @@ def _delete_owned_path(path: Path, identity: tuple[int, int], *, directory: bool
             query.restype = ctypes.c_int
             if not query(handle, ctypes.byref(information)):
                 raise OSError("owned deletion identity unavailable")
-            if (bool(information.file_attributes & 0x10) != directory
+            # A directory symlink carries the directory attribute while lstat reports a
+            # link; the handle is the link itself (OPEN_REPARSE_POINT), never its target.
+            if ((not reparse and bool(information.file_attributes & 0x10) != directory)
                     or bool(information.file_attributes & 0x400) != reparse
                     or _native_identity(int(handle)) != identity):
                 raise ValueError("owned deletion identity or type lost")
