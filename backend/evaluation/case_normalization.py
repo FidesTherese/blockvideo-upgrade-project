@@ -78,6 +78,12 @@ def _prior_turn(
     turn = dict(value)
     if "project_id" not in turn and type(turn.get("target_project_id")) is int:
         turn["project_id"] = turn["target_project_id"]
+    continuation = case.request.continuation
+    if ("project_id" not in turn and turn.get("target_project_id") is None
+            and continuation is not None and continuation.parent_request_id == turn.get("request_id")
+            and case.request.target_project_id is not None):
+        # A target-less clarification is owned by the project its answer names.
+        turn["project_id"] = case.request.target_project_id
     turn.setdefault("project_id", case.initial.project_id)
     result_revision = turn.get("result_revision")
     if type(turn.get("base_revision")) is not int:

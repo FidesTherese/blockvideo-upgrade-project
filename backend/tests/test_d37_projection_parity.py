@@ -174,3 +174,35 @@ def test_references_to_unseeded_projects_and_turns_become_representable() -> Non
     body = case_to_unlabeled(_with_details(_score_case("same_id_different_body"), {
         "changed_request": {"text": "別の依頼", "target_project_id": 9}}))
     assert [item.project_id for item in body.initial.additional_projects] == [9]
+
+
+def test_target_less_clarification_belongs_to_the_answering_request_target() -> None:
+    base = _score_case("none")
+    request = type(base.request).model_validate({
+        **base.request.model_dump(), "target_project_id": 4, "base_revision": 2,
+        "continuation": {"parent_request_id": "turn-1", "relation": "answer"},
+    })
+    case = _with_initial(base, prior_turns=[
+        {"request_id": "turn-1", "text": "synthetic which project", "status": "needs_input",
+         "target_project_id": None, "base_revision": 2, "settings_saved": False,
+         "proposal": {"kind": "clarification", "question": "どれですか？",
+                      "missing_fields": ["target"]}},
+    ]).model_copy(update={"request": request})
+
+    projected = case_to_unlabeled(case)
+
+    assert projected.initial.prior_turns[0].project_id == 4
+    assert [item.project_id for item in projected.initial.additional_projects] == [4]
+
+
+def test_failure_report_names_race_timing_by_label_and_offset() -> None:
+    report = projection_failure(_with_details(_score_case("revision_race"), {
+        "competing_revision": 3, "competing_settings": {"subtitle_font_size": 52},
+        "original_confirmation_revision": 2, "phase": "after_save_before_confirm",
+        "then": "秘密の説明"}))
+
+    assert report is not None
+    assert report["event_timing"] == {
+        "labels": {"phase": "after_save_before_confirm", "then": "<redacted>"},
+        "revision_offsets": {"competing_revision": 2, "original_confirmation_revision": 1},
+    }

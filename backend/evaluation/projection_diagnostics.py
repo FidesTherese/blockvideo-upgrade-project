@@ -25,6 +25,29 @@ def _location(parts: tuple[Any, ...]) -> str:
     return ".".join(str(part) if isinstance(part, int) else _label(part) for part in parts)
 
 
+def _relation(case: Case, project_id: object) -> str:
+    """Name a project reference by its role, never by its value."""
+    if project_id is None:
+        return "null"
+    if project_id == case.initial.project_id:
+        return "selected"
+    if project_id == case.request.target_project_id:
+        return "request_target"
+    return "other" if type(project_id) is int else "<redacted>"
+
+
+def _event_timing(case: Case) -> dict[str, object]:
+    """Timing labels and revision offsets relative to the initial revision."""
+    details = case.event.details
+    offsets = {
+        key: details[key] - case.initial.revision
+        for key in ("competing_revision", "external_revision", "original_confirmation_revision")
+        if type(details.get(key)) is int
+    }
+    labels = {key: _label(details[key]) for key in ("phase", "when", "then") if key in details}
+    return {"labels": labels, "revision_offsets": offsets}
+
+
 def projection_failure(case: Case) -> dict[str, object] | None:
     """Return a content-free failure description, or None when the case projects."""
     try:
@@ -52,6 +75,8 @@ def projection_failure(case: Case) -> dict[str, object] | None:
         return None
     return {
         "case_id": case.case_id,
+        "event_timing": _event_timing(case),
+        "request_target": _relation(case, case.request.target_project_id),
         "event_kind": case.event.kind,
         "event_detail_keys": _keys(case.event.details),
         "job_keys": [_keys(job) for job in case.initial.jobs],
@@ -62,6 +87,9 @@ def projection_failure(case: Case) -> dict[str, object] | None:
             {
                 "keys": _keys(turn),
                 "status": _label(turn.get("status")),
+                "target": _relation(case, turn.get("target_project_id", turn.get("project_id"))),
+                "is_continuation_parent": case.request.continuation is not None
+                and case.request.continuation.parent_request_id == turn.get("request_id"),
                 "proposal_kind": _label(
                     turn["proposal"].get("kind")
                     if isinstance(turn.get("proposal"), dict) else None
