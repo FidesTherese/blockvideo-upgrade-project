@@ -141,3 +141,36 @@ def test_prior_turn_author_forms_project_into_the_wire_contract() -> None:
     assert first.proposal.arguments.voicevox_pitch_scale == 0.1
     assert (second.proposal.kind, third.proposal.kind) == ("unsupported", "no_operation")
     assert third.successor_request_id is None
+
+
+def test_competing_full_snapshot_reduces_to_the_changed_modeled_settings() -> None:
+    base = _score_case("revision_race")
+    snapshot = {**base.initial.settings, "subtitle_font_size": 52, "title": "synthetic",
+                "subtitle_position": "bottom", "voicevox_volume_scale": 1.0}
+    projected = case_to_unlabeled(_with_details(base, {
+        "competing_revision": 2, "competing_settings": snapshot, "phase": "synthetic"}))
+
+    assert projected.event.external_settings.model_dump(exclude_unset=True) == {
+        "subtitle_font_size": 52
+    }
+
+
+def test_references_to_unseeded_projects_and_turns_become_representable() -> None:
+    base = _score_case("none")
+    case = _with_initial(base, prior_turns=[
+        {"request_id": "turn-1", "text": "synthetic other project", "status": "dismissed",
+         "target_project_id": 8, "base_revision": 3, "settings_saved": False,
+         "successor_request_id": "turn-outside-case",
+         "proposal": {"kind": "clarification", "question": "どれですか？",
+                      "missing_fields": ["target"]}},
+    ])
+
+    projected = case_to_unlabeled(case)
+
+    (other,) = projected.initial.additional_projects
+    assert (other.project_id, other.revision, other.project_status) == (8, 3, "completed")
+    assert projected.initial.prior_turns[0].successor_request_id is None
+
+    body = case_to_unlabeled(_with_details(_score_case("same_id_different_body"), {
+        "changed_request": {"text": "別の依頼", "target_project_id": 9}}))
+    assert [item.project_id for item in body.initial.additional_projects] == [9]

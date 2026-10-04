@@ -72,7 +72,7 @@ from evaluation.tool_attestation import (
     fingerprint_file,
     validate_git_repository,
 )
-from evaluation.case_normalization import normalize_case
+from evaluation.case_normalization import complete_settings, normalize_case
 from evaluation.unlabeled_contracts import (
     UnlabeledTrialCase,
     canonical_case_sha256,
@@ -210,6 +210,27 @@ def _wire_projects(case: Case) -> tuple[dict[str, object], ...]:
             "settings": _wire_settings(job["input_settings"]),
             "project_status": "generating"
             if job["status"] in {"pending", "running"} else "failed",
+        })
+    # Prior turns and a changed request may name a project that only exists in prose;
+    # seed it with product defaults so the reference is representable.
+    referenced = [
+        (turn["project_id"], max(turn["base_revision"], turn.get("result_revision") or 1))
+        for turn in case.initial.prior_turns
+    ]
+    replacement = case.event.details.get("replacement_target_project_id")
+    if case.event.kind == "same_id_different_body" and type(replacement) is int:
+        referenced.append((replacement, 1))
+    for project_id, revision in referenced:
+        if project_id in seen:
+            continue
+        seen.add(project_id)
+        additional.append({
+            "project_id": project_id,
+            "revision": max(
+                [revision] + [r for p, r in referenced if p == project_id]
+            ),
+            "settings": _wire_settings(complete_settings({})),
+            "project_status": "completed",
         })
     return tuple(additional)
 

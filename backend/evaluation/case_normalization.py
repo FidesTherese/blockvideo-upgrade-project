@@ -43,11 +43,22 @@ def complete_settings(
     return {name: merged[name] for name in SETTING_FIELDS}
 
 
-def _event_details(case: Case) -> dict[str, Any]:
+def _external_patch(value: Any, current: dict[str, Any]) -> Any:
+    """Reduce a competing full-project snapshot to the modeled settings it changes."""
+    if not isinstance(value, dict) or set(value) <= set(SETTING_FIELDS):
+        return value
+    modeled = {name: value[name] for name in SETTING_FIELDS if name in value}
+    changed = {name: item for name, item in modeled.items() if item != current[name]}
+    return changed or modeled
+
+
+def _event_details(case: Case, settings: dict[str, Any]) -> dict[str, Any]:
     details = dict(case.event.details)
     for alias, name in _DETAIL_ALIASES.get(case.event.kind, {}).items():
         if name not in details and alias in details:
             details[name] = details[alias]
+    if case.event.kind == "revision_race" and "external_settings" in details:
+        details["external_settings"] = _external_patch(details["external_settings"], settings)
     if case.event.kind == "switch_target":
         details.setdefault("action", "read_original_request")
     if case.event.kind == "same_id_different_body" and "replacement_text" not in details:
@@ -61,7 +72,9 @@ def _event_details(case: Case) -> dict[str, Any]:
     return details
 
 
-def _prior_turn(case: Case, value: dict[str, Any], explicit_successors: bool) -> dict[str, Any]:
+def _prior_turn(
+    case: Case, value: dict[str, Any], explicit_successors: bool, turn_ids: set[str]
+) -> dict[str, Any]:
     turn = dict(value)
     if "project_id" not in turn and type(turn.get("target_project_id")) is int:
         turn["project_id"] = turn["target_project_id"]
@@ -75,8 +88,10 @@ def _prior_turn(case: Case, value: dict[str, Any], explicit_successors: bool) ->
         else:
             turn["base_revision"] = case.initial.revision
     turn.setdefault("settings_saved", False)
-    # The case's own request continues the last turn; the host links it itself.
-    if explicit_successors and turn.get("successor_request_id") == case.request.request_id:
+    # The case's own request continues the last turn and the host links it itself;
+    # a successor outside the case was never seeded, so neither link can be stored.
+    if (explicit_successors and turn.get("successor_request_id") is not None
+            and turn["successor_request_id"] not in turn_ids):
         turn["successor_request_id"] = None
     return turn
 
@@ -98,10 +113,11 @@ def normalize_case(case: Case) -> Case:
         for item in initial.history
     ]
     explicit = any("successor_request_id" in turn for turn in initial.prior_turns)
-    prior_turns = [_prior_turn(case, turn, explicit) for turn in initial.prior_turns]
+    turn_ids = {turn.get("request_id") for turn in initial.prior_turns}
+    prior_turns = [_prior_turn(case, turn, explicit, turn_ids) for turn in initial.prior_turns]
     return case.model_copy(update={
         "initial": initial.model_copy(update={
             "settings": settings, "jobs": jobs, "history": history, "prior_turns": prior_turns,
         }),
-        "event": case.event.model_copy(update={"details": _event_details(case)}),
+        "event": case.event.model_copy(update={"details": _event_details(case, settings)}),
     })

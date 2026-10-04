@@ -1152,6 +1152,14 @@ settings, patches, v1 arguments and history fields, and prior turns may carry
 Because these are D36 trial sources, the successor must be re-frozen and D39 rerun
 against the new freeze; earlier D36/D39 evidence stays valid only for its tooling.
 
+A third check (at `4c34ae6`, against the r2 freeze) left 7 of 200 cases in four
+patterns, all handled in the D37 reading without touching D36 sources: a competing
+full-project snapshot reduces to the modeled settings it changes (all modeled keys when
+none change); a successor link to a request not seeded in the case is dropped; and a
+project named only by a prior turn or by a changed request is seeded with product
+defaults (`completed`, revision at least the turn's base/result revision, else 1).
+Changes to unmodeled settings stay outside the wire state, as before.
+
 The runner now projects every included case before writing the protocol, so an
 unprojectable corpus stops before any trial. `scripts/check_blinded_projection.py`
 reports failures by case ID, field location, key name and identifier-shaped labels
