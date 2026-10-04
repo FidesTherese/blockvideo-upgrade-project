@@ -79,7 +79,10 @@ python -m uv run python -m scripts.check_blinded_projection --corpus <封印フ�
 ### 0-7. 事前チェック 6 回目（91bae4b、199/200）への対処
 
 - 残り 1 問は確認待ちの間の競合で、依頼が投稿時に保存しない（生成の準備だけ）形。外部の保存は「初期 +1」。
-  投稿後の競合で +1／+2 の両方を受け付け、実製品テストを追加。ホスト変更のため **r4 で再凍結・D39 取り直し**。
+  投稿後の競合で +1／+2 の両方を受け付け、実製品テストを追加。ホスト変更のため r4 で再凍結し、
+  **D39 も合格（2026-10-05）**。凍結 `release-evidence/d36-r4/c910dcb3d2399b53-93dae092bf04`
+  （freeze-manifest `8c8afa4c…` は不変、D36 ツール構成証明 `d50eff6b…`）、D39 `d39-d35.1-r4-*`。
+  **以降の D37・D38・D40 は r4 を使います。**
 
 ## 1. 済んでいること
 
@@ -143,7 +146,7 @@ held-out の封印フォルダと承認台帳を使い、評価者が管理す�
 ```text
 python -m uv run python -m scripts.run_blinded_evaluation \
   --candidate-root C:\Users\Danir\Downloads\blockvideo-d35.1-candidate \
-  --freeze-manifest <repo>\release-evidence\d36-r3\c910dcb3d2399b53-93dae092bf04\freeze-manifest.json \
+  --freeze-manifest <repo>\release-evidence\d36-r4\c910dcb3d2399b53-93dae092bf04\freeze-manifest.json \
   --corpus <封印フォルダの held-out コーパス> \
   --human-review <人の承認台帳> --independent-review <独立承認台帳> \
   --output <新しい空の評価出力フォルダ> --model <評価者のモデルID> \
