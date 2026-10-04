@@ -2,6 +2,10 @@
 
 ## D40 readiness decision handoff — 2026-10-03
 
+- 2026-10-03: the user accepted the native Chrome cold-start teardown item as passed
+  (negligible impact); it is no longer an open item. Remaining work is listed in
+  `docs/plan-c/remaining-steps-runbook.md`.
+
 Read `D40 implementation amendments (2026-10-03)` in `docs/DTD.md` and
 `work-report-40.md`. The decision tooling exists; no decision has been made.
 

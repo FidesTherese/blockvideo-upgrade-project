@@ -1221,3 +1221,37 @@ def test_cli_writes_completed_publication_contract(tmp_path: Path) -> None:
         "freeze_manifest": f"{response['candidate_id']}/freeze-manifest.json",
         "tool_attestation": f"{response['candidate_id']}/d36-tool-attestation.json",
     }
+
+
+SUCCESSOR_SUBJECT = "[DONE] Mission 35.1 Fix release-candidate verification blockers"
+
+
+def test_authorized_successor_subject_freezes_and_others_are_refused(tmp_path: Path) -> None:
+    freeze, _, _ = _freeze_api()
+    successor_root = tmp_path / "successor"
+    successor_root.mkdir()
+    candidate, commit = _make_candidate(successor_root, subject=SUCCESSOR_SUBJECT)
+    control_path, digest = _write_control(successor_root, _control(commit, git_commit_subject=SUCCESSOR_SUBJECT))
+    manifest = freeze.freeze_candidate(candidate_root=candidate, candidate_control_path=control_path,
+                                       expected_candidate_control_sha256=digest, output_root=successor_root / "output")
+    assert manifest.git_commit == commit and manifest.candidate_control_sha256 == digest
+    # A control naming the D35 subject cannot vouch for the successor commit, and an
+    # unlisted subject is refused by the strict contract itself.
+    mismatch_root = tmp_path / "mismatch"
+    mismatch_root.mkdir()
+    control_path, digest = _write_control(mismatch_root, _control(commit))
+    with pytest.raises(ValueError):
+        freeze.freeze_candidate(candidate_root=candidate, candidate_control_path=control_path,
+                                expected_candidate_control_sha256=digest, output_root=mismatch_root / "output")
+    with pytest.raises(ValidationError):
+        freeze.CandidateControl.model_validate(_control(commit, git_commit_subject="[DONE] Mission 35.2 Unreviewed"))
+
+
+def test_readme_referenced_docs_are_inventoried(tmp_path: Path) -> None:
+    _, fingerprints, _ = _freeze_api()
+    extras = {"docs/plan-c/work-report-22.md": b"# report\n", "docs/frame-subtitles.png": b"\x89PNG\x00\x00\x00\rIHDR",
+              "docs/notes.txt": b"not documentation\n"}
+    candidate, _ = _make_candidate(tmp_path, extras=extras)
+    paths = {item.path for item in fingerprints.fingerprint_files(candidate)}
+    assert {"docs/plan-c/work-report-22.md", "docs/frame-subtitles.png"} <= paths
+    assert "docs/notes.txt" not in paths
