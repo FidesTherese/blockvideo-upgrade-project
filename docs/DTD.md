@@ -1192,6 +1192,12 @@ race timings:
 
 Host and wire changes are D36 sources, so the successor is re-frozen (r3) and D39 rerun.
 
+A sixth check (at `91bae4b`) left one after-submit race whose request only prepared a
+generation (original confirmation revision = initial), so the external save is
+initial+1. After-submit races now accept initial+1 or initial+2; scoring expects +2 only
+when the request's own save persisted, and the host never reuses a revision the request
+just recorded. A real-product test covers this prepare-only race. Re-frozen as r4.
+
 The runner now projects every included case before writing the protocol, so an
 unprojectable corpus stops before any trial. `scripts/check_blinded_projection.py`
 reports failures by case ID, field location, key name and identifier-shaped labels

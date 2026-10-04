@@ -227,11 +227,9 @@ def _expected_history(
         )
     if case.event.kind == "revision_race":
         external_settings = _mapping(case.event.details.get("external_settings"), "external settings")
-        race_offset = 2 if race_after_submit else 1
+        race_offset = 2 if race_after_submit and candidate_persists else 1
         if type(race_revision) is not int or race_revision != initial_revision + race_offset:
             raise ValueError("revision_race requires the exact next external revision")
-        if race_after_submit and not candidate_persists:
-            raise ValueError("an after-submit race needs the request's own save first")
         current_settings = {**current_settings, **external_settings}
         settings_by_revision[race_revision] = current_settings
         after.append(

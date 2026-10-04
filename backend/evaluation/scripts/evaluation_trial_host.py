@@ -1100,7 +1100,9 @@ def _candidate_worker(model_call_budget: int) -> int:
                 project = race_db.get(Project, initial["project_id"])
                 for key, value in event["external_settings"].items():
                     setattr(project, key, value)
-                project.revision = event["external_revision"]
+                # After submit, never reuse a revision the request itself just recorded.
+                project.revision = (max(event["external_revision"], project.revision + 1)
+                                    if after_submit_race else event["external_revision"])
                 race_db.add(SettingsRevision(project_id=project.id, revision=project.revision,
                                               settings_json=configuration(project), changed_fields=sorted(event["external_settings"])))
                 race_db.commit()

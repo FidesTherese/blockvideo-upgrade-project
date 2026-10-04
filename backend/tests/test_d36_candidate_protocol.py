@@ -2717,6 +2717,14 @@ _REAL_FLOWS: dict[str, tuple[str, str, dict[str, object], dict[str, object], dic
         "interpretation": "no_operation", "operations": [],
         "submit": _effects("dismissed"), "after_event": None,
     }, {}),
+    "race_after_prepare": ("revision_race", "動画を作り直して", _START, {
+        "operations": [{k: v for k, v in _START.items() if k != "kind"}],
+        "submit": _effects("awaiting_confirmation", confirmation_required=True),
+        # FORMAT.md: generation always requires separate confirmation, also when refused.
+        "after_event": _effects("blocked", reason="stale_state", confirmation_required=True),
+    }, {"competing_revision": 2, "competing_settings": {"subtitle_font_size": 72},
+        "original_confirmation_revision": 1,
+        "phase": "after_submit_before_confirmation", "then": "confirm_original_generation"}),
     "race_before_execution": ("revision_race", "字幕を50pxにして", _FONT_50, {
         "submit": _effects("blocked", reason="stale_state"),
         "after_event": _effects("blocked", reason="stale_state"),

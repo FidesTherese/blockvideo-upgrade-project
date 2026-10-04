@@ -1567,7 +1567,7 @@ def test_score_requires_expected_project_status_and_exact_history_projection() -
     case = _score_case("none")
     observation = _score_observation("none")
     observation["after"]["project_status"] = "failed"
-    observation["after"]["history_entries"][0]["changed_fields"] = []
+    observation["after"]["history_entries"][-1]["changed_fields"] = []
 
     score = score_trial(case, observation)
 
@@ -1597,7 +1597,7 @@ def test_score_preserves_initial_history_and_requires_exact_sequence() -> None:
     observation["after"]["history_count"] = 2
     observation["after"]["history_entries"] = [
         initial_entry,
-        observation["after"]["history_entries"][0],
+        observation["after"]["history_entries"][-1],
     ]
 
     passing = score_trial(case, observation)

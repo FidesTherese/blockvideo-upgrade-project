@@ -625,9 +625,11 @@ class UnlabeledTrialCase(StrictUnlabeledRecord):
                 raise ValueError("external revision collides with seeded history")
             if self.event.external_revision <= self.initial.revision:
                 raise ValueError("external revision must exceed primary initial revision")
-            offset = 2 if self.event.timing == "after_submit_before_confirmation" else 1
-            if (self.initial.revision > MAX_REVISION - offset
-                    or self.event.external_revision != self.initial.revision + offset):
+            # After submit, the external save follows the request's own save when it
+            # saved (initial+2), or the unchanged initial revision when it only prepared.
+            offsets = {1, 2} if self.event.timing == "after_submit_before_confirmation" else {1}
+            if (self.initial.revision > MAX_REVISION - max(offsets)
+                    or self.event.external_revision - self.initial.revision not in offsets):
                 raise ValueError("external revision must follow the primary revision for its timing")
         if isinstance(self.event, UnlabeledDifferentBodyEvent):
             replacement_target = self.event.replacement_target_project_id
