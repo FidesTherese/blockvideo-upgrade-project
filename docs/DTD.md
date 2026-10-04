@@ -1137,6 +1137,21 @@ or `settings_saved` take the selected project, a revision derived from
 and `false`. Event details, prior-turn statuses and proposal kinds outside the wire
 contract still fail closed; the frozen D36 trial host and wire contract are unchanged.
 
+A content-free check of the held-out corpus at `b9ac596` then reported 22 of 200
+cases still unprojectable, in seven structural patterns. Case reading now lives in
+`evaluation/case_normalization.py`, used by both projection and scoring so the trial
+input and the expected state cannot diverge: author spellings of event details
+(`competing_revision`/`competing_settings`, `switched_project_id`, `changed_request`)
+map to the wire names, `switch_target` defaults its only action, prior turns take
+`project_id` from `target_project_id`, a null `base_revision` is derived like a missing
+one, and an explicit successor link to the case's own request is dropped because the
+host links the continuation itself. The D36 wire contract and trial host also change:
+`voicevox_pitch_scale`, a catalog setting of `project.settings.update`, joins the wire
+settings, patches, v1 arguments and history fields, and prior turns may carry
+`unsupported` and `no_operation` proposals, seeded with the matching outcome status.
+Because these are D36 trial sources, the successor must be re-frozen and D39 rerun
+against the new freeze; earlier D36/D39 evidence stays valid only for its tooling.
+
 The runner now projects every included case before writing the protocol, so an
 unprojectable corpus stops before any trial. `scripts/check_blinded_projection.py`
 reports failures by case ID, field location, key name and identifier-shaped labels

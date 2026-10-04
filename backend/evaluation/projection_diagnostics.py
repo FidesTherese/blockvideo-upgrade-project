@@ -40,6 +40,11 @@ def projection_failure(case: Case) -> dict[str, object] | None:
             "fields": sorted({
                 f"{_location(item['loc'])}:{item['type']}" for item in error.errors()
             }),
+            # Model validators raise fixed messages; they never echo the input.
+            "messages": sorted({
+                str(item["ctx"]["error"]) for item in error.errors()
+                if item["type"] == "value_error" and "ctx" in item
+            }),
         }
     except (TypeError, ValueError) as error:
         problem = {"error": type(error).__name__}

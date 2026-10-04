@@ -90,3 +90,54 @@ def test_projection_failure_report_is_structural_and_content_free() -> None:
     assert report["prior_turns"][0]["status"] == "<redacted>"
     assert secret not in json.dumps(report, ensure_ascii=False)
     assert projection_failure(_score_case("none")) is None
+
+
+def _with_details(case: Case, details: dict[str, object]) -> Case:
+    return case.model_copy(update={"event": case.event.model_copy(update={"details": details})})
+
+
+def test_author_spellings_of_event_details_map_to_wire_names() -> None:
+    race = case_to_unlabeled(_with_details(_score_case("revision_race"), {
+        "competing_revision": 2, "competing_settings": {"subtitle_font_size": 52},
+        "phase": "before_confirmation", "then": "synthetic"}))
+    assert (race.event.external_revision, race.event.external_settings.subtitle_font_size) == (2, 52)
+
+    switch = case_to_unlabeled(_with_details(_score_case("switch_target"), {
+        "switched_project_id": 202, "original_project_id": 1}))
+    assert (switch.event.selected_project_id_after, switch.event.action) == (202, "read_original_request")
+
+    for changed, target in (("別の依頼", None), ({"text": "別の依頼", "target_project_id": 1}, 1)):
+        body = case_to_unlabeled(_with_details(_score_case("same_id_different_body"),
+                                               {"changed_request": changed}))
+        assert (body.event.replacement_text, body.event.replacement_target_project_id) == ("別の依頼", target)
+
+
+def test_prior_turn_author_forms_project_into_the_wire_contract() -> None:
+    base = _score_case("none")
+    case = _with_initial(
+        base,
+        revision=2,
+        settings={**base.initial.settings, "voicevox_pitch_scale": 0.1},
+        prior_turns=[
+            {"request_id": "turn-1", "text": "synthetic pitch change", "status": "completed",
+             "target_project_id": 1, "base_revision": None, "result_revision": 2,
+             "settings_saved": True,
+             "proposal": {"kind": "operation", "operation_id": "project.settings.update",
+                          "operation_version": 1, "arguments": {"voicevox_pitch_scale": 0.1},
+                          "generate_after_save": False}},
+            {"request_id": "turn-2", "text": "synthetic unsupported turn", "status": "unsupported",
+             "proposal": {"kind": "unsupported", "reason": "synthetic reason"}},
+            {"request_id": "turn-3", "text": "synthetic dismissed turn", "status": "dismissed",
+             "proposal": {"kind": "no_operation", "reason": "synthetic reason"},
+             "parent_request_id": None, "successor_request_id": base.request.request_id},
+        ],
+    )
+
+    projected = case_to_unlabeled(case)
+
+    first, second, third = projected.initial.prior_turns
+    assert projected.initial.settings.voicevox_pitch_scale == 0.1
+    assert (first.project_id, first.base_revision) == (1, 1)
+    assert first.proposal.arguments.voicevox_pitch_scale == 0.1
+    assert (second.proposal.kind, third.proposal.kind) == ("unsupported", "no_operation")
+    assert third.successor_request_id is None

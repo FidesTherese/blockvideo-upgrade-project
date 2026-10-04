@@ -53,6 +53,7 @@ UnlabeledPronunciations = Annotated[
 class UnlabeledSettings(StrictUnlabeledRecord):
     subtitle_font_size: int = Field(ge=16, le=120)
     voicevox_speed_scale: float = Field(ge=0.5, le=2.0)
+    voicevox_pitch_scale: float = Field(default=0.0, ge=-1.0, le=1.0)
     voicevox_speaker_id: int = Field(ge=0, le=100000)
     pronunciation_overrides: UnlabeledPronunciations = Field(max_length=100, strict=False)
     narration_pacing_mode: Literal["adaptive", "fixed"]
@@ -62,6 +63,7 @@ class UnlabeledSettings(StrictUnlabeledRecord):
 class UnlabeledSettingsPatch(StrictUnlabeledRecord):
     subtitle_font_size: int | None = Field(default=None, ge=16, le=120)
     voicevox_speed_scale: float | None = Field(default=None, ge=0.5, le=2.0)
+    voicevox_pitch_scale: float | None = Field(default=None, ge=-1.0, le=1.0)
     voicevox_speaker_id: int | None = Field(default=None, ge=0, le=100000)
     pronunciation_overrides: UnlabeledPronunciations | None = Field(default=None, max_length=100, strict=False)
     narration_pacing_mode: Literal["adaptive", "fixed"] | None = None
@@ -104,10 +106,10 @@ class UnlabeledInitialHistory(StrictUnlabeledRecord):
     revision: int = Field(ge=1, le=MAX_REVISION)
     settings: UnlabeledSettings
     changed_fields: tuple[Literal[
-        "subtitle_font_size", "voicevox_speed_scale", "voicevox_speaker_id",
-        "pronunciation_overrides", "narration_pacing_mode",
+        "subtitle_font_size", "voicevox_speed_scale", "voicevox_pitch_scale",
+        "voicevox_speaker_id", "pronunciation_overrides", "narration_pacing_mode",
         "narration_sentence_pause_seconds",
-    ], ...] = Field(default=(), max_length=6, strict=False)
+    ], ...] = Field(default=(), max_length=7, strict=False)
     restored_from_revision: int | None = Field(default=None, ge=1, le=MAX_REVISION)
 
 
@@ -195,6 +197,7 @@ class UnlabeledOperationArguments(StrictUnlabeledRecord):
     subtitle_font_size: int | None = Field(default=None, ge=16, le=120)
     subtitle_font_size_delta: int | None = Field(default=None, ge=-104, le=104)
     voicevox_speed_scale: float | None = Field(default=None, ge=0.5, le=2.0)
+    voicevox_pitch_scale: float | None = Field(default=None, ge=-1.0, le=1.0)
     voicevox_speaker_id: int | None = Field(default=None, ge=0, le=100000)
     pronunciation_overrides: UnlabeledPronunciations | None = Field(default=None, max_length=100, strict=False)
     narration_pacing_mode: Literal["adaptive", "fixed"] | None = None
@@ -223,7 +226,7 @@ class UnlabeledOperationProposal(StrictUnlabeledRecord):
             "project.subtitle-font-size.set": {"value"},
             "project.subtitle-font-size.adjust": {"delta"},
             "project.settings.update": ({
-                "subtitle_font_size", "voicevox_speed_scale", "voicevox_speaker_id",
+                "subtitle_font_size", "voicevox_speed_scale", "voicevox_pitch_scale", "voicevox_speaker_id",
                 "pronunciation_overrides", "narration_pacing_mode", "narration_sentence_pause_seconds",
             } if self.operation_version == 1 else {"settings", "subtitle_font_size_delta"}),
             "project.status.get": set(),
@@ -245,8 +248,19 @@ class UnlabeledClarificationProposal(StrictUnlabeledRecord):
     )
 
 
+class UnlabeledUnsupportedProposal(StrictUnlabeledRecord):
+    kind: Literal["unsupported"]
+    reason: str = Field(min_length=1, max_length=240, pattern=r"\S")
+
+
+class UnlabeledNoOperationProposal(StrictUnlabeledRecord):
+    kind: Literal["no_operation"]
+    reason: str = Field(min_length=1, max_length=240, pattern=r"\S")
+
+
 UnlabeledPriorProposal = Annotated[
-    UnlabeledOperationProposal | UnlabeledClarificationProposal,
+    UnlabeledOperationProposal | UnlabeledClarificationProposal
+    | UnlabeledUnsupportedProposal | UnlabeledNoOperationProposal,
     Field(discriminator="kind"),
 ]
 

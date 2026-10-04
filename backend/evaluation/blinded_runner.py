@@ -43,7 +43,6 @@ from evaluation.blinded_contracts import (
     opaque_case_token,
     token_key,
 )
-from app.schemas import ProjectCreate
 from evaluation.blinded_scoring import TrialScore, score_trial
 from evaluation.evidence_json import parse_canonical_model
 from evaluation.contracts import Case
@@ -73,8 +72,8 @@ from evaluation.tool_attestation import (
     fingerprint_file,
     validate_git_repository,
 )
+from evaluation.case_normalization import normalize_case
 from evaluation.unlabeled_contracts import (
-    UnlabeledSettings,
     UnlabeledTrialCase,
     canonical_case_sha256,
 )
@@ -190,62 +189,29 @@ def _assert_no_forbidden_wire_keys(value: object) -> None:
             _assert_no_forbidden_wire_keys(item)
 
 
-# D24 permits partial setting snapshots; the development seed completes them
-# with product defaults (other projects) or the owner's current settings.
-_SETTING_DEFAULTS: dict[str, object] = {
-    name: ProjectCreate.model_fields[name].get_default(call_default_factory=True)
-    for name in UnlabeledSettings.model_fields
-}
-
-
-def _wire_settings(
-    value: dict[str, object], base: dict[str, object] | None = None
-) -> dict[str, object]:
-    merged = {**_SETTING_DEFAULTS, **(base or {}), **value}
+def _wire_settings(value: dict[str, object]) -> dict[str, object]:
     return {
-        name: tuple(merged[name]) if name == "pronunciation_overrides" else merged[name]
-        for name in UnlabeledSettings.model_fields
+        **value,
+        "pronunciation_overrides": tuple(value["pronunciation_overrides"]),
     }
 
 
-def _wire_projects(
-    case: Case, settings: dict[str, object]
-) -> tuple[dict[int, dict[str, object]], tuple[dict[str, object], ...]]:
+def _wire_projects(case: Case) -> tuple[dict[str, object], ...]:
     """Seed other projects referenced by jobs exactly as the D24 development seed does."""
-    owners: dict[int, dict[str, object]] = {case.initial.project_id: settings}
+    seen = {case.initial.project_id}
     additional = []
     for job in case.initial.jobs:
-        owner_id = job["project_id"]
-        if owner_id in owners:
+        if job["project_id"] in seen:
             continue
-        owner_settings = _wire_settings(job.get("input_settings", {}))
-        owners[owner_id] = owner_settings
+        seen.add(job["project_id"])
         additional.append({
-            "project_id": owner_id,
+            "project_id": job["project_id"],
             "revision": job["input_revision"],
-            "settings": owner_settings,
+            "settings": _wire_settings(job["input_settings"]),
             "project_status": "generating"
             if job["status"] in {"pending", "running"} else "failed",
         })
-    return owners, tuple(additional)
-
-
-def _prior_turn_defaults(case: Case, value: dict[str, object]) -> dict[str, object]:
-    """Fill D24-optional prior-turn identity fields from the selected project state."""
-    result_revision = value.get("result_revision")
-    settings_saved = value.get("settings_saved", False)
-    if type(result_revision) is int and result_revision > 1 and settings_saved is True:
-        base_revision: object = result_revision - 1
-    elif type(result_revision) is int:
-        base_revision = result_revision
-    else:
-        base_revision = case.initial.revision
-    return {
-        "project_id": case.initial.project_id,
-        "base_revision": base_revision,
-        "settings_saved": False,
-        **value,
-    }
+    return tuple(additional)
 
 
 def _wire_prior_turn(value: dict[str, object]) -> dict[str, object]:
@@ -299,6 +265,7 @@ def _wire_prior_turn(value: dict[str, object]) -> dict[str, object]:
 
 def case_to_unlabeled(case: Case) -> UnlabeledTrialCase:
     """Project one label-bearing D24 case through an explicit wire allowlist."""
+    case = normalize_case(case)
     if case.split != "held_out" or not case.tags:
         raise ValueError("only categorized held-out cases can be projected")
     request = case.request.model_dump(mode="json")
@@ -338,32 +305,22 @@ def case_to_unlabeled(case: Case) -> UnlabeledTrialCase:
                 "action": details["action"],
             }
         )
-    settings = _wire_settings(case.initial.settings)
-    owners, additional_projects = _wire_projects(case, settings)
+    additional_projects = _wire_projects(case)
     initial: dict[str, object] = {
         "project_id": case.initial.project_id,
         "revision": case.initial.revision,
-        "settings": settings,
+        "settings": _wire_settings(case.initial.settings),
         "project_status": case.initial.project_status,
         "jobs": tuple(
-            {
-                "kind": "full",
-                **item,
-                "input_settings": _wire_settings(
-                    item.get("input_settings", {}), owners[item["project_id"]]
-                ),
-            }
+            {**item, "input_settings": _wire_settings(item["input_settings"])}
             for item in case.initial.jobs
         ),
         "history": tuple(
-            {**item, "settings": _wire_settings(item["settings"], settings)}
+            {**item, "settings": _wire_settings(item["settings"])}
             for item in case.initial.history
         ),
         "artifact_revisions": tuple(case.initial.artifact_revisions),
-        "prior_turns": tuple(
-            _wire_prior_turn(_prior_turn_defaults(case, item))
-            for item in case.initial.prior_turns
-        ),
+        "prior_turns": tuple(_wire_prior_turn(item) for item in case.initial.prior_turns),
     }
     if additional_projects:
         initial["additional_projects"] = additional_projects
@@ -850,7 +807,7 @@ async def _run_trial(
             observation, _ = _observation(output_path)
             if observation.mode != mode or observation.case_sha256 != projected.case_sha256:
                 raise ValueError("trial observation does not match its invocation")
-            score = score_trial(case, observation.model_dump(mode="json"))
+            score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
             candidate_snapshot = observation.candidate_snapshot_sha256
         except (OSError, ValidationError, ValueError):
             outcome = "transport_failure"

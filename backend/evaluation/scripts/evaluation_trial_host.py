@@ -280,10 +280,10 @@ class RedactedHistoryEntry(_StrictRecord):
     revision: int = Field(ge=1, le=10**12)
     settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     changed_fields: tuple[Literal[
-        "subtitle_font_size", "voicevox_speed_scale", "voicevox_speaker_id",
-        "pronunciation_overrides", "narration_pacing_mode",
+        "subtitle_font_size", "voicevox_speed_scale", "voicevox_pitch_scale",
+        "voicevox_speaker_id", "pronunciation_overrides", "narration_pacing_mode",
         "narration_sentence_pause_seconds",
-    ], ...] = Field(max_length=6, strict=False)
+    ], ...] = Field(max_length=7, strict=False)
     restored_from_revision: int | None = Field(default=None, ge=1, le=10**12)
 
     @model_validator(mode="after")
@@ -1210,7 +1210,8 @@ def _candidate_worker(model_call_budget: int) -> int:
                 for index, turn in enumerate(initial["prior_turns"]):
                     proposal = turn.get("proposal")
                     outcome = InterpretationOutcome.model_validate({
-                        "status": "proposed" if proposal and proposal["kind"] == "operation" else "needs_input",
+                        "status": {"operation": "proposed", "unsupported": "unsupported",
+                                   "no_operation": "dismissed"}.get(proposal["kind"] if proposal else "", "needs_input"),
                         "proposal": proposal,
                     })
                     response = LanguageResponse(request_id=turn["request_id"], core_request_id="seed-" + turn["request_id"],

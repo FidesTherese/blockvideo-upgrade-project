@@ -28,6 +28,7 @@ from evaluation.blinded_io import (
     ensure_writable_directory as _ensure_writable_directory,
     publish_immutable as _publish_immutable,
 )
+from evaluation.case_normalization import normalize_case
 from evaluation.blinded_runner import (
     _D36_SOURCE_PATHS,
     _D37_SOURCE_PATHS,
@@ -2529,13 +2530,28 @@ def _write_task4_inputs(root: Path, case: Case) -> tuple[Path, Path, Path, Path,
     return corpus, review_paths[0], review_paths[1], index, key
 
 
+def _host_settings_observation(case: Case, observation: dict[str, object]) -> dict[str, object]:
+    """Rehash canned settings as the real host does: over the projected (completed) fields."""
+    raw = dict(case.initial.settings)
+    completed = dict(normalize_case(case).initial.settings)
+    replacements = {
+        _settings_sha256(raw): _settings_sha256(completed),
+        _settings_sha256({**raw, "subtitle_font_size": 50}):
+            _settings_sha256({**completed, "subtitle_font_size": 50}),
+    }
+    text = json.dumps(observation)
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return json.loads(text)
+
+
 def _task4_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *, mutate_candidate: bool = False,
 ) -> dict[str, object]:
     case = _score_case("none")
-    observation = _score_observation("none")
+    observation = _host_settings_observation(case, _score_observation("none"))
     candidate, candidate_commit, candidate_files = _make_task4_candidate(tmp_path)
     tool_repo, _, d36_attestation = _make_task4_tool_repo(
         tmp_path, observation, mutate_candidate=mutate_candidate
