@@ -43,6 +43,7 @@ from evaluation.blinded_contracts import (
     opaque_case_token,
     token_key,
 )
+from app.schemas import ProjectCreate
 from evaluation.blinded_scoring import TrialScore, score_trial
 from evaluation.evidence_json import parse_canonical_model
 from evaluation.contracts import Case
@@ -73,6 +74,7 @@ from evaluation.tool_attestation import (
     validate_git_repository,
 )
 from evaluation.unlabeled_contracts import (
+    UnlabeledSettings,
     UnlabeledTrialCase,
     canonical_case_sha256,
 )
@@ -188,16 +190,61 @@ def _assert_no_forbidden_wire_keys(value: object) -> None:
             _assert_no_forbidden_wire_keys(item)
 
 
-def _wire_settings(value: dict[str, object]) -> dict[str, object]:
+# D24 permits partial setting snapshots; the development seed completes them
+# with product defaults (other projects) or the owner's current settings.
+_SETTING_DEFAULTS: dict[str, object] = {
+    name: ProjectCreate.model_fields[name].get_default(call_default_factory=True)
+    for name in UnlabeledSettings.model_fields
+}
+
+
+def _wire_settings(
+    value: dict[str, object], base: dict[str, object] | None = None
+) -> dict[str, object]:
+    merged = {**_SETTING_DEFAULTS, **(base or {}), **value}
     return {
-        "subtitle_font_size": value["subtitle_font_size"],
-        "voicevox_speed_scale": value["voicevox_speed_scale"],
-        "voicevox_speaker_id": value["voicevox_speaker_id"],
-        "pronunciation_overrides": tuple(value["pronunciation_overrides"]),
-        "narration_pacing_mode": value["narration_pacing_mode"],
-        "narration_sentence_pause_seconds": value[
-            "narration_sentence_pause_seconds"
-        ],
+        name: tuple(merged[name]) if name == "pronunciation_overrides" else merged[name]
+        for name in UnlabeledSettings.model_fields
+    }
+
+
+def _wire_projects(
+    case: Case, settings: dict[str, object]
+) -> tuple[dict[int, dict[str, object]], tuple[dict[str, object], ...]]:
+    """Seed other projects referenced by jobs exactly as the D24 development seed does."""
+    owners: dict[int, dict[str, object]] = {case.initial.project_id: settings}
+    additional = []
+    for job in case.initial.jobs:
+        owner_id = job["project_id"]
+        if owner_id in owners:
+            continue
+        owner_settings = _wire_settings(job.get("input_settings", {}))
+        owners[owner_id] = owner_settings
+        additional.append({
+            "project_id": owner_id,
+            "revision": job["input_revision"],
+            "settings": owner_settings,
+            "project_status": "generating"
+            if job["status"] in {"pending", "running"} else "failed",
+        })
+    return owners, tuple(additional)
+
+
+def _prior_turn_defaults(case: Case, value: dict[str, object]) -> dict[str, object]:
+    """Fill D24-optional prior-turn identity fields from the selected project state."""
+    result_revision = value.get("result_revision")
+    settings_saved = value.get("settings_saved", False)
+    if type(result_revision) is int and result_revision > 1 and settings_saved is True:
+        base_revision: object = result_revision - 1
+    elif type(result_revision) is int:
+        base_revision = result_revision
+    else:
+        base_revision = case.initial.revision
+    return {
+        "project_id": case.initial.project_id,
+        "base_revision": base_revision,
+        "settings_saved": False,
+        **value,
     }
 
 
@@ -291,25 +338,35 @@ def case_to_unlabeled(case: Case) -> UnlabeledTrialCase:
                 "action": details["action"],
             }
         )
-    initial = {
+    settings = _wire_settings(case.initial.settings)
+    owners, additional_projects = _wire_projects(case, settings)
+    initial: dict[str, object] = {
         "project_id": case.initial.project_id,
         "revision": case.initial.revision,
-        "settings": _wire_settings(case.initial.settings),
+        "settings": settings,
         "project_status": case.initial.project_status,
         "jobs": tuple(
             {
+                "kind": "full",
                 **item,
-                "input_settings": _wire_settings(item["input_settings"]),
+                "input_settings": _wire_settings(
+                    item.get("input_settings", {}), owners[item["project_id"]]
+                ),
             }
             for item in case.initial.jobs
         ),
         "history": tuple(
-            {**item, "settings": _wire_settings(item["settings"])}
+            {**item, "settings": _wire_settings(item["settings"], settings)}
             for item in case.initial.history
         ),
         "artifact_revisions": tuple(case.initial.artifact_revisions),
-        "prior_turns": tuple(_wire_prior_turn(item) for item in case.initial.prior_turns),
+        "prior_turns": tuple(
+            _wire_prior_turn(_prior_turn_defaults(case, item))
+            for item in case.initial.prior_turns
+        ),
     }
+    if additional_projects:
+        initial["additional_projects"] = additional_projects
     payload: dict[str, object] = {
         "schema_version": 1,
         "case_id": case.case_id,
@@ -953,6 +1010,11 @@ async def _run_blinded_evaluation_anchored(
         token_by_id = {
             case.case_id: opaque_case_token(key, case.case_id) for case in cases
         }
+    # Reject unprojectable included cases before any protocol or trial is written.
+    included_tokens = set(included)
+    for case in cases:
+        if token_by_id[case.case_id] in included_tokens:
+            case_to_unlabeled(case)
     case_tokens = tuple(binding.case_token for binding in bindings)
     category_tokens = tuple(sorted({binding.category_token for binding in bindings}))
     protocol = EvaluationProtocol(

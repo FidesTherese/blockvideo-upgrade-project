@@ -1122,6 +1122,26 @@ materialized runtime. This changes the inventory and aggregate of any re-freeze
 (including D35), so earlier D36 evidence stays valid only for the tooling that
 produced it. No gate, threshold or pin changes.
 
+#### D37 projection parity amendment (2026-10-04)
+
+D37's first held-out run stopped before any trial because `case_to_unlabeled` was
+stricter than the D24 case format. The D24 development seed is the reference reading
+of a case's initial state, so the projection now matches it: partial job
+`input_settings` complete from the owning project's settings, partial history
+settings complete from the selected project's current settings, a job of another
+project seeds that project in `additional_projects` (product defaults plus the job
+snapshot, revision from the job, `generating` when active and `failed` otherwise), a
+missing job `kind` is `full`, and prior turns without `project_id`, `base_revision`
+or `settings_saved` take the selected project, a revision derived from
+`result_revision` (minus one when the turn saved settings) or the current revision,
+and `false`. Event details, prior-turn statuses and proposal kinds outside the wire
+contract still fail closed; the frozen D36 trial host and wire contract are unchanged.
+
+The runner now projects every included case before writing the protocol, so an
+unprojectable corpus stops before any trial. `scripts/check_blinded_projection.py`
+reports failures by case ID, field location, key name and identifier-shaped labels
+only, so an evaluator can share the report without revealing held-out text or labels.
+
 `evaluation/release_candidate/freeze.py` reads bounded control bytes once, validates
 the detached lowercase 64-hex digest before parsing, requires byte-for-byte canonical
 JSON and the exact fields above, and then matches commit, subject, and cleanliness to
