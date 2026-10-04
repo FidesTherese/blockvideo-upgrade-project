@@ -71,7 +71,10 @@ python -m uv run python -m scripts.check_blinded_projection --corpus <封印フ�
   全イベント種別を実製品で採点するテストを追加して、採点側の不一致 6 件を修正しました
   （初回保存前の基準履歴、確認待ち中の executed、生成開始時の stage、キャンセル効果、受領記録 2 件、
   同時送信の比較）。いずれも正しい候補を不合格にする方向の誤りでした。
-- ホストと受け口の変更なので、**r3 で再凍結し D39 を取り直します**（以降は r3 を使用）。
+- ホストと受け口の変更なので **r3 で再凍結し D39 を取り直しました（2026-10-05、合格）**。
+  凍結 `release-evidence/d36-r3/c910dcb3d2399b53-93dae092bf04`（freeze-manifest は r2 と同一バイト、
+  SHA-256 `8c8afa4c…`。変わったのは D36 ツール構成証明 `b5e2577c…`）、D39 `d39-d35.1-r3-*`
+  （smoke 全段階完了、秘密情報スキャン 0 件）。**以降の D37・D38・D40 は r3 を使います。**
 
 ## 1. 済んでいること
 
@@ -135,7 +138,7 @@ held-out の封印フォルダと承認台帳を使い、評価者が管理す�
 ```text
 python -m uv run python -m scripts.run_blinded_evaluation \
   --candidate-root C:\Users\Danir\Downloads\blockvideo-d35.1-candidate \
-  --freeze-manifest <repo>\release-evidence\d36-r2\c910dcb3d2399b53-93dae092bf04\freeze-manifest.json \
+  --freeze-manifest <repo>\release-evidence\d36-r3\c910dcb3d2399b53-93dae092bf04\freeze-manifest.json \
   --corpus <封印フォルダの held-out コーパス> \
   --human-review <人の承認台帳> --independent-review <独立承認台帳> \
   --output <新しい空の評価出力フォルダ> --model <評価者のモデルID> \
