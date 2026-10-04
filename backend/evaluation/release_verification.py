@@ -295,7 +295,9 @@ def build_group_environment(root: Path, *, python_executable: Path, node_executa
     else:
         system_paths = ["/usr/bin", "/bin"]
     writable = {
-        "HOME": "home", "USERPROFILE": "home", "APPDATA": "home/appdata", "LOCALAPPDATA": "home/local",
+        # Windows-shaped AppData: programs such as Chrome resolve known folders from
+        # %USERPROFILE%\AppData\{Local,Roaming}, not from APPDATA/LOCALAPPDATA.
+        "HOME": "home", "USERPROFILE": "home", "APPDATA": "home/AppData/Roaming", "LOCALAPPDATA": "home/AppData/Local",
         "XDG_CONFIG_HOME": "home/config", "XDG_CACHE_HOME": "home/cache", "XDG_DATA_HOME": "home/data", "XDG_STATE_HOME": "home/state",
         "TEMP": "temp", "TMP": "temp", "TMPDIR": "temp", "UV_PROJECT_ENVIRONMENT": "env", "UV_CACHE_DIR": "uv-cache",
         "NPM_CONFIG_CACHE": "npm-cache", "RUFF_CACHE_DIR": "ruff-cache", "PNPM_HOME": "pnpm-home",
