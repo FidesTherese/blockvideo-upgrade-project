@@ -40,7 +40,12 @@ python -m uv run python -m scripts.check_blinded_projection --corpus <封印フ�
 - 残り 22 問は 7 パターン（イベント詳細の別名 3 種、会話履歴の `target_project_id`・空の基準リビジョン・
   自分の依頼への後続リンク、ピッチ設定 `voicevox_pitch_scale`、「対応外」提案）。すべて修正済み。
 - ピッチ設定と提案の種類は凍結済み D36 の受け口と試験ホストの変更なので、**D35.1 の再凍結と D39 の
-  取り直しが必要**です（実装側で実施）。評価者には新しい凍結の freeze-manifest を使ってもらいます。
+  取り直しが必要**でした。
+- **再凍結と D39 は完了（2026-10-04）**: 凍結 `release-evidence/d36-r2/c910dcb3d2399b53-93dae092bf04`
+  （freeze-manifest SHA-256 `8c8afa4c5bf5947052baf97e888193bdb3124d4971b764cb94d50bb7b1a41649`）、
+  D39 `d39-d35.1-r2-materialization`・`d39-d35.1-r2-smoke`・`d39-d35.1-r2-verification` は合格
+  （smoke 全段階完了、秘密情報スキャン 4 規則 0 件）。**以降の D37・D38・D40 はこの r2 の凍結と D39 を使います。**
+  `d36/c910…` と `d39-d35.1-*-6` は旧ツール用の記録として残しています。
 
 ## 1. 済んでいること
 
@@ -104,7 +109,7 @@ held-out の封印フォルダと承認台帳を使い、評価者が管理す�
 ```text
 python -m uv run python -m scripts.run_blinded_evaluation \
   --candidate-root C:\Users\Danir\Downloads\blockvideo-d35.1-candidate \
-  --freeze-manifest <repo>\release-evidence\d36\c910dcb3d2399b53-93dae092bf04\freeze-manifest.json \
+  --freeze-manifest <repo>\release-evidence\d36-r2\c910dcb3d2399b53-93dae092bf04\freeze-manifest.json \
   --corpus <封印フォルダの held-out コーパス> \
   --human-review <人の承認台帳> --independent-review <独立承認台帳> \
   --output <新しい空の評価出力フォルダ> --model <評価者のモデルID> \
