@@ -1198,14 +1198,16 @@ def _score_observation(event_kind: str) -> dict[str, object]:
     same_response = event_kind != "same_id_different_body"
     replay_reason = "request_id_conflict" if event_kind == "same_id_different_body" else None
     language_additions = 1
-    receipt_additions = 1
+    # Real product: saving then confirming generation executes two operations.
+    receipt_additions = 2 if confirmation else 1
     observation = {
         "schema_version": 1,
         "response": {
             "http_status": 200,
             "status": "ready" if confirmation else "completed",
             "mode": "all_tools",
-            "executed": not confirmation,
+            # The request's own settings save ran even while generation awaits confirmation.
+            "executed": True,
             "requires_confirmation": confirmation,
             "operation_id": "project.subtitle-font-size.set",
             "operation_version": 1,
@@ -1219,7 +1221,7 @@ def _score_observation(event_kind: str) -> dict[str, object]:
         "before": _redacted_state("before"),
         "after": _redacted_state(
             "after",
-            history_count=1,
+            history_count=2,
             job_count=1 if confirmation else 0,
             receipt_count=receipt_additions,
             language_request_count=language_additions,
@@ -1229,7 +1231,8 @@ def _score_observation(event_kind: str) -> dict[str, object]:
             "settings": 1,
             "revision": 1,
             "jobs": int(confirmation),
-            "cancellations": 0,
+            # The host's cancellation effect also registers a newly queued job.
+            "cancellations": int(confirmation),
             "receipts": receipt_additions,
             "artifacts": 0,
             "external_calls": 0,
@@ -1319,6 +1322,14 @@ def _score_observation(event_kind: str) -> dict[str, object]:
     initial_settings = _score_case(event_kind).initial.settings
     saved_settings = {**initial_settings, "subtitle_font_size": 50}
     observation["after"]["history_entries"] = [
+        # The product records the pre-change revision before the first save.
+        {
+            "project_id": 1,
+            "revision": 1,
+            "settings_sha256": _settings_sha256(initial_settings),
+            "changed_fields": [],
+            "restored_from_revision": None,
+        },
         {
             "project_id": 1,
             "revision": 2,

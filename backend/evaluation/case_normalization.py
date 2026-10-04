@@ -25,6 +25,8 @@ SETTING_DEFAULTS: dict[str, Any] = {
     for name in SETTING_FIELDS
 }
 
+AFTER_SUBMIT_RACE = "after_submit_before_confirmation"
+
 # Author spellings of event details, mapped to the D37 wire names.
 _DETAIL_ALIASES: dict[str, dict[str, str]] = {
     "revision_race": {
@@ -59,6 +61,11 @@ def _event_details(case: Case, settings: dict[str, Any]) -> dict[str, Any]:
             details[name] = details[alias]
     if case.event.kind == "revision_race" and "external_settings" in details:
         details["external_settings"] = _external_patch(details["external_settings"], settings)
+    if case.event.kind == "revision_race" and "timing" not in details:
+        labels = {details.get("phase"), details.get("when")}
+        details["timing"] = (
+            AFTER_SUBMIT_RACE if AFTER_SUBMIT_RACE in labels else "before_execution"
+        )
     if case.event.kind == "switch_target":
         details.setdefault("action", "read_original_request")
     if case.event.kind == "same_id_different_body" and "replacement_text" not in details:

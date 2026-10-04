@@ -83,6 +83,11 @@ def _mapping(value: object, name: str) -> dict[str, Any]:
     return value
 
 
+def _race_after_submit(case: Case) -> bool:
+    return (case.event.kind == "revision_race"
+            and case.event.details.get("timing") == "after_submit_before_confirmation")
+
+
 def _final_effects(case: Case) -> Effects:
     return case.expected.after_event or case.expected.submit
 
@@ -174,7 +179,25 @@ def _expected_history(
     initial_settings = dict(case.initial.settings)
     submit = case.expected.submit
     race_revision = case.event.details.get("external_revision") if case.event.kind == "revision_race" else None
-    candidate_persists = submit.revision_delta == 1 and race_revision is None
+    race_after_submit = _race_after_submit(case)
+    candidate_persists = submit.revision_delta == 1 and (race_revision is None or race_after_submit)
+    event_persists = (
+        not candidate_persists and case.event.kind != "revision_race" and final.revision_delta == 1
+    )
+    # The product records the pre-change revision before the first save or job
+    # (record_settings) when no history row exists for it yet.
+    if ((candidate_persists or event_persists or final.new_jobs >= 1)
+            and (case.initial.project_id, initial_revision)
+            not in {(item["project_id"], item["revision"]) for item in before}):
+        after.append(
+            {
+                "project_id": case.initial.project_id,
+                "revision": initial_revision,
+                "settings_sha256": _canonical_hash(initial_settings),
+                "changed_fields": [],
+                "restored_from_revision": None,
+            }
+        )
     current_settings = initial_settings
     if candidate_persists:
         current_settings = {**current_settings, **submit.settings_delta}
@@ -189,7 +212,7 @@ def _expected_history(
                 "restored_from_revision": _restore_revision(case),
             }
         )
-    elif case.event.kind != "revision_race" and final.revision_delta == 1:
+    elif event_persists:
         current_settings = {**current_settings, **final.settings_delta}
         revision = initial_revision + 1
         settings_by_revision[revision] = current_settings
@@ -204,8 +227,11 @@ def _expected_history(
         )
     if case.event.kind == "revision_race":
         external_settings = _mapping(case.event.details.get("external_settings"), "external settings")
-        if type(race_revision) is not int or race_revision != initial_revision + 1:
+        race_offset = 2 if race_after_submit else 1
+        if type(race_revision) is not int or race_revision != initial_revision + race_offset:
             raise ValueError("revision_race requires the exact next external revision")
+        if race_after_submit and not candidate_persists:
+            raise ValueError("an after-submit race needs the request's own save first")
         current_settings = {**current_settings, **external_settings}
         settings_by_revision[race_revision] = current_settings
         after.append(
@@ -306,9 +332,14 @@ def _response_matches_effects(
     accepted_proposals: set[tuple[object, ...]],
     *,
     interpretation: str = "operation",
+    saved_before: bool = False,
 ) -> bool:
     status = response.get("status")
-    completed = status == "completed"
+    # The product reports executed once the request's own settings save ran, also
+    # while generation still awaits confirmation or that confirmation is refused.
+    completed = status == "completed" or saved_before or (
+        effects.outcome == "saved_awaiting_confirmation"
+    )
     reason_code = response.get("reason_code")
     expected_missing_fields = (
         sorted(set(effects.question_for)) if effects.question_for else None
@@ -369,7 +400,7 @@ def _event_check(case: Case, observation: dict[str, Any]) -> tuple[bool, bool]:
     }
     final = _final_effects(case)
 
-    if kind in {"none", "revision_race"}:
+    if kind in {"none", "revision_race"} and not _race_after_submit(case):
         valid = (
             not replay_attempted
             and not confirmation_attempted
@@ -379,7 +410,10 @@ def _event_check(case: Case, observation: dict[str, Any]) -> tuple[bool, bool]:
         replay_response = _mapping(replay.get("response"), "replay response")
         valid = (
             replay_attempted
-            and replay.get("state_unchanged") is True
+            # Concurrent submissions share one before/after window, so the host's
+            # state comparison spans the single execution; the persisted checks
+            # (one revision, receipt and language record) prove no duplicate ran.
+            and (replay.get("state_unchanged") is True or kind == "concurrent_identical")
             and replay.get("same_response") is True
             and replay_response == primary
             and type(replay_response.get("http_status")) is int
@@ -403,7 +437,7 @@ def _event_check(case: Case, observation: dict[str, Any]) -> tuple[bool, bool]:
             and not confirmation_attempted
             and not duplicate_attempted
         )
-    elif kind in _CONFIRMATION_EVENTS:
+    elif kind in _CONFIRMATION_EVENTS or _race_after_submit(case):
         confirmation_response = _mapping(
             confirmation.get("response"), "confirmation response"
         )
@@ -412,7 +446,8 @@ def _event_check(case: Case, observation: dict[str, Any]) -> tuple[bool, bool]:
             and confirmation_attempted
             and confirmation.get("state_sha256") == after.get("state_sha256")
             and _response_matches_effects(
-                confirmation_response, final, accepted_proposals
+                confirmation_response, final, accepted_proposals,
+                saved_before=case.expected.submit.outcome == "saved_awaiting_confirmation",
             )
             and duplicate_attempted == (kind == "confirm_twice")
         )
@@ -535,6 +570,9 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         if project_id != case.initial.project_id
     )
     permitted_primary_changes = {"revision", "status", "settings_sha256"}
+    if final.new_jobs:
+        # Queuing a job moves the project to its first stage.
+        permitted_primary_changes.update({"current_stage", "progress"})
     if final.artifact_policy == "job_may_publish_on_success":
         permitted_primary_changes.update(
             {"current_artifact_id", "output_video", "output_subtitle"}
@@ -668,8 +706,11 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
         if cancellations_after.get(job_id) != cancellations_before[job_id]
     }
     expected_cancellation = _has_cancellation(final)
+    # The host's cancellation effect compares (job, cancel_requested) lists, so a
+    # queued or removed job also registers there.
+    cancellation_effect = expected_cancellation or bool(new_jobs) or bool(removed_job_ids)
     cancellation_valid = (
-        effects.get("cancellations") == int(expected_cancellation)
+        effects.get("cancellations") == int(cancellation_effect)
         and (
             changed_cancellations == {asserted_job_id}
             if expected_cancellation and asserted_job_id is not None
@@ -709,9 +750,10 @@ def score_trial(case: Case, observation: dict[str, object]) -> TrialScore:
     )
 
     expected_settings = expected_final_settings != case.initial.settings
+    # Saving and then confirming generation executes two operations.
     expected_receipt_additions = int(
         case.expected.submit.receipt_rule in {"new_request", "first_result"}
-    )
+    ) + int(case.expected.submit.outcome == "saved_awaiting_confirmation" and final.new_jobs >= 1)
     expected_language_additions = 1
     initial_settings_identity = before.get("settings_sha256") == _canonical_hash(case.initial.settings)
     settings_identity = after.get("settings_sha256") == _canonical_hash(expected_final_settings)

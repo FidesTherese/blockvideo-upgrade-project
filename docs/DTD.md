@@ -1160,6 +1160,38 @@ project named only by a prior turn or by a changed request is seeded with produc
 defaults (`completed`, revision at least the turn's base/result revision, else 1).
 Changes to unmodeled settings stay outside the wire state, as before.
 
+A fourth check (at `39e7144`) left 4 cases. Three describe a race after the request's
+own save: the request saves (initial+1) and awaits generation confirmation, an external
+save lands (initial+2), and the original confirmation is then attempted. The wire race
+event gains `timing` (`before_execution` default, or `after_submit_before_confirmation`,
+read from the author's `phase`/`when` label and requiring `external_revision` =
+initial+2); the host applies such a race after submit and then posts the original
+confirmation, and scoring treats it as a confirmation event with the request's save
+persisted before the race. The fourth answers a clarification about another project;
+the product rejects that at runtime (`dialogue_target_mismatch`), so the wire no longer
+pre-rejects a continuation whose parent belongs to another project.
+
+Testing the race end to end against the real product exposed scorer assumptions that
+had only been checked against canned observations. Each is now covered by a
+real-product scoring test whose labels were written from RULES.md before running it,
+across none, resend, restart resend, concurrent, same-id/different-body, confirm,
+confirm-twice, generation start, clarification, unsupported, no-operation and both
+race timings:
+
+- The product records the pre-change revision as a history row before the first save
+  or job when none exists; expected history now includes it.
+- `executed` is true once the request's own settings save ran, including while
+  generation awaits confirmation or after that confirmation is refused.
+- Queuing a job may change the primary project's `current_stage` and `progress`.
+- The host's cancellation effect also registers a queued or removed job.
+- Saving and then confirming generation adds two receipts.
+- Concurrent identical submissions: the host now settles an in-flight duplicate by
+  reading its stored response (bounded polling) before comparing, and scoring relies on
+  the persisted checks rather than a before/after state comparison that spans the one
+  execution.
+
+Host and wire changes are D36 sources, so the successor is re-frozen (r3) and D39 rerun.
+
 The runner now projects every included case before writing the protocol, so an
 unprojectable corpus stops before any trial. `scripts/check_blinded_projection.py`
 reports failures by case ID, field location, key name and identifier-shaped labels

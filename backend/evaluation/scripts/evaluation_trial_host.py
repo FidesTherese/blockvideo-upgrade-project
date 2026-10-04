@@ -1087,10 +1087,13 @@ def _candidate_worker(model_call_budget: int) -> int:
             settings.language_embedding_base_url = os.environ["LANGUAGE_EMBEDDING_BASE_URL"]
         model_budget = _ModelCallBudget(model_call_budget)
         race_applied = False
+        after_submit_race = False
 
         def apply_external_race() -> None:
             nonlocal race_applied
             if race_applied or event["kind"] != "revision_race":
+                return
+            if event.get("timing", "before_execution") != "before_execution" and not after_submit_race:
                 return
             race_applied = True
             with get_session_factory()() as race_db:
@@ -1460,9 +1463,18 @@ def _candidate_worker(model_call_budget: int) -> int:
                     submitted = list(executor.map(
                         lambda _: client.post("/api/language/requests", json=payload), range(2)
                     ))
-                response_http = submitted[0]
+                # One submission usually observes the other in flight; read its final
+                # stored response (bounded) so both sides are compared after completion.
+                settled = []
+                for item in submitted:
+                    for _ in range(600):
+                        if item.json().get("status") != "interpreting":
+                            break
+                        time.sleep(0.05)
+                        item = client.get(f"/api/language/requests/{request['request_id']}")
+                    settled.append(item)
+                response_http, concurrent_http = settled
                 response = response_http.json()
-                concurrent_http = submitted[1]
                 concurrent_response = concurrent_http.json()
             else:
                 response_http = client.post("/api/language/requests", json=payload)
@@ -1497,7 +1509,14 @@ def _candidate_worker(model_call_budget: int) -> int:
                 return 0
 
             kind = event["kind"]
-            if kind in {"confirm_generation", "confirm_twice"} and response.get("confirmation_token"):
+            if kind == "revision_race" and event.get("timing") == "after_submit_before_confirmation":
+                after_submit_race = True
+                apply_external_race()
+                if response.get("confirmation_token"):
+                    permission = {"confirmation_token": response["confirmation_token"], "confirm_generation": True}
+                    confirmation_http = client.post(f"/api/language/requests/{request['request_id']}/execute", json=permission)
+                    confirmation_response = confirmation_http.json()
+            elif kind in {"confirm_generation", "confirm_twice"} and response.get("confirmation_token"):
                 permission = {"confirmation_token": response["confirmation_token"], "confirm_generation": True}
                 confirmation_http = client.post(f"/api/language/requests/{request['request_id']}/execute", json=permission)
                 confirmation_response = confirmation_http.json()

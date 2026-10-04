@@ -521,6 +521,10 @@ class UnlabeledRevisionRaceEvent(_RequestEvent):
     kind: Literal["revision_race"]
     external_revision: int = Field(ge=1, le=MAX_REVISION)
     external_settings: UnlabeledSettingsPatch
+    # before_execution: the external save lands while the request is interpreted.
+    # after_submit_before_confirmation: it lands after the request's own save, and
+    # the original confirmation is then attempted.
+    timing: Literal["before_execution", "after_submit_before_confirmation"] = "before_execution"
 
 
 class UnlabeledSwitchTargetEvent(_RequestEvent):
@@ -609,8 +613,8 @@ class UnlabeledTrialCase(StrictUnlabeledRecord):
                 )
             if successor_id is not None:
                 raise ValueError("continuation parent already has successor")
-            if request.target_project_id is not None and parent.project_id != request.target_project_id:
-                raise ValueError("continuation parent ownership mismatch")
+            # A continuation naming another project is a product-rule case
+            # (dialogue_target_mismatch); the product, not the seed, decides it.
         if isinstance(self.event, UnlabeledRevisionRaceEvent):
             primary_history_revisions = {
                 item.revision
@@ -621,9 +625,10 @@ class UnlabeledTrialCase(StrictUnlabeledRecord):
                 raise ValueError("external revision collides with seeded history")
             if self.event.external_revision <= self.initial.revision:
                 raise ValueError("external revision must exceed primary initial revision")
-            if (self.initial.revision == MAX_REVISION
-                    or self.event.external_revision != self.initial.revision + 1):
-                raise ValueError("external revision must be the next primary revision")
+            offset = 2 if self.event.timing == "after_submit_before_confirmation" else 1
+            if (self.initial.revision > MAX_REVISION - offset
+                    or self.event.external_revision != self.initial.revision + offset):
+                raise ValueError("external revision must follow the primary revision for its timing")
         if isinstance(self.event, UnlabeledDifferentBodyEvent):
             replacement_target = self.event.replacement_target_project_id
             if replacement_target is not None and replacement_target not in projects:

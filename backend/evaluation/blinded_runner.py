@@ -305,6 +305,7 @@ def case_to_unlabeled(case: Case) -> UnlabeledTrialCase:
         event.update(
             {
                 "external_revision": details["external_revision"],
+                "timing": details["timing"],
                 "external_settings": {
                     **details["external_settings"],
                     **(
