@@ -187,6 +187,7 @@ export type ProjectOperationId =
   | 'project.subtitle-font-size.adjust'
   | 'project.settings.update'
   | 'project.settings.restore'
+  | 'project.artifact.restore'
   | 'project.generation.start'
   | 'project.generation.cancel'
   | 'project.generation.retry';

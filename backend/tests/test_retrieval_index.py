@@ -39,17 +39,18 @@ def write_json(path: Path, value: object) -> None:
 
 def alter_catalog(paths: tuple[Path, Path], change: str) -> None:
     raw = json.loads(paths[0].read_bytes())
+    adjust = next(item for item in raw["operations"] if item["operation_id"] == "project.subtitle-font-size.adjust")
     if change == "description":
-        raw["operations"][0]["description"] += " Updated canonical explanation."
+        adjust["description"] += " Updated canonical explanation."
     elif change == "example":
-        raw["operations"][0]["examples"].append("字幕サイズを明示量で変える")
+        adjust["examples"].append("字幕サイズを明示量で変える")
     elif change == "schema":
-        raw["operations"][0]["input_schema"]["properties"]["delta"]["minimum"] = -100
+        adjust["input_schema"]["properties"]["delta"]["minimum"] = -100
     elif change == "version":
-        raw["operations"][0]["operation_version"] = 3
+        adjust["operation_version"] = 3
         scope = json.loads(paths[1].read_bytes())
         for binding in scope["bindings"]:
-            if binding["operation_id"] == raw["operations"][0]["operation_id"]:
+            if binding["operation_id"] == adjust["operation_id"]:
                 binding["operation_version"] = 3
         write_json(paths[1], scope)
     write_json(paths[0], raw)
@@ -72,7 +73,7 @@ def full_scope(sources) -> SearchScope:
 def test_documents_reproducible_complete_and_public(sources_files) -> None:
     sources = load_sources(*sources_files)
     assert sources == load_sources(*sources_files)
-    assert sources.operation_count == 9
+    assert sources.operation_count == 10
     assert len({d.document_id for d in sources.documents}) == len(sources.documents)
     assert {d.kind for d in sources.documents} == {"description", "example", "input"}
     raw = canonical([d.model_dump(mode="json") for d in sources.documents]).decode()

@@ -16,6 +16,12 @@
     "arguments": {"kind": "full"}
   },
   "references": {
+    "artifact": {
+      "patterns": ["(?:動画|成果物|artifact)\\s*(?:id|番号)?\\s*[:=#]?\\s*(\\d+)\\s*(?:番)?(?!\\s*(?:px|ピクセル|倍|秒|%))"],
+      "marker": "(?:動画|成果物|artifact)",
+      "answer_prefix": "動画 ",
+      "question": "戻したい完成動画の番号を「動画 3」のように1つ指定してください（出力履歴の「動画 N を開く」の番号です）。"
+    },
     "job": {
       "patterns": ["(?:ジョブ|job)(?:[_\\s]*id)?\\s*[:=#]?\\s*(\\d+)"],
       "marker": "(?:ジョブ|job)",
@@ -33,6 +39,12 @@
     }
   },
   "operations": {
+    "project.artifact.restore": {
+      "mutates": true,
+      "requires_confirmation": false,
+      "negative_phrases": ["動画は戻さない", "動画を戻さない"],
+      "reference": {"argument": "artifact_id", "kind": "artifact"}
+    },
     "project.generation.cancel": {
       "mutates": true,
       "requires_confirmation": false,

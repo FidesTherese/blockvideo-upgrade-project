@@ -33,7 +33,8 @@ class OperationCatalog(BaseModel):
 
 
 _KNOWN_PRECONDITIONS = {"project_exists", "project_editable"}
-_KNOWN_POSTCONDITIONS = {"state_unchanged", "subtitle_font_size_saved", "settings_saved", "job_queued", "cancellation_requested", "settings_restored"}
+_KNOWN_POSTCONDITIONS = {"state_unchanged", "subtitle_font_size_saved", "settings_saved", "job_queued", "cancellation_requested", "settings_restored",
+                         "artifact_restored"}
 _KNOWN_ARTIFACTS = {"video"}
 
 

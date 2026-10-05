@@ -44,6 +44,18 @@ Development recall@5:
 68.1% (English metadata, vector only) to 100% (annotations + hybrid), optimistic
 because some annotation phrasings overlap development requests.
 
+### Artifact restore (catalog-only addition)
+
+`project.artifact.restore@1 {artifact_id}` (handler `project.restore_artifact`,
+precondition `project_editable`, postcondition `artifact_restored`) points
+`current_artifact_id` and the output paths at an earlier verified artifact of the same
+project. It changes neither settings nor revision and queues no job; history stays
+immutable. Unknown or foreign IDs fail with `artifact_not_found` (404), a missing or
+changed file with `artifact_unavailable` (422). Like `settings.restore` it needs no
+generation confirmation (it is reversible by restoring again); the policy binds `artifact_id` to the new `artifact` reference kind ("動画 3"), so the model never
+supplies a number the request did not contain. Language-layer logging derives its
+allowed operation identifiers from the policy file instead of a fixed list.
+
 ### Negation-only requests
 
 `negative_control_reason` also returns `explicit_negative_intent` for any mutating

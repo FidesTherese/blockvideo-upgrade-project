@@ -16,6 +16,7 @@ const operationLabels: Record<string, string> = {
   'project.generation.cancel': 'ジョブのキャンセル',
   'project.settings.update': '設定の保存',
   'project.settings.restore': '設定の版を戻す',
+  'project.artifact.restore': '完成動画を戻す',
   'project.subtitle-font-size.set': '字幕サイズの設定',
   'project.subtitle-font-size.adjust': '字幕サイズの増減',
   'project.status.get': '状態の確認',

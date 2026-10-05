@@ -68,7 +68,7 @@ export function LanguageResultCard({ response, project, history, unavailable, bu
       {!generation && <ul className="space-y-1">{Object.entries(prepared.operation_version === 2 && prepared.operation_id === 'project.settings.update'
         ? { ...(prepared.arguments.settings as Record<string, unknown>), ...(prepared.arguments.subtitle_font_size_delta != null ? { delta: prepared.arguments.subtitle_font_size_delta } : {}) }
         : prepared.arguments).map(([field, value]) =>
-        <li key={field}>{settingNames[field] ?? ({ value: '字幕サイズ', delta: '字幕サイズの増減', revision: '戻す設定の版', job_id: '対象ジョブ' } as Record<string, string>)[field] ?? field}: {settingValue(field === 'value' || field === 'delta' ? 'subtitle_font_size' : field, value)}</li>)}</ul>}
+        <li key={field}>{settingNames[field] ?? ({ value: '字幕サイズ', delta: '字幕サイズの増減', revision: '戻す設定の版', job_id: '対象ジョブ', artifact_id: '戻す完成動画の番号' } as Record<string, string>)[field] ?? field}: {settingValue(field === 'value' || field === 'delta' ? 'subtitle_font_size' : field, value)}</li>)}</ul>}
       <p>{generation ? 'まだ動画生成は開始していません。対象と内容を確認してください。' : settings ? 'まだ設定は変更していません。' : 'まだこの操作は実行していません。'}</p>
       {stale && <p className="text-amber-800">設定が変わったため、この提案は実行できません。最新の状態で依頼し直してください。</p>}
       {response.requires_confirmation && <button type="button" className="btn-primary" disabled={busy || disabled || stale || unavailable || !!response.superseded_by} onClick={onConfirm}>

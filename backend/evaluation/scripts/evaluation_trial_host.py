@@ -50,7 +50,7 @@ ReasonCode = Literal[
     "request_not_ready", "confirmation_mismatch", "generation_confirmation_required",
     "core_request_conflict", "request_not_found", "request_id_conflict", "invalid_arguments",
     "operation_not_found", "invalid_generation_request", "job_not_found", "job_not_retryable",
-    "settings_revision_not_found", "database_busy", "external_outcome_unknown",
+    "settings_revision_not_found", "artifact_not_found", "artifact_unavailable", "database_busy", "external_outcome_unknown",
     "interpretation_failed", "interpretation_interrupted", "model_not_configured", "not_ready",
     "invalid_input", "invalid_json", "invalid_output", "candidate_not_offered", "invalid_response",
     "refused", "incomplete_response", "response_too_large", "http_error", "timeout",

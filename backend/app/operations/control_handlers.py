@@ -1,4 +1,4 @@
-"""Explicit generation, cancellation, current-settings retry and history restore."""
+"""Explicit generation, cancellation, current-settings retry and history restores."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,11 +6,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.artifact import GenerationArtifact
 from app.models.job import GenerationJob, JobStatus
 from app.models.project import Project
 from app.models.settings_revision import SettingsRevision
 from app.operations.contracts import OperationResult
 from app.operations.errors import OperationError
+from app.services.artifact_store import artifact_is_available
 from app.services.external_calls import has_unresolved_calls
 from app.services.job_records import create_pending_job
 from app.services.project_settings import apply_project_settings
@@ -87,3 +89,20 @@ def restore_settings(db: Session, project: Project, arguments: dict[str, Any]) -
     return _result(project, "project.settings.restore", changed=bool(changed),
                    data={"restored_from_revision": saved.revision, "settings": configuration(project),
                          "changed_fields": sorted(changed)})
+
+
+def restore_artifact(db: Session, project: Project, arguments: dict[str, Any]) -> OperationResult:
+    """Point the project's current video at an earlier verified artifact; settings stay as they are."""
+    artifact = db.get(GenerationArtifact, arguments["artifact_id"])
+    if artifact is None or artifact.project_id != project.id:
+        raise OperationError("artifact_not_found", "その番号の完成動画は出力履歴にありません")
+    if not artifact_is_available(artifact):
+        raise OperationError("artifact_unavailable", "その完成動画のファイルが欠損または変更されています")
+    changed = project.current_artifact_id != artifact.id
+    project.current_artifact_id = artifact.id
+    project.output_video_path = artifact.video_path
+    project.output_subtitle_path = artifact.subtitle_path
+    db.flush()
+    return _result(project, "project.artifact.restore", changed=changed,
+                   data={"artifact_id": artifact.id, "artifact_revision": artifact.revision,
+                         "settings_revision": project.revision})

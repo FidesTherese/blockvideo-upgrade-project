@@ -177,7 +177,8 @@ function ProjectMonitor({ id }: { id: number }) {
         <p>「{command.pending.label}」の応答が未確認です。同じ要求を再送して結果を確認できます。二重には実行されません。</p>
         <button type="button" className="btn-secondary" onClick={command.resend}>同じ要求を再送する</button>
       </div>}
-      {history.data && <ProjectOutputHistory projectId={id} history={history.data} legacyVideo={!!p.output_video_path} />}
+      {history.data && <ProjectOutputHistory projectId={id} history={history.data} legacyVideo={!!p.output_video_path}
+        disabled={blocked} onRestore={(artifactId) => command.execute('project.artifact.restore', revision, { artifact_id: artifactId }, '完成動画を戻す')} />}
       <ProjectSettingsEditor key={`${id}:${p.revision}`} project={p} disabled={blocked}
         onSave={(changes) => command.execute('project.settings.update', p.revision, changes, '設定保存')} />
       {history.data && <>

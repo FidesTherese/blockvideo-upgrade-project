@@ -92,7 +92,7 @@ async def test_narrow_failure_expands_once_then_full_and_only_final_is_proposal(
     result = await run(runner, adapter, text="zq")
     assert result.interpretation.status == "proposed"
     assert result.interpretation.proposal.arguments == {"value": 56}
-    assert [len(c["candidates"]) for c in adapter.calls] == [5, 8, 9]
+    assert [len(c["candidates"]) for c in adapter.calls] == [5, 8, 10]
     assert encoder.calls == result.trace.embedding_calls == 1
     assert result.trace.chat_calls == 3
     assert result.trace.expansion_count == result.trace.all_tools_count == 1
@@ -238,10 +238,10 @@ def test_ranking_deduplicates_versions_and_keeps_stable_ties(setup) -> None:
     runner, _, scope, sources, _ = setup
     index = runner._load(sources)
     ranked = rank_operations(index, (4.0, 0.0), scope, sources)
-    assert len(ranked) == 9 and all(c.score == 1.0 for c in ranked)
+    assert len(ranked) == 10 and all(c.score == 1.0 for c in ranked)
     assert [r.key for r in ranked] == sorted({d.key for d in sources.documents})
     assert len([r for r in ranked if r.operation_id == "project.settings.update"]) == 2
-    assert [r.score for r in rank_operations(index, (-1.0, 0.0), scope, sources)] == [-1.0] * 9
+    assert [r.score for r in rank_operations(index, (-1.0, 0.0), scope, sources)] == [-1.0] * 10
     with pytest.raises(RetrievalError):
         rank_operations(index, (float("nan"), 0.0), scope, sources)
 

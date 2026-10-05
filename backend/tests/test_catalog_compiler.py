@@ -31,7 +31,7 @@ def _edit(path: Path, change) -> None:
 def test_repository_catalog_is_consistent() -> None:
     report = compile_catalog()
     assert report.ok, report.errors
-    assert report.operations == 9 and report.annotated_operations == 9 and report.prompt_rules > 100
+    assert report.operations == 10 and report.annotated_operations == 10 and report.prompt_rules > 100
 
 
 def test_operation_without_policy_is_refused(copy: Path) -> None:

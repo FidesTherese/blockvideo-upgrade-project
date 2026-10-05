@@ -11,7 +11,7 @@ function describe(operationId: string, argumentsValue: Record<string, unknown>):
   const entries = Object.entries(argumentsValue.settings && typeof argumentsValue.settings === 'object'
     ? argumentsValue.settings as Record<string, unknown> : argumentsValue);
   return entries.map(([field, value]) => `${settingNames[field] ?? ({ value: '字幕サイズ', delta: '字幕サイズの増減',
-    revision: '戻す設定の版', job_id: '対象ジョブ' } as Record<string, string>)[field] ?? field}: ${settingValue(
+    revision: '戻す設定の版', job_id: '対象ジョブ', artifact_id: '戻す完成動画の番号' } as Record<string, string>)[field] ?? field}: ${settingValue(
     field === 'value' || field === 'delta' ? 'subtitle_font_size' : field, value)}`).join('、');
 }
 

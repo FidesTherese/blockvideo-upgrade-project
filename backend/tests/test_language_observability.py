@@ -62,7 +62,7 @@ def test_timings_candidates_and_guard_survive_exact_replay(harness) -> None:
     metrics = original["diagnostics"]
     assert metrics["started_at"] > 0 and metrics["interpretation_ms"] >= 10
     assert metrics["execution_ms"] >= 0 and metrics["generation_execution_ms"] is None
-    assert len(metrics["candidates"]) == 9
+    assert len(metrics["candidates"]) == 10
     replay = client.post("/api/language/requests", json=payload(project)).json()
     lookup = client.get("/api/language/requests/PRIVATE-ID").json()
     assert replay["diagnostics"] == lookup["diagnostics"] == metrics

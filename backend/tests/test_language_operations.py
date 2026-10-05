@@ -105,7 +105,7 @@ def test_language_and_typed_settings_have_identical_persisted_effects(harness, o
     assert client.get(f"/api/projects/{first}").json()[field] == client.get(f"/api/projects/{second}").json()[field] == value
     assert count(GenerationJob) == 0
     prompt = adapter.calls[0]["prompt"]
-    assert len(prompt["candidates"]) == 9
+    assert len(prompt["candidates"]) == 10
     assert {item["operation_id"] for item in prompt["candidates"]} == {item.operation_id for item in operation_service.list_definitions()}
     assert "source_script" not in json.dumps(prompt)
     assert "title" not in prompt["state"]

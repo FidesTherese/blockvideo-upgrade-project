@@ -10,23 +10,23 @@ from typing import Any, Literal
 from app.core.logging import log
 from app.interpretation.contracts import OperationProposal
 from app.language_operations.contracts import LanguageResponse
+from app.operations.policies import load_policies
 
 _PROCESS_KEY = secrets.token_bytes(32)
-_OPERATIONS = frozenset(f"project.{name}" for name in (
-    "subtitle-font-size.set", "subtitle-font-size.adjust", "settings.update", "status.get",
-    "generation.start", "generation.retry", "generation.cancel", "settings.restore",
-))
+# Catalog operations (every one carries a reviewed policy) are safe identifiers to log.
+_OPERATIONS = frozenset(load_policies().operations)
 _REASONS = frozenset({
     "model_not_configured", "configuration_error", "timeout", "connection_failed", "http_error",
     "model_mismatch", "invalid_input", "invalid_json", "invalid_output", "invalid_response", "invalid_arguments", "candidate_not_offered",
     "incomplete_response", "response_too_large", "refused", "interpretation_failed",
     "interpretation_interrupted", "target_required", "target_conflict", "target_not_found",
     "stale_state", "project_busy", "not_ready", "dialogue_superseded", "job_not_found",
-    "job_not_retryable", "external_result_unknown", "history_not_found",
+    "job_not_retryable", "external_result_unknown", "history_not_found", "artifact_not_found",
+    "artifact_unavailable",
 })
 _NUMBERS = {
     "value": (16, 120), "delta": (-104, 104), "subtitle_font_size": (16, 120),
-    "subtitle_font_size_delta": (-104, 104), "voicevox_speed_scale": (0.5, 2.0),
+    "subtitle_font_size_delta": (-104, 104), "voicevox_speed_scale": (0.5, 2.0), "artifact_id": (1, 10**12),
     "voicevox_speaker_id": (0, 100000), "revision": (1, 10**12),
 }
 
