@@ -192,7 +192,9 @@ def test_every_catalog_schema_can_be_offered_without_handlers(catalog: Operation
 
 def test_interpretation_imports_no_execution_capability() -> None:
     root = CATALOG_PATH.parents[1] / "interpretation"
-    allowed_operations = {"app.operations.catalog", "app.operations.contracts"}
+    # Catalog-side metadata only (policies and limits hold no handlers or executors).
+    allowed_operations = {"app.operations.catalog", "app.operations.contracts",
+                          "app.operations.policies", "app.operations.limits"}
     for file in root.glob("*.py"):
         for node in ast.walk(ast.parse(file.read_text(encoding="utf-8"))):
             imports = [node.module or ""] if isinstance(node, ast.ImportFrom) else (

@@ -6,6 +6,7 @@ import unicodedata
 from typing import Literal
 
 from app.interpretation.contracts import ClarificationProposal, DialogueContextTurn, OperationProposal
+from app.operations.policies import load_policies, settings_values
 
 _PX = r"(?<![\d.])([0-9]+)\s*(?:px|ピクセル)(?![a-z])"
 _UP = r"大き|上げ|増や|増加|拡大"
@@ -45,12 +46,12 @@ def subtitle_question(
     proposal: OperationProposal,
 ) -> ClarificationProposal | None:
     """Unsupported phrasing asks, rather than guessing; saved text never supplies a new value."""
-    name, args = proposal.operation_id, proposal.arguments
-    if name not in {"project.subtitle-font-size.set", "project.subtitle-font-size.adjust", "project.settings.update"}:
+    view = load_policies().settings_view(proposal.operation_id, proposal.operation_version)
+    if view is None:
         return None
-    settings = args.get("settings", {}) if name == "project.settings.update" and proposal.operation_version == 2 else args
-    absolute = args.get("value") if name.endswith("font-size.set") else settings.get("subtitle_font_size")
-    delta = args.get("delta") if name.endswith("font-size.adjust") else args.get("subtitle_font_size_delta")
+    values = settings_values(view, proposal.arguments)
+    absolute = values.get("subtitle_font_size")
+    delta = values.get("subtitle_font_size_delta")
     supplied = _normalize(text)
     pending: list[str] = []
     if relation == "answer":

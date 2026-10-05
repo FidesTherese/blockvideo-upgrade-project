@@ -9,11 +9,12 @@ from app.interpretation.contracts import CandidateRef, InterpretationOutcome, St
 from app.retrieval.contracts import Digest
 from app.retrieval.ranking import RankedCandidate
 from app.operations.contracts import CandidateReadinessSnapshot
+from app.operations.limits import MAX_PROMPT_CANDIDATES
 
 
 class SearchStage(StrictValue):
     name: Literal["initial", "expanded", "all_tools"]
-    candidates: tuple[CandidateRef, ...] = Field(max_length=32, strict=False)
+    candidates: tuple[CandidateRef, ...] = Field(max_length=MAX_PROMPT_CANDIDATES, strict=False)
     candidate_state: CandidateReadinessSnapshot | None = None
     result: Literal["proposed", "needs_input", "unsupported", "dismissed", "error"]
     chat_calls: int = Field(ge=0, le=2)

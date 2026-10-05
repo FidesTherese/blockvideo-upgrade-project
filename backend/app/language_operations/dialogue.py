@@ -12,6 +12,7 @@ from app.models.language_request import LanguageRequestRecord
 from app.models.language_turn import LanguageTurn
 from app.models.operation_request import OperationReceipt
 from app.operations.errors import OperationError
+from app.operations.policies import load_policies
 from app.operations.receipts import canonical_request
 
 
@@ -84,16 +85,17 @@ def require_current(db: Session, request_id: str) -> None:
 def reference_text(request: LanguageInput, turns: tuple[DialogueContextTurn, ...], proposal: OperationProposal) -> str:
     """Bind opaque references to explicit dialogue text, never state guesses."""
     text = unicodedata.normalize("NFKC", request.text).strip()
-    is_job = proposal.operation_id in {"project.generation.cancel", "project.generation.retry"}
-    is_restore = proposal.operation_id == "project.settings.restore"
-    if not turns or not (is_job or is_restore):
+    policies = load_policies()
+    binding = policies.get(proposal.operation_id).reference
+    if not turns or binding is None:
         return text
-    marker = r"(?:ジョブ|job)" if is_job else r"(?:revision|リビジョン|版|バージョン)"
+    kind = policies.references[binding.kind]
+    marker = kind.marker
     if re.search(marker, text, re.IGNORECASE):
         return text
     question = turns[-1].question or ""
     if re.fullmatch(r"\d+", text) and re.search(marker, question, re.IGNORECASE):
-        return ("ジョブ " if is_job else "revision ") + text
+        return kind.answer_prefix + text
     for turn in reversed(turns):
         if re.search(marker, turn.text, re.IGNORECASE):
             return turn.text + "\n" + text

@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.operations.contracts import CandidateReadinessSnapshot
+from app.operations.limits import MAX_CATALOG_OPERATIONS
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=240, pattern=r"\S")]
 
@@ -39,7 +40,7 @@ class InterpretationInput(StrictValue):
     """One interpretation request with explicitly selected candidates."""
 
     text: str = Field(min_length=1, max_length=2000, pattern=r"\S")
-    candidates: tuple[CandidateRef, ...] = Field(min_length=1, max_length=32)
+    candidates: tuple[CandidateRef, ...] = Field(min_length=1, max_length=MAX_CATALOG_OPERATIONS)
     state: MinimalState = Field(default_factory=MinimalState)
     dialogue: tuple[DialogueContextTurn, ...] = Field(default=(), max_length=8)
     candidate_state: CandidateReadinessSnapshot | None = None

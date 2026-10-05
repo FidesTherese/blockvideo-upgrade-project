@@ -22,10 +22,10 @@ from app.language_operations.settings_values import settings_value_question
 from app.operations.catalog import OperationCatalog
 from app.operations.contracts import OperationRequest, OperationTarget, Readiness
 from app.operations.errors import OperationError
+from app.operations.policies import load_policies
 from app.operations.service import OperationService
 from app.semantic_interpretation.interface import CandidateInterpreter
 
-_GENERATION = {"project.generation.start", "project.generation.retry"}
 
 
 class LanguageOperationService:
@@ -95,7 +95,7 @@ class LanguageOperationService:
                 if question is None and isinstance(outcome.proposal, OperationProposal):
                     question = reading_question([turn.text for turn in turns] + [request.text], outcome.proposal)
                     guard_code = "reading" if question else None
-                    if outcome.proposal.operation_id == "project.settings.update" and not outcome.proposal.arguments:
+                    if load_policies().get(outcome.proposal.operation_id).requires_arguments and not outcome.proposal.arguments:
                         question = ClarificationProposal(kind="clarification", question="どの設定を、どの値に変更しますか？", missing_fields=["arguments"])
                         guard_code = "empty_settings"
                 negative_reason = None
@@ -129,7 +129,8 @@ class LanguageOperationService:
                         "status": "ready", "prepared_request": prepared,
                         "generate_after_save": proposal.generate_after_save,
                         "confirmation_token": confirmation,
-                        "requires_confirmation": self.review_all or request.review_all or proposal.operation_id in _GENERATION,
+                        "requires_confirmation": self.review_all or request.review_all
+                            or load_policies().get(proposal.operation_id).requires_confirmation,
                     })
                     # Expire read snapshots before asking the core about the latest state.
                     db.rollback()
@@ -186,7 +187,7 @@ class LanguageOperationService:
         if not hmac.compare_digest(confirmation.confirmation_token, response.confirmation_token):
             raise LanguageError("confirmation_mismatch", "確認内容が保存済みの提案と一致しません。")
         prepared = response.generation_request or response.prepared_request
-        if prepared.operation_id in _GENERATION and not confirmation.confirm_generation:
+        if load_policies().get(prepared.operation_id).requires_confirmation and not confirmation.confirm_generation:
             raise LanguageError("generation_confirmation_required", "動画生成の対象と内容を確認してから開始してください。")
         started = perf_counter()
         try:

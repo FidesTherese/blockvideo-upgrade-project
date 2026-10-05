@@ -6,6 +6,7 @@ import unicodedata
 from typing import Any, Literal
 
 from app.interpretation.contracts import ClarificationProposal, DialogueContextTurn, OperationProposal
+from app.operations.policies import load_policies, settings_base
 
 
 def settings_value_question(
@@ -13,9 +14,8 @@ def settings_value_question(
     proposal: OperationProposal,
 ) -> ClarificationProposal | None:
     """Only veto a proposal; never populate, convert or execute model arguments."""
-    if proposal.operation_id not in {
-        "project.settings.update", "project.subtitle-font-size.set", "project.subtitle-font-size.adjust",
-    }:
+    view = load_policies().settings_view(proposal.operation_id, proposal.operation_version)
+    if view is None:
         return None
     texts = [text]
     if relation == "answer":
@@ -25,9 +25,7 @@ def settings_value_question(
             texts.append(turn.text)
     supplied = unicodedata.normalize("NFKC", "\n".join(texts)).casefold()
     numbers = {float(value) for value in re.findall(r"(?<![\d.])[-+]?\d+(?:\.\d+)?(?![\d.])", supplied)}
-    settings: dict[str, Any] = {}
-    if proposal.operation_id == "project.settings.update":
-        settings = proposal.arguments["settings"] if proposal.operation_version == 2 else proposal.arguments
+    settings: dict[str, Any] = settings_base(view, proposal.arguments) or {}
     invalid = any(type(value) in {int, float} and key != "subtitle_font_size" and value not in numbers
                   for key, value in settings.items())
     for clause in re.split(r"[、,。!！?？\n]", supplied):

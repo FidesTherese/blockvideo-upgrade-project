@@ -12,6 +12,8 @@ from app.interpretation.service import Interpreter
 from app.interpretation.transport import ModelMessage, StructuredAdapter
 from app.operations.catalog import OperationCatalog
 from app.operations.contracts import CandidateReadinessSnapshot
+from app.operations.limits import MAX_PROMPT_CANDIDATES
+from app.operations.policies import load_policies
 from app.retrieval.contracts import OperationRef, SearchScope
 from app.retrieval.ranking import rank_operations
 from app.retrieval.reader import VerifiedIndex, check_sources
@@ -119,7 +121,7 @@ class SemanticInterpreter:
                     stages.append(("initial", ranked_refs[:5]))
                     if len(ranked_refs) > 5:
                         stages.append(("expanded", ranked_refs[:8]))
-                if self._allow_all and len(all_refs) <= 32 and (not stages or len(stages[-1][1]) < len(all_refs)):
+                if self._allow_all and len(all_refs) <= MAX_PROMPT_CANDIDATES and (not stages or len(stages[-1][1]) < len(all_refs)):
                     stages.append(("all_tools", all_refs))
                 for name, refs in stages:
                     # Retrieval chooses membership; preserve canonical grammar branch
@@ -146,8 +148,9 @@ class SemanticInterpreter:
                             chat_calls=meter.calls - before[0], request_bytes=meter.request_bytes - before[1],
                             response_bytes=meter.response_bytes - before[2], elapsed_ms=round((perf_counter() - stage_started) * 1000)))})
                     check_sources(index.manifest, await asyncio.to_thread(self._sources))
+                    follow_up = load_policies().follow_up_generation.operation_id
                     if (isinstance(outcome.proposal, OperationProposal) and outcome.proposal.generate_after_save
-                            and not any(r.operation_id == "project.generation.start" for r in all_refs)):
+                            and not any(r.operation_id == follow_up for r in all_refs)):
                         # Follow-up generation must not escape the host capability scope.
                         outcome = _question()
                         trace = trace.model_copy(update={"reason": "fallback_unavailable"})

@@ -8,6 +8,7 @@ from app.interpretation.contracts import CandidateRef
 from app.interpretation.errors import InterpretationError
 from app.operations.catalog import CatalogError, OperationCatalog
 from app.operations.contracts import OperationDefinition
+from app.operations.policies import load_policies
 
 
 def select_candidates(
@@ -56,10 +57,11 @@ def model_argument_schema(schema: dict[str, Any]) -> dict[str, Any]:
 def constrained_arguments(definition: OperationDefinition) -> dict[str, Any]:
     """Equivalent settings schemas allow common key orders in local grammars."""
     ordered = model_argument_schema(definition.input_schema)
-    if definition.operation_id != "project.settings.update":
+    view = load_policies().settings_view(definition.operation_id, definition.operation_version)
+    if view is None or view.settings_at is None:
         return ordered
     alternate = deepcopy(ordered)
-    settings = alternate if definition.operation_version == 1 else alternate["properties"]["settings"]
+    settings = alternate if view.settings_at == "" else alternate["properties"][view.settings_at]
     fields = settings["properties"]
     leading = ("subtitle_font_size", "voicevox_speed_scale", "voicevox_speaker_id", "subtitle_mode", "pronunciation_overrides")
     settings["properties"] = {key: fields[key] for key in (*leading, *fields) if key in fields}
@@ -81,9 +83,8 @@ def response_schema(definitions: tuple[OperationDefinition, ...]) -> dict[str, A
             "operation_id": {"type": "string", "enum": [item.operation_id]},
             "operation_version": {"type": "integer", "enum": [item.operation_version]},
             "arguments": constrained_arguments(item),
-            "generate_after_save": {"type": "boolean", **({} if item.operation_id in {
-                "project.settings.update", "project.subtitle-font-size.set", "project.subtitle-font-size.adjust",
-            } else {"enum": [False]})},
+            "generate_after_save": {"type": "boolean", **(
+                {} if load_policies().get(item.operation_id).allows_generate_after_save else {"enum": [False]})},
         }) for item in definitions
     ]
     text_rule = {"type": "string", "minLength": 1, "maxLength": 240, "pattern": r"\S"}

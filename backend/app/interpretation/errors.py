@@ -9,7 +9,7 @@ FailureCode = Literal[
     "invalid_input", "invalid_json", "invalid_output", "candidate_not_offered",
     "invalid_arguments", "connection_failed", "timeout", "http_error",
     "invalid_response", "refused", "incomplete_response", "response_too_large",
-    "configuration_error", "model_mismatch",
+    "configuration_error", "model_mismatch", "too_many_candidates",
 ]
 
 _MESSAGES: dict[FailureCode, str] = {
@@ -27,6 +27,7 @@ _MESSAGES: dict[FailureCode, str] = {
     "response_too_large": "モデルの返答がサイズ上限を超えました。設定は変更していません。",
     "configuration_error": "ローカルモデルの接続設定が不正です。通信は行っていません。",
     "model_mismatch": "設定したモデルと応答元のモデルが一致しません。モデル名を確認してください。設定は変更していません。",
+    "too_many_candidates": "操作の候補が多すぎて一度に解釈できません。検索による絞り込みを有効にしてください。設定は変更していません。",
 }
 
 

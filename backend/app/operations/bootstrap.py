@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.operations.catalog import load_catalog
 from app.operations.handlers import get_project_status, set_subtitle_font_size
+from app.operations.policies import load_policies
 from app.operations.control_handlers import (
     update_settings, start_generation, cancel_generation, retry_generation, restore_settings,
 )
@@ -68,6 +69,9 @@ def build_operation_service(catalog_path: Path = _DEFAULT_CATALOG) -> OperationS
             raise RegistryError(
                 f"definition violates handler policy: {definition.handler_key}"
             )
+    # Safety and confirmation facts must exist for every operation before startup.
+    load_policies().require_catalog_coverage(
+        {(definition.operation_id, definition.operation_version) for definition in catalog.definitions})
     return OperationService(catalog, registry)
 
 

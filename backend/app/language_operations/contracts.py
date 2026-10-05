@@ -7,6 +7,7 @@ from pydantic import Field
 
 from app.interpretation.contracts import CandidateRef, ClarificationProposal, FailureView, InterpretationOutcome, StrictValue
 from app.operations.contracts import OperationRequest, OperationResult, OperationTarget
+from app.operations.limits import MAX_CATALOG_OPERATIONS
 from app.semantic_interpretation.contracts import SearchTrace
 
 
@@ -34,7 +35,7 @@ class LanguageExecution(StrictValue):
 class LanguageDiagnostics(StrictValue):
     retrieval: SearchTrace | None = None
     started_at: float | None = Field(default=None, ge=0)
-    candidates: list[CandidateRef] = Field(default_factory=list, max_length=32)
+    candidates: list[CandidateRef] = Field(default_factory=list, max_length=MAX_CATALOG_OPERATIONS)
     interpretation_ms: int | None = Field(default=None, ge=0)
     execution_ms: int | None = Field(default=None, ge=0)
     generation_execution_ms: int | None = Field(default=None, ge=0)

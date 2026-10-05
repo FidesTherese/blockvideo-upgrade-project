@@ -11,6 +11,7 @@ from app.interpretation.contracts import OperationProposal, ProposalEnvelope
 from app.interpretation.errors import InterpretationError
 from app.operations.catalog import CatalogError, validate_arguments
 from app.operations.contracts import OperationDefinition
+from app.operations.policies import load_policies
 
 MAX_MODEL_TEXT_BYTES = 65_536
 
@@ -70,9 +71,7 @@ def parse_proposal(
         raise InterpretationError("invalid_output") from None
     proposal = envelope.result
     if isinstance(proposal, OperationProposal):
-        if proposal.generate_after_save and proposal.operation_id not in {
-            "project.settings.update", "project.subtitle-font-size.set", "project.subtitle-font-size.adjust",
-        }:
+        if proposal.generate_after_save and not load_policies().get(proposal.operation_id).allows_generate_after_save:
             raise InterpretationError("invalid_arguments")
         definition = next((item for item in definitions if
                            (item.operation_id, item.operation_version) ==
