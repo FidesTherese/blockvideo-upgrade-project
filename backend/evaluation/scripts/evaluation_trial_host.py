@@ -525,6 +525,14 @@ _VOLATILE_LOGICAL_FIELDS = frozenset({
 _OPAQUE_LOGICAL_FIELDS = frozenset({"confirmation_token", "core_request_id"})
 
 
+def _identity_view(collection: str, item: Any) -> Any:
+    """Answering a question links the parent turn to its successor; that link is the
+    product's normal chaining, not a rewrite of the earlier record."""
+    if collection == "language_turns" and isinstance(item, dict):
+        return {key: value for key, value in item.items() if key != "successor_request_id"}
+    return item
+
+
 def _record_identity(value: object) -> str:
     def stable_opaque(item: object) -> object:
         if isinstance(item, dict):
@@ -1390,7 +1398,7 @@ def _candidate_worker(model_call_budget: int) -> int:
                           _record_identity(item) for item in value["language_requests"]
                       ),
                       "language_turn_identity_sha256s": sorted(
-                          _record_identity(item) for item in value["language_turns"]
+                          _record_identity(_identity_view("language_turns", item)) for item in value["language_turns"]
                       )}
             for name in ("projects", "history", "jobs", "receipts", "artifacts", "external_calls", "language_requests", "language_turns"):
                 result[f"{name}_sha256"] = _hash(value[name])
@@ -1486,6 +1494,7 @@ def _candidate_worker(model_call_budget: int) -> int:
             after_submit = canonical_state()
             confirmation_http: Any | None = None
             confirmation_response: dict[str, Any] | None = None
+            confirmed_state: dict[str, Any] | None = None
             duplicate_confirmation_http: Any | None = None
             duplicate_confirmation: dict[str, Any] | None = None
             replay_http: Any | None = None
@@ -1518,10 +1527,12 @@ def _candidate_worker(model_call_budget: int) -> int:
                     permission = {"confirmation_token": response["confirmation_token"], "confirm_generation": True}
                     confirmation_http = client.post(f"/api/language/requests/{request['request_id']}/execute", json=permission)
                     confirmation_response = confirmation_http.json()
+                    confirmed_state = canonical_state()
             elif kind in {"confirm_generation", "confirm_twice"} and response.get("confirmation_token"):
                 permission = {"confirmation_token": response["confirmation_token"], "confirm_generation": True}
                 confirmation_http = client.post(f"/api/language/requests/{request['request_id']}/execute", json=permission)
                 confirmation_response = confirmation_http.json()
+                confirmed_state = canonical_state()
                 if kind == "confirm_twice":
                     duplicate_confirmation_http = client.post(
                         f"/api/language/requests/{request['request_id']}/execute", json=permission
@@ -1562,11 +1573,11 @@ def _candidate_worker(model_call_budget: int) -> int:
                 "receipts", "external_calls", "language_requests", "language_turns"
             )
             before_identities = {
-                name: {_record_identity(item) for item in before[name]}
+                name: {_record_identity(_identity_view(name, item)) for item in before[name]}
                 for name in opaque_collections
             }
             after_identities = {
-                name: {_record_identity(item) for item in after[name]}
+                name: {_record_identity(_identity_view(name, item)) for item in after[name]}
                 for name in opaque_collections
             }
             additions = {
@@ -1614,7 +1625,8 @@ def _candidate_worker(model_call_budget: int) -> int:
                     "response": replay_projection, "failure_class": None},
                 "confirmation": {"attempted": confirmation_projection is not None,
                     "duplicate_attempted": duplicate_confirmation_projection is not None,
-                    "state_sha256": _hash(after) if confirmation_projection is not None else None,
+                    "state_sha256": _hash(confirmed_state if confirmed_state is not None else after)
+                    if confirmation_projection is not None else None,
                     "duplicate_same_response": (
                         confirmation_projection["response_sha256"] == duplicate_confirmation_projection["response_sha256"]
                     ) if duplicate_confirmation_projection is not None and confirmation_projection is not None else None,

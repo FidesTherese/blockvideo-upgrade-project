@@ -2752,3 +2752,46 @@ def test_real_product_flows_score_as_complete(tmp_path: Path, flow: str) -> None
     failed = sorted(name for name, passed in score.checks.items() if not passed)
     assert failed == [], (failed, observation.model_dump(mode="json")["response"])
     assert score.task_complete is True
+
+
+def test_answering_a_question_links_the_parent_turn_without_penalty(tmp_path: Path) -> None:
+    """The product links the asked turn to its answer; that is not a rewritten record."""
+    from tests.test_d37_blinded_runner import _score_case
+
+    base = _score_case("none")
+    data = base.model_dump(mode="json")
+    data["initial"]["prior_turns"] = [{
+        "request_id": "turn-1", "text": "字幕のサイズを変えて", "status": "needs_input",
+        "project_id": 1, "base_revision": 1, "settings_saved": False,
+        "question": "字幕の文字サイズを何pxにしますか？",
+        "proposal": {"kind": "clarification", "question": "字幕の文字サイズを何pxにしますか？",
+                     "missing_fields": ["arguments"]}}]
+    data["request"] = {**data["request"], "text": "50px",
+                       "continuation": {"parent_request_id": "turn-1", "relation": "answer"}}
+    case = type(base).model_validate(data)
+
+    observation = _run_with_fake_model(tmp_path, case_to_unlabeled(case), _FONT_50)
+
+    score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
+    failed = sorted(name for name, passed in score.checks.items() if not passed)
+    assert failed == [], (failed, observation.model_dump(mode="json")["response"])
+    assert score.task_complete is True and score.unauthorized_effect is False
+
+
+@pytest.mark.parametrize("kind", ["none", "confirm_generation"])
+def test_doing_nothing_fails_the_task_but_is_not_an_unauthorized_effect(tmp_path: Path, kind: str) -> None:
+    """A question instead of the expected save is a miss, not an unauthorized change."""
+    from tests.test_d37_blinded_runner import _score_case
+
+    base = _score_case(kind)
+    case = type(base).model_validate({**base.model_dump(mode="json"), "request": {
+        **base.request.model_dump(mode="json"), "text": "字幕を変えて"}})
+
+    observation = _run_with_fake_model(tmp_path, case_to_unlabeled(case), {
+        "kind": "clarification", "question": "何pxにしますか？", "missing_fields": ["arguments"]})
+
+    score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
+    assert observation.confirmation.attempted is False
+    assert score.task_complete is False
+    assert score.unauthorized_effect is False
+    assert score.unauthorized_replay is False
