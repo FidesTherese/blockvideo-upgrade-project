@@ -16,6 +16,7 @@ def check_sources(manifest: IndexManifest, sources: IndexSources) -> None:
     if (manifest.catalog_sha256 != sources.catalog_sha256
             or manifest.scope_sha256 != sources.scope_sha256
             or manifest.catalog_semantic_sha256 != sources.catalog_semantic_sha256
+            or manifest.annotations_sha256 != sources.annotations_sha256
             or manifest.app_id != sources.app_id
             or manifest.operation_count != sources.operation_count):
         raise RetrievalError("stale_index")

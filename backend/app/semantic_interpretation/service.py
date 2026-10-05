@@ -111,7 +111,7 @@ class SemanticInterpreter:
                     trace = trace.model_copy(update={"reason": "search_unavailable"})
                 else:
                     # Integrity failure here must NOT become an encoder fallback.
-                    ranking = rank_operations(index, vector, scope, await asyncio.to_thread(self._sources))
+                    ranking = rank_operations(index, vector, scope, await asyncio.to_thread(self._sources), query_text=query)
                     trace = trace.model_copy(update={"ranking": ranking})
                 finally:
                     trace = trace.model_copy(update={"embedding_ms": round((perf_counter() - embed_started) * 1000)})

@@ -88,7 +88,8 @@ async def run(runner: SemanticInterpreter, adapter: Replies, text: str = "字幕
 async def test_narrow_failure_expands_once_then_full_and_only_final_is_proposal(setup, first) -> None:
     runner, encoder, *_ = setup
     adapter = Replies([first, UNSUPPORTED, SET])
-    result = await run(runner, adapter)
+    # No lexical overlap with any annotation, so uniform vectors decide the stages.
+    result = await run(runner, adapter, text="zq")
     assert result.interpretation.status == "proposed"
     assert result.interpretation.proposal.arguments == {"value": 56}
     assert [len(c["candidates"]) for c in adapter.calls] == [5, 8, 9]
@@ -193,7 +194,7 @@ async def test_prompt_order_is_canonical_even_when_ranking_is_different(setup, m
     from app.semantic_interpretation import service
     runner, _, scope, sources, _ = setup
     ranking = rank_operations(runner._load(sources), (1.0, 0.0), scope, sources)
-    monkeypatch.setattr(service, "rank_operations", lambda *_args: tuple(reversed(ranking)))
+    monkeypatch.setattr(service, "rank_operations", lambda *_args, **_kwargs: tuple(reversed(ranking)))
     adapter = Replies([SET])
     result = await run(runner, adapter)
     actual = [(r["operation_id"], r["operation_version"]) for r in adapter.calls[0]["candidates"]]

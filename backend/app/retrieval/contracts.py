@@ -58,7 +58,7 @@ class IndexDocument(OperationRef):
     document_id: str = Field(min_length=1, max_length=200)
     app_id: Identifier
     required_capabilities: tuple[Identifier, ...]
-    kind: Literal["description", "example", "input"]
+    kind: Literal["description", "example", "input", "annotation"]
     ordinal: int = Field(ge=0, strict=True)
     text: str = Field(min_length=1, max_length=1200)
     definition_sha256: Digest
@@ -72,12 +72,14 @@ class IndexBundle(FrozenModel):
 class IndexManifest(FrozenModel):
     format_version: Literal[1] = 1
     builder_version: Literal["operation-index-v1"] = "operation-index-v1"
-    extraction_version: Literal["public-metadata-chunks-v1"] = "public-metadata-chunks-v1"
+    extraction_version: Literal["public-metadata-chunks-v1", "public-metadata-annotations-v2"] = "public-metadata-chunks-v1"
     created_at: str = Field(min_length=1, max_length=80)
     app_id: Identifier
     catalog_sha256: Digest
     scope_sha256: Digest
     catalog_semantic_sha256: Digest
+    # Bound when the catalog carries operation annotations (index documents of kind "annotation").
+    annotations_sha256: Digest | None = None
     profile: EmbeddingProfile
     operation_count: int = Field(ge=1, le=256, strict=True)
     document_count: int = Field(ge=1, le=4096, strict=True)

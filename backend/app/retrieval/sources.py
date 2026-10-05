@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.operations.annotations import OperationAnnotations, parse_annotations
 from app.operations.catalog import CatalogError, OperationCatalog, load_catalog
 from app.retrieval.contracts import CatalogScope, IndexDocument
 from app.retrieval.serialization import RetrievalError, canonical, decode, digest, read_bytes
@@ -23,6 +24,7 @@ class IndexSources:
     app_id: str
     operation_count: int
     documents: tuple[IndexDocument, ...]
+    annotations_sha256: str | None = None
 
 
 def _input_lines(schema: dict[str, Any], path: str = "arguments") -> list[str]:
@@ -53,7 +55,8 @@ def _chunks(text: str) -> list[str]:
     return chunks
 
 
-def extract_documents(catalog: OperationCatalog, scope: CatalogScope) -> tuple[IndexDocument, ...]:
+def extract_documents(catalog: OperationCatalog, scope: CatalogScope,
+                      annotations: OperationAnnotations | None = None) -> tuple[IndexDocument, ...]:
     """No callable/policy names, project state, evaluation cases or model examples."""
     definitions = sorted(catalog.definitions, key=lambda d: (d.operation_id, d.operation_version))
     keys = {(d.operation_id, d.operation_version) for d in definitions}
@@ -68,6 +71,11 @@ def extract_documents(catalog: OperationCatalog, scope: CatalogScope) -> tuple[I
         definition_hash = digest(canonical(definition.model_dump(mode="json")))
         sections = [("description", [definition.description]), ("example", definition.examples),
                     ("input", _input_lines(definition.input_schema))]
+        if annotations is not None:
+            # Japanese utterances, synonyms and scenarios: each its own document, so the
+            # per-operation maximum score matches whichever phrasing is closest.
+            sections.append(("annotation", list(annotations.for_operation(
+                definition.operation_id, definition.operation_version).searchable())))
         for kind, texts in sections:
             ordinal = 0
             for text in texts:
@@ -86,9 +94,15 @@ def extract_documents(catalog: OperationCatalog, scope: CatalogScope) -> tuple[I
 
 
 def load_sources(catalog_path: Path = DEFAULT_CATALOG, scope_path: Path = DEFAULT_SCOPE) -> IndexSources:
-    """Read a coherent bounded snapshot; full source bytes invalidate old indexes."""
+    """Read a coherent bounded snapshot; full source bytes invalidate old indexes.
+
+    Annotations are read from ``operation_annotations.json`` beside the catalog when
+    that file exists; a catalog without one keeps the annotation-free index format.
+    """
     catalog_bytes = read_bytes(catalog_path, 2_000_000)
     scope_bytes = read_bytes(scope_path, 200_000)
+    annotations_path = catalog_path.with_name("operation_annotations.json")
+    annotations_bytes = read_bytes(annotations_path, 1_000_000) if annotations_path.is_file() else None
     try:
         decode(catalog_bytes)  # Reject duplicate keys before the legacy loader.
         catalog = load_catalog(catalog_path)
@@ -96,12 +110,18 @@ def load_sources(catalog_path: Path = DEFAULT_CATALOG, scope_path: Path = DEFAUL
         if not isinstance(scope_raw, dict) or type(scope_raw.get("format_version")) is not int:
             raise RetrievalError("invalid_source")
         scope = CatalogScope.model_validate(scope_raw)
+        annotations = parse_annotations(annotations_bytes) if annotations_bytes is not None else None
+        if annotations is not None:
+            annotations.require_known_operations(
+                {(d.operation_id, d.operation_version) for d in catalog.definitions})
     except (CatalogError, ValidationError, TypeError):
         raise RetrievalError("invalid_source") from None
-    if read_bytes(catalog_path, 2_000_000) != catalog_bytes or read_bytes(scope_path, 200_000) != scope_bytes:
+    if (read_bytes(catalog_path, 2_000_000) != catalog_bytes or read_bytes(scope_path, 200_000) != scope_bytes
+            or (annotations_bytes is not None and read_bytes(annotations_path, 1_000_000) != annotations_bytes)):
         raise RetrievalError("source_changed")
-    docs = extract_documents(catalog, scope)
+    docs = extract_documents(catalog, scope, annotations)
     ordered = sorted(catalog.definitions, key=lambda d: (d.operation_id, d.operation_version))
     return IndexSources(digest(catalog_bytes), digest(scope_bytes),
                         digest(canonical([d.model_dump(mode="json") for d in ordered])),
-                        scope.app_id, len(ordered), docs)
+                        scope.app_id, len(ordered), docs,
+                        digest(annotations_bytes) if annotations_bytes is not None else None)

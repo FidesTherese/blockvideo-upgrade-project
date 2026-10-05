@@ -120,7 +120,10 @@ async def test_minimal_payload_and_schema_are_candidate_specific(catalog: Operat
     payload = json.loads(messages[1].content)
     assert payload["state"] == {"selected_project_id": 101, "revision": 7, "subtitle_font_size": 48}
     candidate = payload["candidates"][0]
-    assert set(candidate) == {"operation_id", "operation_version", "description", "examples", "arguments_schema"}
+    # Public metadata plus optional catalog annotations (notes, example requests); nothing else.
+    assert {"operation_id", "operation_version", "description", "examples", "arguments_schema"} <= set(candidate)
+    assert set(candidate) <= {"operation_id", "operation_version", "description", "examples", "arguments_schema",
+                              "notes", "example_requests"}
     assert len(schema["properties"]["result"]["anyOf"]) == 4
     branch = schema["properties"]["result"]["anyOf"][0]
     assert branch["properties"]["arguments"] == catalog.require(SET, 1).input_schema
@@ -194,7 +197,7 @@ def test_interpretation_imports_no_execution_capability() -> None:
     root = CATALOG_PATH.parents[1] / "interpretation"
     # Catalog-side metadata only (policies and limits hold no handlers or executors).
     allowed_operations = {"app.operations.catalog", "app.operations.contracts",
-                          "app.operations.policies", "app.operations.limits"}
+                          "app.operations.policies", "app.operations.limits", "app.operations.annotations"}
     for file in root.glob("*.py"):
         for node in ast.walk(ast.parse(file.read_text(encoding="utf-8"))):
             imports = [node.module or ""] if isinstance(node, ast.ImportFrom) else (

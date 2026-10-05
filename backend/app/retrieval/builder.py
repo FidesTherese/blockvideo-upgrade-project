@@ -39,6 +39,8 @@ def publish_index(directory: Path, sources: IndexSources, profile: EmbeddingProf
         created_at=datetime.now(timezone.utc).isoformat(), app_id=sources.app_id,
         catalog_sha256=sources.catalog_sha256, scope_sha256=sources.scope_sha256,
         catalog_semantic_sha256=sources.catalog_semantic_sha256, profile=profile,
+        annotations_sha256=sources.annotations_sha256,
+        extraction_version="public-metadata-annotations-v2" if sources.annotations_sha256 else "public-metadata-chunks-v1",
         operation_count=sources.operation_count, document_count=len(sources.documents),
         documents_sha256=digest(canonical([d.model_dump(mode="json") for d in sources.documents])),
         vectors_sha256=digest(canonical(vectors)), bundle_sha256=digest(payload),

@@ -8,6 +8,7 @@ from app.interpretation.contracts import CandidateRef
 from app.interpretation.errors import InterpretationError
 from app.operations.catalog import CatalogError, OperationCatalog
 from app.operations.contracts import OperationDefinition
+from app.operations.annotations import load_annotations
 from app.operations.policies import load_policies
 
 
@@ -25,14 +26,24 @@ def select_candidates(
 
 
 def candidate_payload(definition: OperationDefinition) -> dict[str, Any]:
-    """Only public operation metadata, excluding callable/internal policy keys."""
-    return {
+    """Only public operation metadata, excluding callable/internal policy keys.
+
+    Japanese annotation notes (when to use it, what it is not for) help a small model
+    tell similar candidates apart; they are data, never instructions to execute.
+    """
+    payload: dict[str, Any] = {
         "operation_id": definition.operation_id,
         "operation_version": definition.operation_version,
         "description": definition.description,
         "examples": list(definition.examples),
         "arguments_schema": model_argument_schema(definition.input_schema),
     }
+    annotation = load_annotations().for_operation(definition.operation_id, definition.operation_version)
+    if annotation.notes():
+        payload["notes"] = list(annotation.notes())
+    if annotation.utterances:
+        payload["example_requests"] = list(annotation.utterances[:6])
+    return payload
 
 
 def model_argument_schema(schema: dict[str, Any]) -> dict[str, Any]:
