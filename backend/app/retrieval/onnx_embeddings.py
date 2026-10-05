@@ -6,6 +6,7 @@ import hashlib
 import threading
 from pathlib import Path
 
+from app.operations.limits import MAX_INDEX_DOCUMENTS
 from app.retrieval.contracts import EmbeddingProfile
 from app.retrieval.serialization import RetrievalError
 from app.retrieval.vectors import normalize_vector
@@ -90,7 +91,7 @@ class OnnxEmbeddingAdapter:
                 raise RetrievalError("embedding_runtime_failed") from None
 
     async def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        if not texts or len(texts) > 4096 or any(not isinstance(t, str) or not t.strip() or len(t.encode()) > 1200 for t in texts):
+        if not texts or len(texts) > MAX_INDEX_DOCUMENTS or any(not isinstance(t, str) or not t.strip() or len(t.encode()) > 1200 for t in texts):
             raise RetrievalError("invalid_embedding_input")
         result: list[tuple[float, ...]] = []
         for offset in range(0, len(texts), 8):
