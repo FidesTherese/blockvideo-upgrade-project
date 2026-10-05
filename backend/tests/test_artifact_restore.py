@@ -79,6 +79,20 @@ async def test_restore_rejects_foreign_missing_or_unverified_artifacts(
     response = client.post("/api/operations/execute", json=_request(project_id, 999).model_dump(mode="json"))
     assert response.status_code == 404
     assert response.json()["detail"]["reason_code"] == "artifact_not_found"
+    with get_session_factory()() as db:
+        # A corrupt subtitle alone also makes the video unrestorable.
+        row = db.get(GenerationArtifact, first.id)
+        subtitle = Path(store.artifact_file_path(row).parent / "video.srt")
+        subtitle.write_text("1", encoding="utf-8")
+        row.subtitle_path = row.video_path.replace("video.mp4", "video.srt")
+        row.manifest_json = {**row.manifest_json, "subtitle": {**store.file_identity(subtitle), "size": 999}}
+        db.commit()
+    response = client.post("/api/operations/execute", json=_request(project_id, first.id).model_dump(mode="json"))
+    assert response.json()["detail"]["reason_code"] == "artifact_unavailable"
+    with get_session_factory()() as db:
+        row = db.get(GenerationArtifact, first.id)
+        row.subtitle_path = None
+        db.commit()
     Path(store.artifact_file_path(first)).write_bytes(b"tampered")
     response = client.post("/api/operations/execute", json=_request(project_id, first.id).model_dump(mode="json"))
     assert response.status_code == 422

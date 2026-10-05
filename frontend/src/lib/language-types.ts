@@ -86,7 +86,7 @@ export interface LanguageResponse {
       policy: 'semantic-3-6-all-v1' | 'semantic-5-8-all-v1' | 'all-tools-v1';
       index_sha256: string | null;
       ranking: Array<{ operation_id: string; operation_version: number; score: number; document_id: string }>;
-      stages: Array<{ name: 'initial' | 'expanded' | 'all_tools'; candidates: Array<{ operation_id: string; operation_version: number }>;
+      stages: Array<{ name: 'initial' | 'expanded' | 'wide' | 'all_tools'; candidates: Array<{ operation_id: string; operation_version: number }>;
         candidate_state?: CandidateReadinessSnapshot | null;
         result: string; chat_calls: number; elapsed_ms: number; request_bytes: number; response_bytes: number }>;
       expansion_count: number; all_tools_count: number; embedding_calls: number;

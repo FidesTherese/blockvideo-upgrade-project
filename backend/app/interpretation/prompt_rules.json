@@ -614,6 +614,12 @@
    "text": "前の step の結果（新しい版の番号やジョブ番号）は書きません。実行時にアプリが受け渡します。"
   },
   {
+   "operations": [
+    "project.artifact.restore"
+   ],
+   "text": "project.artifact.restoreは出力履歴の完成動画（「動画3」など）を現在の動画に戻す操作で、設定の変更も生成もしません。artifact_idはユーザー文に明示された動画番号だけを使い、番号が無ければ質問します。設定の版を戻す依頼はsettings.restoreです。"
+  },
+  {
    "operations": [],
    "modes": [
     "yolo"
@@ -700,12 +706,6 @@
     "yolo"
    ],
    "text": "設定変更と動画の作成を両方頼まれたら、settings 系の操作に generate_after_save: true を付けます。"
-  },
-  {
-   "operations": [
-    "project.artifact.restore"
-   ],
-   "text": "project.artifact.restoreは出力履歴の完成動画（「動画3」など）を現在の動画に戻す操作で、設定の変更も生成もしません。artifact_idはユーザー文に明示された動画番号だけを使い、番号が無ければ質問します。設定の版を戻す依頼はsettings.restoreです。"
   }
  ]
 }

@@ -12,7 +12,7 @@ from app.models.project import Project
 from app.models.settings_revision import SettingsRevision
 from app.operations.contracts import OperationResult
 from app.operations.errors import OperationError
-from app.services.artifact_store import artifact_is_available
+from app.services.artifact_store import artifact_file_path, artifact_is_available
 from app.services.external_calls import has_unresolved_calls
 from app.services.job_records import create_pending_job
 from app.services.project_settings import apply_project_settings
@@ -91,12 +91,22 @@ def restore_settings(db: Session, project: Project, arguments: dict[str, Any]) -
                          "changed_fields": sorted(changed)})
 
 
+def _subtitle_is_available(artifact: GenerationArtifact) -> bool:
+    if artifact.subtitle_path is None:
+        return True
+    try:
+        artifact_file_path(artifact, "subtitle")
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def restore_artifact(db: Session, project: Project, arguments: dict[str, Any]) -> OperationResult:
     """Point the project's current video at an earlier verified artifact; settings stay as they are."""
     artifact = db.get(GenerationArtifact, arguments["artifact_id"])
     if artifact is None or artifact.project_id != project.id:
         raise OperationError("artifact_not_found", "その番号の完成動画は出力履歴にありません")
-    if not artifact_is_available(artifact):
+    if not artifact_is_available(artifact) or not _subtitle_is_available(artifact):
         raise OperationError("artifact_unavailable", "その完成動画のファイルが欠損または変更されています")
     changed = project.current_artifact_id != artifact.id
     project.current_artifact_id = artifact.id

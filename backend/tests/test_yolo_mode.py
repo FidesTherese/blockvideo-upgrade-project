@@ -117,3 +117,47 @@ def test_negation_only_requests_are_dismissed_before_clarifying(harness) -> None
     _reply(adapter, "project.generation.cancel", {"job_id": 101})
     response = submit(client, language_input(project_id, request_id="nl-neg-cancel", text="動画は作り直さないで"))
     assert response["status"] == "dismissed" and count(GenerationJob) == 0
+
+
+def test_negated_follow_up_generation_is_dropped_in_both_modes(harness) -> None:  # noqa: F811
+    client, adapter, _ = harness
+    project_id = create(client)
+    before = count(GenerationJob)
+    for mode in ("normal", "yolo"):
+        _reply(adapter, "project.subtitle-font-size.set", {"value": 60}, generate=True)
+        response = submit(client, language_input(project_id, request_id=f"nl-nogen-{mode}",
+                                                 text="字幕を60pxにして、動画は生成しないで", mode=mode))
+        assert response["status"] == "completed", response
+        assert response["generation_request"] is None and response["generate_after_save"] is False
+        if mode == "yolo":
+            assert response["yolo_report"]["dropped_steps"] == ["project.generation.start"]
+    assert count(GenerationJob) == before
+    assert client.get(f"/api/projects/{project_id}").json()["subtitle_font_size"] == 60
+
+
+def test_yolo_never_overrides_a_value_the_user_wrote(harness) -> None:  # noqa: F811
+    client, adapter, _ = harness
+    project_id = create(client)
+    _reply(adapter, "project.subtitle-font-size.set", {"value": 80})
+    response = submit(client, language_input(project_id, request_id="nl-conflict",
+                                             text="字幕を64pxにして", mode="yolo"))
+    assert response["status"] == "needs_input" and response["executed"] is False
+    assert client.get(f"/api/projects/{project_id}").json()["subtitle_font_size"] != 80
+
+
+def test_numbered_negation_with_another_request_still_blocks_the_negated_operation(harness) -> None:  # noqa: F811
+    client, adapter, _ = harness
+    project_id = create(client)
+    _reply(adapter, "project.artifact.restore", {"artifact_id": 3})
+    response = submit(client, language_input(project_id, request_id="nl-neg-restore",
+                                             text="動画3には戻さないで、状態だけ教えて"))
+    assert response["status"] == "dismissed" and response["executed"] is False
+
+
+def test_model_question_about_a_declined_operation_is_dismissed(harness) -> None:  # noqa: F811
+    client, adapter, _ = harness
+    project_id = create(client)
+    adapter.response = json.dumps({"result": {"kind": "clarification", "question": "戻したい版を指定してください。",
+                                              "missing_fields": ["arguments"]}})
+    response = submit(client, language_input(project_id, request_id="nl-neg-question", text="第2版には戻さないで"))
+    assert response["status"] == "dismissed" and response["clarification"] is None

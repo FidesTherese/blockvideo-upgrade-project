@@ -125,17 +125,20 @@ async def test_no_all_tools_returns_question_not_unsupported(setup) -> None:
     assert result.trace.all_tools_count == 0
 
 
-@pytest.mark.parametrize("replies,status", [([UNSUPPORTED] * 2, "unsupported"),
-                                             ([QUESTION, UNSUPPORTED], "needs_input")])
+@pytest.mark.parametrize("replies,status,text", [([UNSUPPORTED] * 3, "unsupported", "動画をメールして"),
+                                                  ([QUESTION, UNSUPPORTED, UNSUPPORTED], "needs_input", "動画をメールして"),
+                                                  ([UNSUPPORTED, UNSUPPORTED, SET], "proposed", "字幕を56pxにして")])
 async def test_catalog_too_large_for_all_tools_trusts_only_unanimous_unsupported(setup, monkeypatch,
-                                                                                replies, status) -> None:
+                                                                                replies, status, text) -> None:
     runner, *_ = setup
     # Pretend the 9-operation catalog cannot be shown at once (as with 1,000 operations).
     monkeypatch.setattr("app.semantic_interpretation.service.MAX_PROMPT_CANDIDATES", 5)
-    result = await run(runner, Replies(list(replies)), "動画をメールして")
+    result = await run(runner, Replies(list(replies)), text)
     assert result.interpretation.status == status and result.trace.all_tools_count == 0
-    assert result.trace.reason == ("unsupported_without_full_scope" if status == "unsupported"
-                                   else "fallback_unavailable")
+    assert [stage.name for stage in result.trace.stages] == ["initial", "expanded", "wide"]
+    assert result.trace.reason == {"unsupported": "unsupported_without_full_scope",
+                                   "needs_input": "fallback_unavailable",
+                                   "proposed": "candidate_insufficient"}[status]
 
 
 @pytest.mark.parametrize("reason", ["connection_failed", "timeout", "http_error", "model_mismatch"])

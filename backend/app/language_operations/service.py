@@ -17,6 +17,7 @@ from app.language_operations.candidate_state import current_candidates
 from app.language_operations.contracts import (
     LanguageError, LanguageExecution, LanguageInput, LanguageResponse, YoloReport,
 )
+from app.language_operations.explicit_values import explicit_conflict
 from app.language_operations.intent_guard import negative_control_reason, only_negated_instructions
 from app.language_operations.references import reference_question
 from app.language_operations.pronunciation import merged_arguments, reading_question
@@ -113,8 +114,9 @@ class LanguageOperationService:
                         found = check()
                         if found is None:
                             continue
-                        if yolo:
-                            # Unattended: the guessed value stands; the bypass is reported.
+                        if yolo and not explicit_conflict([request.text], proposed):
+                            # Unattended: a guessed (missing) value stands; the bypass is reported.
+                            # A value contradicting what the user wrote is never bypassed.
                             bypassed.append(code)
                             continue
                         return found, code
@@ -130,6 +132,14 @@ class LanguageOperationService:
                         negative_reason = negative_control_reason(request.text, outcome.proposal.operation_id)
                     if negative_reason is None:
                         question, guard_code = vet(outcome.proposal)
+                    follow_up = load_policies().follow_up_generation.operation_id
+                    if (negative_reason is None and outcome.proposal.generate_after_save
+                            and negative_control_reason(request.text, follow_up) is not None):
+                        # "…して、動画は生成しないで": save only, never the negated generation.
+                        outcome = outcome.model_copy(update={"proposal": outcome.proposal.model_copy(
+                            update={"generate_after_save": False})})
+                        if yolo:
+                            dropped.append(follow_up)
                 elif isinstance(outcome.proposal, PlanProposal):
                     for step in outcome.proposal.steps:
                         if negative_control_reason(request.text, step.operation_id) is not None:
@@ -145,6 +155,9 @@ class LanguageOperationService:
                 if question is None and negative_reason is None and isinstance(outcome.proposal, OperationProposal):
                     negative_reason = negative_control_reason(request.text, outcome.proposal.operation_id)
                 if question is None and isinstance(outcome.proposal, PlanProposal) and (negated_plan or not plan_steps):
+                    negative_reason = "explicit_negative_intent"
+                if isinstance(outcome.proposal, ClarificationProposal) and only_negated_instructions(request.text):
+                    # Asking for details of an operation the user just declined is pointless.
                     negative_reason = "explicit_negative_intent"
                 if question is not None:
                     # Retain the original structured interpretation for audit;

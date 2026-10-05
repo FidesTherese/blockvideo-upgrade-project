@@ -8,7 +8,7 @@
     "do not execute",
     "don't execute"
   ],
-  "negated_clause_pattern": "[^、。,.!！?？]*?(?:ないで|ないこと|なくていい|なくてよい|なくて大丈夫)(?:ください|ね|ほしい|おいて)?",
+  "negated_clause_pattern": "(?:(?!して|って|んで|いて|えて|けて|せて|めて|べて|れて|きて|みて|にて|ちて)[^、。,.!！?？])*?(?:ないで|ないこと|なくていい|なくてよい|なくて大丈夫)(?:ください|ね|ほしい|おいて)?",
   "negation_residue_pattern": "[ 、。,.!！?？]*(?:です|ね|よ|お願いします)?[ 、。,.!！?？]*",
   "follow_up_generation": {
     "operation_id": "project.generation.start",
@@ -42,13 +42,13 @@
     "project.artifact.restore": {
       "mutates": true,
       "requires_confirmation": false,
-      "negative_phrases": ["動画は戻さない", "動画を戻さない"],
+      "negative_phrases": ["戻さない"],
       "reference": {"argument": "artifact_id", "kind": "artifact"}
     },
     "project.generation.cancel": {
       "mutates": true,
       "requires_confirmation": false,
-      "negative_phrases": ["キャンセルしない", "取り消さない", "停止しない", "do not cancel", "don't cancel"],
+      "negative_phrases": ["止めない", "中止しない", "キャンセルしない", "取り消さない", "停止しない", "do not cancel", "don't cancel"],
       "reference": {"argument": "job_id", "kind": "job"}
     },
     "project.generation.retry": {
@@ -60,11 +60,12 @@
     "project.generation.start": {
       "mutates": true,
       "requires_confirmation": true,
-      "negative_phrases": ["生成しない", "開始しない", "作り直さない", "do not generate", "don't generate"]
+      "negative_phrases": ["作らない", "生成しない", "開始しない", "作り直さない", "do not generate", "don't generate"]
     },
     "project.settings.restore": {
       "mutates": true,
       "requires_confirmation": false,
+      "negative_phrases": ["戻さない"],
       "reference": {"argument": "revision", "kind": "revision"}
     },
     "project.settings.update": {

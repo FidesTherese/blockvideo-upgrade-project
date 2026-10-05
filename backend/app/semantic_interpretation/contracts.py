@@ -13,7 +13,7 @@ from app.operations.limits import MAX_CATALOG_OPERATIONS, MAX_PROMPT_CANDIDATES
 
 
 class SearchStage(StrictValue):
-    name: Literal["initial", "expanded", "all_tools"]
+    name: Literal["initial", "expanded", "wide", "all_tools"]
     candidates: tuple[CandidateRef, ...] = Field(max_length=MAX_PROMPT_CANDIDATES, strict=False)
     candidate_state: CandidateReadinessSnapshot | None = None
     result: Literal["proposed", "needs_input", "unsupported", "dismissed", "error"]

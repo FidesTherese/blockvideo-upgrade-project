@@ -124,6 +124,9 @@ class SemanticInterpreter:
                         stages.append(("expanded", ranked_refs[:8]))
                 if self._allow_all and len(all_refs) <= MAX_PROMPT_CANDIDATES and (not stages or len(stages[-1][1]) < len(all_refs)):
                     stages.append(("all_tools", all_refs))
+                elif self._allow_all and len(ranked_refs) > 8:
+                    # Too many operations to show at once: the widest ranked window stands in.
+                    stages.append(("wide", ranked_refs[:MAX_PROMPT_CANDIDATES]))
                 for name, refs in stages:
                     # Retrieval chooses membership; preserve canonical grammar branch
                     # order (including v1 before v2), as in the All Tools baseline.
@@ -165,10 +168,10 @@ class SemanticInterpreter:
                     unsupported_stages += outcome.status == "unsupported"
                     trace = trace.model_copy(update={"reason": "candidate_insufficient"})
                 else:
-                    if (len(all_refs) > MAX_PROMPT_CANDIDATES and stages
+                    if (len(all_refs) > MAX_PROMPT_CANDIDATES and stages and stages[-1][0] == "wide"
                             and unsupported_stages == len(stages)):
-                        # A catalog too large to show at once has no full-scope check; every
-                        # retrieval stage agreeing on "unsupported" is the strongest answer.
+                        # A catalog too large to show at once has no full-scope check; every stage,
+                        # up to the widest ranked window, agreeing on "unsupported" is the strongest answer.
                         trace = trace.model_copy(update={"reason": "unsupported_without_full_scope"})
                     else:
                         # Missing candidates or an unavailable full-scope check is not unsupported.
