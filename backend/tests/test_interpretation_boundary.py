@@ -124,7 +124,8 @@ async def test_minimal_payload_and_schema_are_candidate_specific(catalog: Operat
     assert {"operation_id", "operation_version", "description", "examples", "arguments_schema"} <= set(candidate)
     assert set(candidate) <= {"operation_id", "operation_version", "description", "examples", "arguments_schema",
                               "notes", "example_requests"}
-    assert len(schema["properties"]["result"]["anyOf"]) == 4
+    # One operation, clarification, unsupported, no_operation and the plan branch.
+    assert len(schema["properties"]["result"]["anyOf"]) == 5
     branch = schema["properties"]["result"]["anyOf"][0]
     assert branch["properties"]["arguments"] == catalog.require(SET, 1).input_schema
     assert branch["properties"]["operation_id"]["enum"] == [SET]
@@ -189,7 +190,7 @@ def test_every_catalog_schema_can_be_offered_without_handlers(catalog: Operation
     refs = tuple(CandidateRef(operation_id=item.operation_id, operation_version=item.operation_version)
                  for item in catalog.definitions)
     schema = response_schema(select_candidates(catalog, refs))
-    assert len(schema["properties"]["result"]["anyOf"]) == len(catalog.definitions) + 3
+    assert len(schema["properties"]["result"]["anyOf"]) == len(catalog.definitions) + 4  # + plan
     assert "handler_key" not in json.dumps(schema)
 
 

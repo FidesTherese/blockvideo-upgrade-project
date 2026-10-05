@@ -30,6 +30,7 @@ export function LanguageYoloReport({ response }: { response: LanguageResponse })
     {report.bypassed_guards.length > 0 ? <ul className="mt-1 list-disc pl-5">
       {report.bypassed_guards.map((code) => <li key={code}>{guardLabels[code]}</li>)}
     </ul> : <p className="mt-1">依頼に書かれていない値の推測はありませんでした。</p>}
+    {(report.dropped_steps ?? []).length > 0 && <p className="mt-1">否定された手順は実行しませんでした：{(report.dropped_steps ?? []).map((id) => operationLabels[id] ?? id).join('、')}</p>}
     {report.unresolved && <p className="mt-1">{report.unresolved}</p>}
     <p className="mt-1 text-xs">結果が意図と違う場合は、設定履歴から依頼前の版に戻せます。</p>
   </section>;

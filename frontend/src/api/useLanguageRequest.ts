@@ -133,7 +133,9 @@ export function useLanguageRequest(projectId: number) {
       || response.superseded_by
       || !response.requires_confirmation || !response.confirmation_token
       || revision !== (response.generation_request?.base_revision ?? response.base_revision)) return;
-    const generation = !!response.generation_request || ['project.generation.start', 'project.generation.retry'].includes(response.prepared_request?.operation_id ?? '');
+    const generationIds = ['project.generation.start', 'project.generation.retry'];
+    const generation = !!response.generation_request || generationIds.includes(response.prepared_request?.operation_id ?? '')
+      || (response.plan ?? []).some((step) => generationIds.includes(step.operation_id));
     begin({ ...current.current, epoch: crypto.randomUUID(), action: 'confirm',
       confirmation: { confirmation_token: response.confirmation_token, confirm_generation: generation } });
   }, [begin, response]);

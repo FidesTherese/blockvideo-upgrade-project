@@ -7,7 +7,7 @@ from pydantic import Field
 
 from app.interpretation.contracts import CandidateRef, ClarificationProposal, FailureView, InterpretationOutcome, StrictValue
 from app.operations.contracts import OperationRequest, OperationResult, OperationTarget
-from app.operations.limits import MAX_CATALOG_OPERATIONS
+from app.operations.limits import MAX_CATALOG_OPERATIONS, MAX_PLAN_STEPS
 from app.semantic_interpretation.contracts import SearchTrace
 
 
@@ -54,6 +54,8 @@ class YoloReport(StrictValue):
     guessing_allowed: bool = True
     bypassed_guards: list[GuardCode] = Field(default_factory=list, max_length=8)
     auto_confirmed: list[str] = Field(default_factory=list, max_length=8)
+    # Plan steps left out because the request explicitly negated them.
+    dropped_steps: list[str] = Field(default_factory=list, max_length=8)
     unresolved: str | None = Field(default=None, max_length=240)
 
 
@@ -82,6 +84,10 @@ class LanguageResponse(StrictValue):
     diagnostics: LanguageDiagnostics = Field(default_factory=LanguageDiagnostics)
     execution_mode: Literal["normal", "yolo"] = "normal"
     yolo_report: YoloReport | None = None
+    # A multi-step plan: steps run in order, each with its own core request ID and
+    # receipt; results accumulate as steps complete.
+    plan: list[OperationRequest] | None = Field(default=None, max_length=MAX_PLAN_STEPS)
+    plan_results: list[OperationResult] = Field(default_factory=list, max_length=MAX_PLAN_STEPS)
 
 
 class LanguageError(ValueError):

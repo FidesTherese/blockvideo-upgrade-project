@@ -585,6 +585,36 @@
   },
   {
    "operations": [],
+   "feature": "plan",
+   "text": "【複数手順】次の規則は、上の「生成・状態照会・復元・停止の混合は clarification」より優先します。"
+  },
+  {
+   "operations": [],
+   "feature": "plan",
+   "text": "順番に行う必要がある複数の操作（例:「以前の版に戻してから動画を作り直して」「生成を止めてから字幕を64pxにして」）は、kind: plan で steps に実行順に並べます（2〜4件）。"
+  },
+  {
+   "operations": [],
+   "feature": "plan",
+   "text": "各 step は operation と同じ形で、generate_after_save は false にします。動画の生成も一つの step として並べます。"
+  },
+  {
+   "operations": [],
+   "feature": "plan",
+   "text": "設定変更と動画生成の組み合わせだけなら plan ではなく、設定の operation に generate_after_save: true を付けます。"
+  },
+  {
+   "operations": [],
+   "feature": "plan",
+   "text": "plan の各 step にも明示された値だけを入れます。値が不足する step があれば、全体を clarification にします。"
+  },
+  {
+   "operations": [],
+   "feature": "plan",
+   "text": "前の step の結果（新しい版の番号やジョブ番号）は書きません。実行時にアプリが受け渡します。"
+  },
+  {
+   "operations": [],
    "modes": [
     "yolo"
    ],

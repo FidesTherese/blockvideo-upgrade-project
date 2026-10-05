@@ -17,6 +17,7 @@ export interface YoloReport {
   guessing_allowed: boolean;
   bypassed_guards: YoloGuardCode[];
   auto_confirmed: string[];
+  dropped_steps?: string[];
   unresolved: string | null;
 }
 
@@ -75,6 +76,9 @@ export interface LanguageResponse {
   generate_after_save?: boolean;
   execution_mode?: 'normal' | 'yolo';
   yolo_report?: YoloReport | null;
+  /** A multi-step plan, run in order after one confirmation (or unattended). */
+  plan?: OperationRequest[] | null;
+  plan_results?: Array<OperationResult & { changed?: boolean; base_revision?: number | null }>;
   generation_request?: OperationRequest | null;
   generation_result?: LanguageResponse['result'];
   diagnostics?: {

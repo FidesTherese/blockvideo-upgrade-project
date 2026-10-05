@@ -70,6 +70,19 @@ def response_for(db: Session, record: LanguageRequestRecord) -> LanguageResponse
                     "requires_confirmation": not blocked,
                     "failure": FailureView(reason_code="dialogue_superseded", message="この生成依頼は訂正・取り下げによって置き換えられています。")
                         if response.superseded_by else stored.failure if blocked else None})
+    if response.plan:
+        # Step receipts are authoritative, also after a crash between core commit and
+        # acknowledgement: results are rebuilt from them in plan order.
+        results = []
+        for step in response.plan:
+            stored_step = db.get(OperationReceipt, step.request_id)
+            if stored_step is None:
+                break
+            results.append(OperationResult.model_validate(stored_step.result_json))
+        response = response.model_copy(update={"plan_results": results})
+        if len(results) == len(response.plan):
+            response = response.model_copy(update={"status": "completed", "executed": True, "failure": None,
+                                                   "requires_confirmation": False})
     return response
 
 

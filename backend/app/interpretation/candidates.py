@@ -8,6 +8,7 @@ from app.interpretation.contracts import CandidateRef
 from app.interpretation.errors import InterpretationError
 from app.operations.catalog import CatalogError, OperationCatalog
 from app.operations.contracts import OperationDefinition
+from app.operations.limits import MAX_PLAN_STEPS
 from app.operations.annotations import load_annotations
 from app.operations.policies import load_policies
 
@@ -98,6 +99,17 @@ def response_schema(definitions: tuple[OperationDefinition, ...]) -> dict[str, A
                 {} if load_policies().get(item.operation_id).allows_generate_after_save else {"enum": [False]})},
         }) for item in definitions
     ]
+    # A plan step is an ordinary operation branch whose generation flag is always false
+    # (generation is its own explicit step).
+    step_branches = [
+        _object({
+            "kind": {"type": "string", "enum": ["operation"]},
+            "operation_id": {"type": "string", "enum": [item.operation_id]},
+            "operation_version": {"type": "integer", "enum": [item.operation_version]},
+            "arguments": constrained_arguments(item),
+            "generate_after_save": {"type": "boolean", "enum": [False]},
+        }) for item in definitions
+    ]
     text_rule = {"type": "string", "minLength": 1, "maxLength": 240, "pattern": r"\S"}
     branches.extend([
         _object({
@@ -110,5 +122,8 @@ def response_schema(definitions: tuple[OperationDefinition, ...]) -> dict[str, A
                  "reason": deepcopy(text_rule)}),
         _object({"kind": {"type": "string", "enum": ["no_operation"]},
                  "reason": deepcopy(text_rule)}),
+        _object({"kind": {"type": "string", "enum": ["plan"]},
+                 "steps": {"type": "array", "minItems": 2, "maxItems": MAX_PLAN_STEPS,
+                           "items": {"anyOf": step_branches}}}),
     ])
     return _object({"result": {"anyOf": branches}})

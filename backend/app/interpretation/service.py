@@ -20,24 +20,30 @@ _RULES_PATH = Path(__file__).with_name("prompt_rules.json")
 
 
 @lru_cache(maxsize=2)
-def _rules(path: Path = _RULES_PATH) -> tuple[tuple[frozenset[str], frozenset[str], str], ...]:
+def _rules(path: Path = _RULES_PATH) -> tuple[tuple[frozenset[str], frozenset[str], str | None, str], ...]:
     """Ordered prompt rules; a rule tagged with operations applies only when one is
-    offered, and a rule tagged with modes only in those modes (untagged: every mode)."""
+    offered, a rule tagged with modes only in those modes (untagged: every mode), and
+    a rule tagged with a feature only while that feature is enabled."""
     raw = json.loads(path.read_text(encoding="utf-8"))
     if raw.get("schema_version") != 1 or not isinstance(raw.get("rules"), list):
         raise ValueError("invalid prompt rules")
-    return tuple((frozenset(item["operations"]), frozenset(item.get("modes", ("normal", "yolo"))), item["text"])
-                 for item in raw["rules"])
+    return tuple((frozenset(item["operations"]), frozenset(item.get("modes", ("normal", "yolo"))),
+                  item.get("feature"), item["text"]) for item in raw["rules"])
 
 
-def system_prompt(offered: set[str], mode: str = "normal") -> str:
+DEFAULT_FEATURES: frozenset[str] = frozenset({"plan"})
+
+
+def system_prompt(offered: set[str], mode: str = "normal",
+                  features: frozenset[str] = DEFAULT_FEATURES) -> str:
     """General rules plus the rules of offered operations, in their fixed order.
 
-    With every catalog operation offered in normal mode this is exactly the All
-    Tools prompt; YOLO mode appends its precedence rules at the end.
+    With every catalog operation offered, normal mode and no features this is
+    exactly the D35 All Tools prompt; the plan feature and YOLO mode append rules.
     """
-    return "".join(text + "\n" for operations, modes, text in _rules()
-                   if mode in modes and (not operations or operations & offered))
+    return "".join(text + "\n" for operations, modes, feature, text in _rules()
+                   if mode in modes and (feature is None or feature in features)
+                   and (not operations or operations & offered))
 
 
 _READINESS_SYSTEM = """
@@ -117,7 +123,7 @@ class Interpreter:
                             "repair": {"failure_code": exc.code,
                                 "instruction": "元の依頼を所定のJSON形式で再提出してください。値の推測・部分実行は禁止です。不足はclarificationにしてください。"},
                         }, ensure_ascii=False)))
-            status = {"operation": "proposed", "clarification": "needs_input",
+            status = {"operation": "proposed", "plan": "proposed", "clarification": "needs_input",
                       "unsupported": "unsupported", "no_operation": "dismissed"}[proposal.kind]
             return InterpretationOutcome(status=status, proposal=proposal, attempts=attempts,
                                          repair_codes=repair_codes)

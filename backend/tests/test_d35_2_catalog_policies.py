@@ -22,7 +22,7 @@ D35_SYSTEM_SHA256 = "0c328f623765c4d26946c957994bf3eac93a5e9d355a11063bfcb7347dd
 
 def test_full_catalog_prompt_is_byte_identical_to_the_all_tools_prompt() -> None:
     offered = {item.operation_id for item in CATALOG.definitions}
-    assert hashlib.sha256(system_prompt(offered).encode("utf-8")).hexdigest() == D35_SYSTEM_SHA256
+    assert hashlib.sha256(system_prompt(offered, features=frozenset()).encode("utf-8")).hexdigest() == D35_SYSTEM_SHA256
 
 
 def test_narrowed_candidates_receive_only_general_and_their_own_rules() -> None:

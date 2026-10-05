@@ -9,6 +9,8 @@ from __future__ import annotations
 MAX_CATALOG_OPERATIONS = 4096
 # Operation versions offered to the model in one interpretation call.
 MAX_PROMPT_CANDIDATES = 32
+# Ordered steps in one multi-step plan (each step is an ordinary proposal).
+MAX_PLAN_STEPS = 4
 # Index documents (descriptions, examples, schema lines, annotations) and the bundle
 # size. Vectors are stored as JSON floats, so beyond this a binary vector format is
 # needed (16,384 x 768 floats is roughly 0.1-0.2 GB of JSON).

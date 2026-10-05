@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.operations.contracts import CandidateReadinessSnapshot
-from app.operations.limits import MAX_CATALOG_OPERATIONS
+from app.operations.limits import MAX_CATALOG_OPERATIONS, MAX_PLAN_STEPS
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=240, pattern=r"\S")]
 
@@ -94,8 +94,16 @@ class NoOperationProposal(StrictValue):
     reason: ShortText
 
 
+class PlanProposal(StrictValue):
+    """Ordered steps the application runs one by one; each step is an ordinary
+    operation proposal. The model never wires results between steps."""
+
+    kind: Literal["plan"]
+    steps: list[OperationProposal] = Field(min_length=2, max_length=MAX_PLAN_STEPS)
+
+
 Proposal = Annotated[
-    OperationProposal | ClarificationProposal | UnsupportedProposal | NoOperationProposal,
+    OperationProposal | ClarificationProposal | UnsupportedProposal | NoOperationProposal | PlanProposal,
     Field(discriminator="kind"),
 ]
 

@@ -7,7 +7,9 @@ from time import perf_counter
 
 from sqlalchemy.orm import Session
 
-from app.interpretation.contracts import CandidateRef, ClarificationProposal, FailureView, InterpretationInput, OperationProposal
+from app.interpretation.contracts import (
+    CandidateRef, ClarificationProposal, FailureView, InterpretationInput, OperationProposal, PlanProposal,
+)
 from app.interpretation.service import Interpreter
 from app.interpretation.transport import StructuredAdapter
 from app.language_operations import dialogue, observability, repository
@@ -53,6 +55,7 @@ class LanguageOperationService:
         guard_code = None
         yolo = request.mode == "yolo"
         bypassed: list[str] = []
+        dropped: list[str] = []
         unresolved: str | None = None
         try:
             if yolo and not self.yolo_enabled:
@@ -90,9 +93,10 @@ class LanguageOperationService:
                             "candidates": list(semantic.candidates)})})
                 response = response.model_copy(update={"interpretation": outcome})
                 question = None
-                if isinstance(outcome.proposal, OperationProposal):
-                    proposed = outcome.proposal
-                    relation = request.continuation.relation if request.continuation else None
+                relation = request.continuation.relation if request.continuation else None
+
+                def vet(proposed: OperationProposal) -> tuple[ClarificationProposal | None, str | None]:
+                    """The first clarifying guard that fires; in YOLO it is recorded and skipped."""
                     empty = ClarificationProposal(kind="clarification", question="どの設定を、どの値に変更しますか？",
                                                   missing_fields=["arguments"])
                     checks = (
@@ -113,11 +117,30 @@ class LanguageOperationService:
                             # Unattended: the guessed value stands; the bypass is reported.
                             bypassed.append(code)
                             continue
-                        question, guard_code = found, code
-                        break
+                        return found, code
+                    return None, None
+
+                plan_steps: list[OperationProposal] = []
+                negated_plan = False
+                if isinstance(outcome.proposal, OperationProposal):
+                    question, guard_code = vet(outcome.proposal)
+                elif isinstance(outcome.proposal, PlanProposal):
+                    for step in outcome.proposal.steps:
+                        if negative_control_reason(request.text, step.operation_id) is not None:
+                            if yolo:
+                                dropped.append(step.operation_id)
+                                continue
+                            negated_plan = True
+                            break
+                        question, guard_code = vet(step)
+                        if question is not None:
+                            break
+                        plan_steps.append(step)
                 negative_reason = None
                 if question is None and isinstance(outcome.proposal, OperationProposal):
                     negative_reason = negative_control_reason(request.text, outcome.proposal.operation_id)
+                if question is None and isinstance(outcome.proposal, PlanProposal) and (negated_plan or not plan_steps):
+                    negative_reason = "explicit_negative_intent"
                 if question is not None:
                     # Retain the original structured interpretation for audit;
                     # the application asks instead of executing a guessed ID.
@@ -125,6 +148,30 @@ class LanguageOperationService:
                 elif negative_reason is not None:
                     guard_code = "negative_intent"
                     response = response.model_copy(update={"status": "dismissed"})
+                elif isinstance(outcome.proposal, PlanProposal):
+                    prepared_steps = [OperationRequest(
+                        operation_id=step.operation_id, operation_version=step.operation_version,
+                        target=OperationTarget(project_id=response.project_id),
+                        arguments=merged_arguments(db, response.project_id, step),
+                        request_id=f"{response.core_request_id}-s{index}",
+                        # Later steps are bound at execution to the previous step's revision.
+                        base_revision=response.base_revision if index == 1 else None,
+                        generation_requested=False,
+                    ) for index, step in enumerate(plan_steps, 1)]
+                    confirmation = repository.digest({"request_id": request.request_id,
+                                                       "plan": [step.model_dump(mode="json") for step in prepared_steps]})
+                    response = response.model_copy(update={
+                        "status": "ready", "plan": prepared_steps, "confirmation_token": confirmation,
+                        # A multi-step plan is always confirmed once as a whole, except unattended.
+                        "requires_confirmation": self.review_all or not yolo,
+                    })
+                    db.rollback()
+                    db.expire_all()
+                    readiness = self.core.readiness(db, prepared_steps[0])
+                    if readiness.readiness != Readiness.ready:
+                        response = response.model_copy(update={"status": "blocked", "failure": FailureView(
+                            reason_code=readiness.reason_code or "not_ready",
+                            message="対象の状態が変わったか、この操作を現在実行できません。最新の状態を確認してください。")})
                 elif not isinstance(outcome.proposal, OperationProposal):
                     clarification = outcome.proposal if isinstance(outcome.proposal, ClarificationProposal) else None
                     if yolo and outcome.status in {"needs_input", "unsupported"}:
@@ -178,7 +225,8 @@ class LanguageOperationService:
         })})
         if yolo:
             response = response.model_copy(update={"execution_mode": "yolo", "yolo_report": YoloReport(
-                guessing_allowed=self.yolo_enabled, bypassed_guards=bypassed, unresolved=unresolved)})
+                guessing_allowed=self.yolo_enabled, bypassed_guards=bypassed, dropped_steps=dropped,
+                unresolved=unresolved)})
         response = repository.finish_interpretation(db, request.request_id, owner, response)
         observability.record(response, "prepared")
         return response
@@ -193,7 +241,8 @@ class LanguageOperationService:
         if response.status != "ready" or response.requires_confirmation or response.result is not None:
             return response
         yolo = response.execution_mode == "yolo"
-        confirmed = [response.prepared_request.operation_id] if response.prepared_request else []
+        confirmed = ([response.prepared_request.operation_id] if response.prepared_request
+                     else [step.operation_id for step in response.plan or []])
         response = await asyncio.to_thread(self.execute, db, request.request_id, LanguageExecution(
             confirmation_token=response.confirmation_token, confirm_generation=yolo,
         ))
@@ -213,6 +262,8 @@ class LanguageOperationService:
 
     def execute(self, db: Session, request_id: str, confirmation: LanguageExecution) -> LanguageResponse:
         response = repository.lookup(db, request_id)
+        if response.plan:
+            return self._execute_plan(db, request_id, response, confirmation)
         if response.result is not None and (not response.generate_after_save or response.generation_result is not None):
             return response
         if response.result is not None and response.generation_request is not None:
@@ -242,6 +293,49 @@ class LanguageOperationService:
         response = response.model_copy(update={"diagnostics": response.diagnostics.model_copy(update={
             "generation_execution_ms" if response.generation_request else "execution_ms": round((perf_counter() - started) * 1000),
         })})
+        response = repository.acknowledge(db, request_id, response)
+        observability.record(response, "executed")
+        return response
+
+    def _execute_plan(self, db: Session, request_id: str, response: LanguageResponse,
+                      confirmation: LanguageExecution) -> LanguageResponse:
+        """Run plan steps in order through the common core; stop at the first failure.
+
+        Each step has its own core request ID, so a replayed confirmation resumes after
+        the last committed step instead of repeating it.
+        """
+        plan = response.plan or []
+        if response.status == "completed" or len(response.plan_results) == len(plan):
+            return response
+        if response.status != "ready" or response.confirmation_token is None:
+            raise LanguageError("request_not_ready", "この要求は実行できる状態ではありません。")
+        if not hmac.compare_digest(confirmation.confirmation_token, response.confirmation_token):
+            raise LanguageError("confirmation_mismatch", "確認内容が保存済みの提案と一致しません。")
+        if (any(load_policies().get(step.operation_id).requires_confirmation for step in plan)
+                and not confirmation.confirm_generation):
+            raise LanguageError("generation_confirmation_required", "動画生成の対象と内容を確認してから開始してください。")
+        started = perf_counter()
+        results = list(response.plan_results)
+        base = results[-1].revision if results else response.base_revision
+        failure: FailureView | None = None
+        for index, step in enumerate(plan):
+            if index < len(results):
+                continue
+            try:
+                result = self.core.execute(db, step.model_copy(update={"base_revision": base}),
+                                           before_dispatch=lambda session: dialogue.require_current(session, request_id))
+            except OperationError as exc:
+                failure = FailureView(reason_code=exc.reason_code,
+                                      message=f"手順{index + 1}で停止しました。残りの手順は実行していません。{exc}")
+                break
+            results.append(result)
+            base = result.revision
+        response = response.model_copy(update={
+            "plan_results": results, "executed": bool(results), "requires_confirmation": False,
+            **({"status": "blocked", "failure": failure} if failure else {"status": "completed", "failure": None}),
+            "diagnostics": response.diagnostics.model_copy(update={
+                "execution_ms": round((perf_counter() - started) * 1000)}),
+        })
         response = repository.acknowledge(db, request_id, response)
         observability.record(response, "executed")
         return response

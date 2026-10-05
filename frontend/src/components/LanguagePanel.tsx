@@ -5,6 +5,7 @@ import type { ProjectDetail, ProjectHistory } from '@/lib/types';
 import { LanguageResultCard } from '@/components/LanguageResultCard';
 import { LanguageWaiting } from '@/components/LanguageWaiting';
 import { LanguageYoloReport } from '@/components/LanguageYoloReport';
+import { LanguagePlanCard } from '@/components/LanguagePlanCard';
 
 const YOLO_KEY = 'blockvideo.language.yolo';
 
@@ -98,7 +99,10 @@ export function LanguagePanel({ project, history, controller, disabled, unavaila
       </div>
     </div>}
     {response && <LanguageYoloReport response={response} />}
-    {response && <LanguageResultCard response={response} project={project} history={history}
+    {response?.plan && <LanguagePlanCard response={response} project={project} busy={busy}
+      disabled={disabled || running} unavailable={unavailable}
+      onConfirm={() => controller.confirm(project.revision)} onEdit={edit} />}
+    {response && !response.plan && <LanguageResultCard response={response} project={project} history={history}
       busy={busy} disabled={disabled || running} unavailable={unavailable}
       onConfirm={() => controller.confirm(project.revision)} onEdit={edit} />}
   </section>;

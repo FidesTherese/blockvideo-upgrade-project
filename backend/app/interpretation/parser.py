@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.interpretation.contracts import OperationProposal, ProposalEnvelope
+from app.interpretation.contracts import OperationProposal, PlanProposal, ProposalEnvelope
 from app.interpretation.errors import InterpretationError
 from app.operations.catalog import CatalogError, validate_arguments
 from app.operations.contracts import OperationDefinition
@@ -71,15 +71,24 @@ def parse_proposal(
         raise InterpretationError("invalid_output") from None
     proposal = envelope.result
     if isinstance(proposal, OperationProposal):
-        if proposal.generate_after_save and not load_policies().get(proposal.operation_id).allows_generate_after_save:
-            raise InterpretationError("invalid_arguments")
-        definition = next((item for item in definitions if
-                           (item.operation_id, item.operation_version) ==
-                           (proposal.operation_id, proposal.operation_version)), None)
-        if definition is None:
-            raise InterpretationError("candidate_not_offered")
-        try:
-            validate_arguments(definition, proposal.arguments)
-        except (CatalogError, OverflowError, RecursionError):
-            raise InterpretationError("invalid_arguments") from None
+        _validate_operation(proposal, definitions)
+    elif isinstance(proposal, PlanProposal):
+        for step in proposal.steps:
+            if step.generate_after_save:
+                raise InterpretationError("invalid_arguments")
+            _validate_operation(step, definitions)
     return envelope
+
+
+def _validate_operation(proposal: OperationProposal, definitions: tuple[OperationDefinition, ...]) -> None:
+    if proposal.generate_after_save and not load_policies().get(proposal.operation_id).allows_generate_after_save:
+        raise InterpretationError("invalid_arguments")
+    definition = next((item for item in definitions if
+                       (item.operation_id, item.operation_version) ==
+                       (proposal.operation_id, proposal.operation_version)), None)
+    if definition is None:
+        raise InterpretationError("candidate_not_offered")
+    try:
+        validate_arguments(definition, proposal.arguments)
+    except (CatalogError, OverflowError, RecursionError):
+        raise InterpretationError("invalid_arguments") from None
