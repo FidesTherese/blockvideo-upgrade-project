@@ -8,6 +8,8 @@
     "do not execute",
     "don't execute"
   ],
+  "negated_clause_pattern": "[^、。,.!！?？]*?(?:ないで|ないこと|なくていい|なくてよい|なくて大丈夫)(?:ください|ね|ほしい|おいて)?",
+  "negation_residue_pattern": "[ 、。,.!！?？]*(?:です|ね|よ|お願いします)?[ 、。,.!！?？]*",
   "follow_up_generation": {
     "operation_id": "project.generation.start",
     "operation_version": 1,

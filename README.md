@@ -224,7 +224,7 @@ python -m uv run python -m scripts.probe_language_dialogue --model blockvideo-d1
   |---|---|
   | `definitions.json` | 操作と引数の形（検索インデックスがこのバイト列に結び付く） |
   | `operation_policies.json` | 変更系か、確認が必要か、否定語、参照番号の種類、引数のどこに設定値があるか、保存後の生成 |
-  | `operation_annotations.json` | 日本語の言い方・同義語・使う場面・紛らわしい操作との違い（検索とモデルへの補足） |
+  | `operation_annotations.json` | 日本語の言い方・同義語・使う場面・紛らわしい操作との違い（検索用。違いの説明は作成者・レビュー向け） |
   | `search_scope.json` | 操作ごとの能力（検索の範囲） |
   | `../interpretation/prompt_rules.json` | モデルへの規則。操作ごと・モード（通常／YOLO）ごとに印を付け、提示した候補の規則だけを組み立てる |
 - **操作を追加する手順**: 上のファイルに書き足し、ハンドラを 1 つ登録し、`python -m scripts.check_catalog`
@@ -235,6 +235,12 @@ python -m uv run python -m scripts.probe_language_dialogue --model blockvideo-d1
   公開の開発用問題では、正解の操作が上位 5 件に入る割合が 68.1%（英語の説明文・ベクトルのみ）から
   100%（注釈＋混合検索）になりました（注釈の一部は開発用問題と同じ言い回しなので楽観的な値です）。
   注釈ファイルを変えると、古いインデックスは自動的に無効になります（`scripts.operation_index build` で作り直す）。
+  注釈は候補の検索だけに使い、モデルに渡す候補の情報には入れません（開発用 30 問の実モデル比較で、
+  入れると否定やあいまいな依頼を操作にしてしまう割合が上がったため）。
+- **否定だけの依頼**: 「ジョブ7は止めないで」「第2版には戻さないで」のように、依頼が否定の指示だけで
+  できている場合は、モデルがどの操作を提案しても変更系の操作は実行しません（YOLO でも同じ）。
+  「字幕は変えないで動画だけ作り直して」のように肯定の指示が残る場合は対象外です。判定の型は
+  `operation_policies.json` の `negated_clause_pattern` / `negation_residue_pattern` にあります。
 - **規模の上限**: カタログ 4,096 操作、インデックス 16,384 文書、1 回のモデル呼び出しに載せる候補は 32 件まで
   （`backend/app/operations/limits.py`）。1,000 操作の合成カタログで検索の試験をしています。
 - **リリース判定（D40）**: 既定は RAG（stateful）。All Tools は安全性の比較用で、正解率は参考値です。

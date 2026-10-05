@@ -20,6 +20,8 @@ from app.operations.schema_validation import CatalogError
 
 OPERATIONS_DIR = Path(__file__).parent
 PROMPT_RULES = OPERATIONS_DIR.parent / "interpretation" / "prompt_rules.json"
+# Optional prompt-rule groups that the interpreter can enable (see system_prompt).
+KNOWN_FEATURES = ("plan",)
 
 
 @dataclass
@@ -90,6 +92,8 @@ def compile_catalog(directory: Path = OPERATIONS_DIR, prompt_rules: Path = PROMP
                 report.errors.append(f"prompt rule {index} names unknown operations: {sorted(unknown)}")
             if set(rule.get("modes", ["normal", "yolo"])) - {"normal", "yolo"}:
                 report.errors.append(f"prompt rule {index} has an unknown mode")
+            if rule.get("feature") not in (None, *KNOWN_FEATURES):
+                report.errors.append(f"prompt rule {index} has an unknown feature")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         report.errors.append(f"prompt rules: {exc}")
 

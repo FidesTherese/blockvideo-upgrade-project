@@ -36,10 +36,23 @@ each). The manifest binds `annotations_sha256` (`extraction_version`
 `public-metadata-annotations-v2`); a changed annotation file marks old indexes stale; a
 catalog directory without the file keeps the v1 format (e.g. pinned D35). Ranking with
 query text mixes `(1 - 0.35) * cosine + 0.35 * character-bigram Dice` (schema documents
-contribute no lexical part). Candidate payloads carry annotation scenarios and
-distinctions as `notes` and up to six `example_requests`. Development recall@5:
+contribute no lexical part). Candidate payloads stay public metadata only: on 30
+development requests with the bonsai model, adding annotation notes or example
+requests to the payload lowered request-class agreement (21 -> 19/30 at product
+level) without improving operation choice, so annotations only shape retrieval.
+Development recall@5:
 68.1% (English metadata, vector only) to 100% (annotations + hybrid), optimistic
 because some annotation phrasings overlap development requests.
+
+### Negation-only requests
+
+`negative_control_reason` also returns `explicit_negative_intent` for any mutating
+proposal when the request consists only of negated instructions: removing every
+`negated_clause_pattern` match leaves only text that fully matches
+`negation_residue_pattern` (punctuation, polite endings; both regexes live in
+`operation_policies.json`). "ジョブ7は止めないで" blocks a proposed cancel or
+retry; "字幕は変えないで動画だけ作り直して" still allows generation. The rule applies in
+normal mode, YOLO mode and to every plan step.
 
 ### Unattended (YOLO) mode
 

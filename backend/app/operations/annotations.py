@@ -28,11 +28,10 @@ class OperationAnnotation(BaseModel):
     scenarios: tuple[str, ...] = Field(default=(), max_length=16)
     distinctions: tuple[str, ...] = Field(default=(), max_length=16)
 
+    # Distinctions document how an operation differs from look-alikes for catalog
+    # authors and reviewers; they are not indexed (they name the other operations).
     def searchable(self) -> tuple[str, ...]:
         return (*self.utterances, *self.synonyms, *self.scenarios)
-
-    def notes(self) -> tuple[str, ...]:
-        return (*self.scenarios, *self.distinctions)
 
 
 class OperationAnnotations(BaseModel):

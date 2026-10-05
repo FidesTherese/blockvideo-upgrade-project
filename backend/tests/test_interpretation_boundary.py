@@ -120,10 +120,8 @@ async def test_minimal_payload_and_schema_are_candidate_specific(catalog: Operat
     payload = json.loads(messages[1].content)
     assert payload["state"] == {"selected_project_id": 101, "revision": 7, "subtitle_font_size": 48}
     candidate = payload["candidates"][0]
-    # Public metadata plus optional catalog annotations (notes, example requests); nothing else.
-    assert {"operation_id", "operation_version", "description", "examples", "arguments_schema"} <= set(candidate)
-    assert set(candidate) <= {"operation_id", "operation_version", "description", "examples", "arguments_schema",
-                              "notes", "example_requests"}
+    # Public metadata only; annotations shape retrieval, not the payload.
+    assert set(candidate) == {"operation_id", "operation_version", "description", "examples", "arguments_schema"}
     # One operation, clarification, unsupported, no_operation and the plan branch.
     assert len(schema["properties"]["result"]["anyOf"]) == 5
     branch = schema["properties"]["result"]["anyOf"][0]

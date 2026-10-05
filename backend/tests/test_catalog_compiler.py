@@ -59,3 +59,11 @@ def test_cli_exit_code_reflects_the_report(copy: Path) -> None:
     bad = subprocess.run([sys.executable, "-B", "-m", "scripts.check_catalog", "--catalog-dir", str(copy),
                           "--prompt-rules", str(copy / "prompt_rules.json")], cwd=backend, capture_output=True)
     assert bad.returncode == 1
+
+
+def test_prompt_rules_with_unknown_modes_or_features_are_refused(copy: Path) -> None:
+    _edit(copy / "prompt_rules.json", lambda data: data["rules"].extend([
+        {"modes": ["fast"], "text": "x"}, {"feature": "recipes", "text": "y"}]))
+    report = compile_catalog(copy, copy / "prompt_rules.json")
+    joined = " | ".join(report.errors)
+    assert "unknown mode" in joined and "unknown feature" in joined

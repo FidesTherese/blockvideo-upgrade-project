@@ -9,7 +9,7 @@ import pytest
 
 from app.interpretation.contracts import CandidateRef, InterpretationInput, OperationProposal
 from app.interpretation.service import Interpreter, system_prompt
-from app.language_operations.intent_guard import negative_control_reason
+from app.language_operations.intent_guard import negative_control_reason, only_negated_instructions
 from app.language_operations.references import reference_question
 from app.operations.catalog import CatalogError, OperationCatalog, load_catalog
 from app.operations.limits import MAX_CATALOG_OPERATIONS, MAX_PROMPT_CANDIDATES
@@ -48,9 +48,20 @@ def test_unknown_operations_default_to_mutating_and_confirmed() -> None:
     assert negative_control_reason("何もしないで", "project.unreviewed.operation") == "explicit_negative_intent"
 
 
+@pytest.mark.parametrize(("text", "expected"), [
+    ("字幕は小さくしないで", True), ("ジョブ7は止めないで", True), ("第2版には戻さないで", True),
+    ("何も変えなくていいです", True), ("字幕は変えないで動画だけ作り直して", False),
+    ("字幕を64pxにして。動画は作らないで", False), ("字幕を小さくして", False),
+])
+def test_requests_made_only_of_negations_are_detected(text: str, expected: bool) -> None:
+    assert only_negated_instructions(text) is expected
+    reason = negative_control_reason(text, "project.subtitle-font-size.adjust")
+    assert (reason == "explicit_negative_intent") is expected
+
+
 def test_policy_driven_guards_keep_the_d35_decisions() -> None:
     assert negative_control_reason("再試行しないで", "project.generation.retry") == "explicit_negative_intent"
-    assert negative_control_reason("再試行しないで", "project.generation.start") is None
+    assert negative_control_reason("再試行しないで新しく作り直して", "project.generation.start") is None
     assert negative_control_reason("何もしないで", "project.status.get") is None
     cancel = OperationProposal(kind="operation", operation_id="project.generation.cancel",
                                operation_version=1, arguments={"job_id": 7})

@@ -74,6 +74,11 @@ class FollowUpGeneration(_Strict):
 class OperationPolicies(_Strict):
     schema_version: int
     global_negative_phrases: tuple[str, ...]
+    # A request made only of negated instructions ("…しないで") asks for no change, whichever
+    # operation the model proposed: removing every negated clause leaves only the residue
+    # pattern (punctuation, polite endings). Both are matched on normalized text.
+    negated_clause_pattern: str | None = None
+    negation_residue_pattern: str | None = None
     follow_up_generation: FollowUpGeneration
     references: dict[str, ReferenceKind]
     operations: dict[str, OperationPolicy]
@@ -85,6 +90,9 @@ class OperationPolicies(_Strict):
         for policy in self.operations.values():
             if policy.reference is not None and policy.reference.kind not in self.references:
                 raise ValueError("operation policy references an unknown reference kind")
+        for pattern in (self.negated_clause_pattern, self.negation_residue_pattern):
+            if pattern is not None:
+                re.compile(pattern)
         if self.follow_up_generation.operation_id not in self.operations:
             raise ValueError("follow-up generation operation has no policy")
         return self
