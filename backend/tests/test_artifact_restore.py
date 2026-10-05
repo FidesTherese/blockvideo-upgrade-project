@@ -47,7 +47,9 @@ async def _two_artifacts() -> tuple[int, GenerationArtifact, GenerationArtifact]
 
 
 @pytest.mark.asyncio
-async def test_restore_points_current_video_at_an_earlier_artifact(temp_storage, accept_synthetic_probe) -> None:
+async def test_restore_points_current_video_at_an_earlier_artifact(
+    temp_storage, accept_synthetic_probe,  # noqa: F811
+) -> None:
     project_id, first, second = await _two_artifacts()
     with get_session_factory()() as db:
         revision = db.get(Project, project_id).revision
@@ -69,7 +71,9 @@ async def test_restore_points_current_video_at_an_earlier_artifact(temp_storage,
 
 
 @pytest.mark.asyncio
-async def test_restore_rejects_foreign_missing_or_unverified_artifacts(temp_storage, accept_synthetic_probe) -> None:
+async def test_restore_rejects_foreign_missing_or_unverified_artifacts(
+    temp_storage, accept_synthetic_probe,  # noqa: F811
+) -> None:
     project_id, first, _ = await _two_artifacts()
     client = TestClient(create_app())
     response = client.post("/api/operations/execute", json=_request(project_id, 999).model_dump(mode="json"))
