@@ -4,6 +4,8 @@ export interface LanguageConnection {
   base_url: string | null;
   cloud_fallback: false;
   operation_mode?: 'all_tools' | 'semantic' | 'stateful';
+  /** Whether the server accepts unattended (YOLO) requests. */
+  yolo_enabled?: boolean;
 }
 
 export const operationModeLabels = {

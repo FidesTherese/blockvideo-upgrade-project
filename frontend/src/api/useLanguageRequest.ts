@@ -121,10 +121,11 @@ export function useLanguageRequest(projectId: number) {
     return true;
   }, [perform, projectId]);
 
-  const submit = useCallback((text: string, revision: number) => {
+  const submit = useCallback((text: string, revision: number, yolo = false) => {
     if (flight.current || locked || !text.trim() || text.length > 2000) return false;
     return begin({ request: { request_id: crypto.randomUUID(), text: text.trim(),
-      target: { selected_project_id: projectId }, base_revision: revision }, epoch: crypto.randomUUID(), action: 'submit' });
+      target: { selected_project_id: projectId }, base_revision: revision, ...(yolo ? { mode: 'yolo' as const } : {}) },
+    epoch: crypto.randomUUID(), action: 'submit' });
   }, [begin, locked, projectId]);
 
   const confirm = useCallback((revision: number) => {

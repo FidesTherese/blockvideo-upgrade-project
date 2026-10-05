@@ -23,6 +23,7 @@ export function readLanguageSession(projectId: number): LanguageSession | null {
     if (value.action === 'confirm' && (!value.confirmation
       || !/^[0-9a-f]{64}$/.test(value.confirmation.confirmation_token)
       || typeof value.confirmation.confirm_generation !== 'boolean')) return null;
+    if (value.request.mode !== undefined && !['normal', 'yolo'].includes(value.request.mode)) return null;
     const parent = value.request.continuation;
     if (parent && (typeof parent.parent_request_id !== 'string'
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(parent.parent_request_id)

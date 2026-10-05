@@ -7,6 +7,17 @@ export interface LanguageRequest {
   target: { selected_project_id: number };
   base_revision: number;
   continuation?: { parent_request_id: string; relation: 'answer' | 'correction' | 'dismiss' };
+  /** 'yolo': no confirmation or clarification; missing values are guessed and reported. */
+  mode?: 'normal' | 'yolo';
+}
+
+export type YoloGuardCode = 'reference' | 'subtitle_value' | 'settings_value' | 'pending_settings' | 'reading' | 'empty_settings';
+
+export interface YoloReport {
+  guessing_allowed: boolean;
+  bypassed_guards: YoloGuardCode[];
+  auto_confirmed: string[];
+  unresolved: string | null;
 }
 
 export interface LanguageConfirmation {
@@ -62,6 +73,8 @@ export interface LanguageResponse {
   failure: { reason_code: string; message: string; http_status?: number | null } | null;
   executed: boolean;
   generate_after_save?: boolean;
+  execution_mode?: 'normal' | 'yolo';
+  yolo_report?: YoloReport | null;
   generation_request?: OperationRequest | null;
   generation_result?: LanguageResponse['result'];
   diagnostics?: {
