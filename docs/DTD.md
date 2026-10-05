@@ -1,5 +1,72 @@
 # BlockVideo Plan C — Detailed Technical Design
 
+## D41–D46 Extensibility redesign (2026-10-06)
+
+Design source: `plan-c/extensibility-proposal.md`. The skeleton is unchanged in
+spirit and made explicit: a large operation catalog is searched by retrieval, a
+small model chooses among a few retrieved candidates and fills typed arguments
+(a proposal, never code), and only registered handlers execute.
+
+### Catalog-side knowledge (single source)
+
+`app/operations/` holds every operation fact: `definitions.json` (arguments; its bytes
+bind retrieval indexes and stay unchanged), `operation_policies.json` (mutating,
+requires_confirmation, negative phrases, reference kinds, settings layouts per
+version, follow-up generation), `operation_annotations.json` (Japanese utterances,
+synonyms, scenarios, distinctions), `search_scope.json` (capabilities), and
+`app/interpretation/prompt_rules.json` (rules tagged by operation and mode). Guards,
+confirmation, references, generate_after_save, follow-up generation and the
+settings-update grammar read policies instead of naming operation IDs. Startup
+refuses an operation without a policy or an annotation naming an unknown operation;
+an unknown operation defaults to mutating and confirmed. `catalog_compiler`
+(`scripts/check_catalog.py`) validates all files together.
+
+### Limits
+
+`app/operations/limits.py`: catalog/scope/ranking/diagnostics up to 4,096 operation
+versions, index up to 16,384 documents and 256 MB (JSON vectors; beyond needs a
+binary format), and one model call sees at most 32 candidates (`too_many_candidates`
+instead of failing every request). With every operation offered in normal mode the
+assembled system prompt is byte-identical to D35.
+
+### Retrieval
+
+Index documents gain kind `annotation` (utterances, synonyms, scenarios, one document
+each). The manifest binds `annotations_sha256` (`extraction_version`
+`public-metadata-annotations-v2`); a changed annotation file marks old indexes stale; a
+catalog directory without the file keeps the v1 format (e.g. pinned D35). Ranking with
+query text mixes `(1 - 0.35) * cosine + 0.35 * character-bigram Dice` (schema documents
+contribute no lexical part). Candidate payloads carry annotation scenarios and
+distinctions as `notes` and up to six `example_requests`. Development recall@5:
+68.1% (English metadata, vector only) to 100% (annotations + hybrid), optimistic
+because some annotation phrasings overlap development requests.
+
+### Unattended (YOLO) mode
+
+`LanguageInput.mode = "yolo"` (server switch `LANGUAGE_YOLO_ENABLED`, default true; UI
+toggle default off, remembered per browser). Interpretation appends YOLO-only prompt
+rules (guess instead of asking; run the supported part; never act against an explicit
+negation). Clarifying guards (reference, subtitle_value, settings_value,
+pending_settings, reading, empty_settings) are recorded in `yolo_report.bypassed_guards`
+instead of asking; the negative-intent guard, schemas, readiness and the server-wide
+`LANGUAGE_REVIEW_ALL` still apply. `submit` confirms on the user's behalf including the
+follow-up generation after a save and records `auto_confirmed`. One generation at most
+per request; no automatic retries or re-planning yet (proposal section 4-3 I).
+
+### Release decision
+
+D40 always selects stateful as the default. Stateful must pass every gate; All Tools
+keeps completion and safety gates while its quality gates are recorded as reference
+only. D38/D40 source inventories include `app/operations/limits.py`.
+
+### Not yet implemented (proposal phases)
+
+Plans/recipes for multi-step requests (phase 4), hierarchical retrieval and a
+reranker, state retrieval and candidate state lists, per-argument guess rules in the
+catalog (YOLO guesses are prompt rules today), cost/attempt budgets and automatic
+retries for YOLO, restoring a previous artifact (the YOLO report points to settings
+history), catalog-driven frontend and evaluator contracts, and binary vector storage.
+
 ## D31–D40 Implementation Contract
 
 ### Document control

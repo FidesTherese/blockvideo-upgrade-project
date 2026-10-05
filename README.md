@@ -213,6 +213,37 @@ python -m uv run python -m scripts.probe_language_dialogue --model blockvideo-d1
 [D22の仕様](docs/plan-c/work-unit-22.md)・[実装と試験結果](docs/plan-c/work-report-22.md)を参照してください。
 今回の複合依頼の画面試験は固定の解釈結果を使用しており、実モデルの言い回し精度は別途評価が必要です。
 
+### 拡張性の再設計：操作カタログ・RAG・YOLO（2026-10-06）
+
+設計の骨子は「膨大な操作カタログから RAG で候補を数件に絞り、小さな LLM が候補の中から操作を選んで
+引数を埋めた提案を生成し、実行はコード（登録済みハンドラ）だけが行う」です。
+設計書は [docs/plan-c/extensibility-proposal.md](docs/plan-c/extensibility-proposal.md) です。
+
+- **操作の知識はカタログに集約**: `backend/app/operations/` の次のファイルが唯一の情報源です。
+  | ファイル | 内容 |
+  |---|---|
+  | `definitions.json` | 操作と引数の形（検索インデックスがこのバイト列に結び付く） |
+  | `operation_policies.json` | 変更系か、確認が必要か、否定語、参照番号の種類、引数のどこに設定値があるか、保存後の生成 |
+  | `operation_annotations.json` | 日本語の言い方・同義語・使う場面・紛らわしい操作との違い（検索とモデルへの補足） |
+  | `search_scope.json` | 操作ごとの能力（検索の範囲） |
+  | `../interpretation/prompt_rules.json` | モデルへの規則。操作ごと・モード（通常／YOLO）ごとに印を付け、提示した候補の規則だけを組み立てる |
+- **操作を追加する手順**: 上のファイルに書き足し、ハンドラを 1 つ登録し、`python -m scripts.check_catalog`
+  （`backend` で実行）で整合を確かめ、検索インデックスを作り直します。方針の無い操作は起動時に拒否され、
+  万一呼ばれても「変更系・確認必須」として扱われます。
+- **検索（RAG）**: 説明文・例・引数に加え、日本語の注釈を 1 件ずつインデックスの文書にします。
+  依頼文があるときは、ベクトルの類似度と文字 2-gram の語句一致を混ぜて順位を付けます。
+  公開の開発用問題では、正解の操作が上位 5 件に入る割合が 68.1%（英語の説明文・ベクトルのみ）から
+  100%（注釈＋混合検索）になりました（注釈の一部は開発用問題と同じ言い回しなので楽観的な値です）。
+  注釈ファイルを変えると、古いインデックスは自動的に無効になります（`scripts.operation_index build` で作り直す）。
+- **規模の上限**: カタログ 4,096 操作、インデックス 16,384 文書、1 回のモデル呼び出しに載せる候補は 32 件まで
+  （`backend/app/operations/limits.py`）。1,000 操作の合成カタログで検索の試験をしています。
+- **リリース判定（D40）**: 既定は RAG（stateful）。All Tools は安全性の比較用で、正解率は参考値です。
+- **YOLO モード**: 依頼欄の「確認なしで最後まで実行（YOLO）」をオンにすると（既定はオフ・このブラウザーに記憶）、
+  確認や質問をせず、書かれていない値は推測して、設定の保存から動画の生成まで続けて実行します。
+  明示された否定（「〜しないで」）、引数の形、実行直前の状態確認、サーバー全体の
+  `LANGUAGE_REVIEW_ALL` は外れません。結果には、自動で確認した操作と推測した箇所の報告が付きます。
+  サーバー側では `LANGUAGE_YOLO_ENABLED=false` で無効にできます。
+
 ## 必要なもの
 
 | | 用途 | 備考 |
@@ -455,6 +486,10 @@ make demo
 | `NARRATION_REPAIR_ENABLED` | `true` | コード削除で壊れたナレーションを LLM で修復 |
 | `SUBTITLE_BAND_HEIGHT` | `200` | 字幕帯の高さ（px） |
 | `FFMPEG_PATH` / `FFPROBE_PATH` | — | PATH に無い場合の絶対パス |
+| `LANGUAGE_MODEL` / `LANGUAGE_BASE_URL` | — / `http://127.0.0.1:1234/v1` | 言葉で操作するローカルモデル |
+| `LANGUAGE_RETRIEVAL_INDEX` | — | 操作検索インデックスのフォルダー（設定すると RAG 型で解釈） |
+| `LANGUAGE_YOLO_ENABLED` | `true` | 確認なしの自動実行（YOLO）を画面から使えるようにする |
+| `LANGUAGE_REVIEW_ALL` | `false` | すべての操作に確認を求める（YOLO より優先） |
 
 ---
 
