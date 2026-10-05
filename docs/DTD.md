@@ -74,17 +74,30 @@ prepared as a save only (YOLO lists the generation in `dropped_steps`).
 ### Guessing versus contradicting (YOLO)
 
 YOLO bypasses a clarifying guard only when `explicit_values.explicit_conflict` finds
-no contradiction with the request text: a stated reference ("動画3", "ジョブ7") that
-differs from the proposed argument, a stated pixel size that differs from the
-proposed absolute size or delta, or other stated numbers that do not include a
-proposed numeric setting. A contradiction keeps the guard's question.
+no contradiction with what the user wrote: the request text plus, for an answer, the
+unsaved request it completes. A conflict is a stated reference ("動画3", "ジョブ7";
+references followed by "ではなく" are ignored) that differs from the proposed
+argument; a stated pixel size that differs from a proposed absolute size, or that is
+proposed as a delta without a direction word; a delta against the stated direction
+("小さく" with a positive delta); or a stated number for a setting that the proposal
+changes or drops. Numbers are bound to settings through the policy file's
+`setting_keywords` (a keyword takes the first number after it within its clause, or
+a regex group such as "1.5倍速"). A setting with a keyword but no number may be
+guessed. A conflict keeps the guard's question.
+
+Per-operation negations may also be regexes (`negative_patterns`), used where the
+target must be named: restores block on "動画3には戻さない" / "第2版には戻さない" but
+not on "設定は戻さないで、動画3に戻して". The negated-clause pattern lets a te-form
+pass when it continues into a polite negation ("止めていただかなくていい").
 
 ### Catalog scale stages
 
 With at most 32 eligible operations the stages are initial (5), expanded (8) and
 all_tools. Above 32 the last stage is `wide` (the top 32 ranked operations). Only if
 every stage answered `unsupported` does the outcome stay unsupported (trace reason
-`unsupported_without_full_scope`); otherwise the request gets a question. The ONNX
+`unsupported_without_full_scope`); otherwise the request gets a question. An
+operation ranked below 32 cannot be offered at all, so this answer inherits the
+retrieval recall limit. The ONNX
 embedder accepts up to `MAX_INDEX_DOCUMENTS` documents per build. A synthetic
 1,010-operation catalog (4,271 documents) builds in about 25 seconds on CPU.
 

@@ -104,10 +104,17 @@ class LanguageOperationService:
                             break
                         stated_texts.append(turn.text)
 
-                def vet(proposed: OperationProposal) -> tuple[ClarificationProposal | None, str | None]:
-                    """The first clarifying guard that fires; in YOLO it is recorded and skipped."""
+                def vet(proposed: OperationProposal, *, whole_request: bool = True,
+                        ) -> tuple[ClarificationProposal | None, str | None]:
+                    """The first clarifying guard that fires; in YOLO it is recorded and skipped.
+
+                    A contradiction of a stated value or reference is never skipped. A plan
+                    step is checked for contradictions only: later steps may set the rest.
+                    """
                     empty = ClarificationProposal(kind="clarification", question="どの設定を、どの値に変更しますか？",
                                                   missing_fields=["arguments"])
+                    contradiction = ClarificationProposal(kind="clarification", missing_fields=["arguments"],
+                        question="依頼に書かれた値や番号と、提案された内容が一致しません。値をもう一度指定してください。まだ何も変更していません。")
                     checks = (
                         ("reference", lambda: reference_question(
                             dialogue.reference_text(request, turns, proposed), proposed)),
@@ -117,14 +124,15 @@ class LanguageOperationService:
                         ("reading", lambda: reading_question([turn.text for turn in turns] + [request.text], proposed)),
                         ("empty_settings", lambda: empty if load_policies().get(proposed.operation_id).requires_arguments
                          and not proposed.arguments else None),
+                        ("explicit_value", lambda: contradiction if explicit_conflict(
+                            stated_texts, proposed, require_all=whole_request) else None),
                     )
                     for code, check in checks:
                         found = check()
                         if found is None:
                             continue
-                        if yolo and not explicit_conflict(stated_texts, proposed):
+                        if yolo and code != "explicit_value":
                             # Unattended: a guessed (missing) value stands; the bypass is reported.
-                            # A value contradicting what the user wrote is never bypassed.
                             bypassed.append(code)
                             continue
                         return found, code
@@ -156,7 +164,7 @@ class LanguageOperationService:
                                 continue
                             negated_plan = True
                             break
-                        question, guard_code = vet(step)
+                        question, guard_code = vet(step, whole_request=False)
                         if question is not None:
                             break
                         plan_steps.append(step)

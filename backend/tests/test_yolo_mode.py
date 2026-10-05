@@ -161,3 +161,13 @@ def test_model_question_about_a_declined_operation_is_dismissed(harness) -> None
                                               "missing_fields": ["arguments"]}})
     response = submit(client, language_input(project_id, request_id="nl-neg-question", text="第2版には戻さないで"))
     assert response["status"] == "dismissed" and response["clarification"] is None
+
+
+def test_swapped_stated_values_are_questioned_in_normal_mode_too(harness) -> None:  # noqa: F811
+    client, adapter, _ = harness
+    project_id = create(client)
+    _reply(adapter, "project.settings.update", {"voicevox_speed_scale": 0.8, "voicevox_volume_scale": 1.2})
+    response = submit(client, language_input(project_id, request_id="nl-swapped",
+                                             text="話速を1.2倍、音量を0.8倍にして"))
+    assert response["status"] == "needs_input" and response["executed"] is False
+    assert response["diagnostics"]["guard_code"] in {"settings_value", "explicit_value"}
