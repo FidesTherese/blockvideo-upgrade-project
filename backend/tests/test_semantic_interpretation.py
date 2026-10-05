@@ -125,6 +125,19 @@ async def test_no_all_tools_returns_question_not_unsupported(setup) -> None:
     assert result.trace.all_tools_count == 0
 
 
+@pytest.mark.parametrize("replies,status", [([UNSUPPORTED] * 2, "unsupported"),
+                                             ([QUESTION, UNSUPPORTED], "needs_input")])
+async def test_catalog_too_large_for_all_tools_trusts_only_unanimous_unsupported(setup, monkeypatch,
+                                                                                replies, status) -> None:
+    runner, *_ = setup
+    # Pretend the 9-operation catalog cannot be shown at once (as with 1,000 operations).
+    monkeypatch.setattr("app.semantic_interpretation.service.MAX_PROMPT_CANDIDATES", 5)
+    result = await run(runner, Replies(list(replies)), "動画をメールして")
+    assert result.interpretation.status == status and result.trace.all_tools_count == 0
+    assert result.trace.reason == ("unsupported_without_full_scope" if status == "unsupported"
+                                   else "fallback_unavailable")
+
+
 @pytest.mark.parametrize("reason", ["connection_failed", "timeout", "http_error", "model_mismatch"])
 async def test_model_transport_failure_never_retried_as_search_expansion(setup, reason: str) -> None:
     runner, *_ = setup

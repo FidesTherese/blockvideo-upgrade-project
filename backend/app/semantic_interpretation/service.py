@@ -117,6 +117,7 @@ class SemanticInterpreter:
                     trace = trace.model_copy(update={"embedding_ms": round((perf_counter() - embed_started) * 1000)})
                 ranked_refs = tuple(CandidateRef(operation_id=r.operation_id, operation_version=r.operation_version) for r in ranking)
                 stages: list[tuple[str, tuple[CandidateRef, ...]]] = []
+                unsupported_stages = 0
                 if ranked_refs:
                     stages.append(("initial", ranked_refs[:5]))
                     if len(ranked_refs) > 5:
@@ -161,11 +162,18 @@ class SemanticInterpreter:
                         break
                     if full or outcome.status in {"proposed", "dismissed"}:
                         break
+                    unsupported_stages += outcome.status == "unsupported"
                     trace = trace.model_copy(update={"reason": "candidate_insufficient"})
                 else:
-                    # Missing candidates or an unavailable full-scope check is not unsupported.
-                    outcome = _question()
-                    trace = trace.model_copy(update={"reason": "fallback_unavailable"})
+                    if (len(all_refs) > MAX_PROMPT_CANDIDATES and stages
+                            and unsupported_stages == len(stages)):
+                        # A catalog too large to show at once has no full-scope check; every
+                        # retrieval stage agreeing on "unsupported" is the strongest answer.
+                        trace = trace.model_copy(update={"reason": "unsupported_without_full_scope"})
+                    else:
+                        # Missing candidates or an unavailable full-scope check is not unsupported.
+                        outcome = _question()
+                        trace = trace.model_copy(update={"reason": "fallback_unavailable"})
         except TimeoutError:
             trace = trace.model_copy(update={"reason": "deadline"})
             outcome = _failure("retrieval_deadline")

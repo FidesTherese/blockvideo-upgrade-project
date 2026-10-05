@@ -35,7 +35,8 @@ class SearchTrace(StrictValue):
     chat_calls: int = Field(default=0, ge=0, le=4)
     elapsed_ms: int = Field(default=0, ge=0)
     reason: Literal["ranked", "candidate_insufficient", "search_unavailable", "no_candidates",
-                    "integrity_failure", "fallback_unavailable", "deadline", "model_failure"] = "ranked"
+                    "integrity_failure", "fallback_unavailable", "deadline", "model_failure",
+                    "unsupported_without_full_scope"] = "ranked"
 
 
 class SemanticOutcome(StrictValue):
