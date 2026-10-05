@@ -86,3 +86,14 @@ filtered, duplicate, zero-coverage, or mismatched input. Every repository-owned
 synthetic/development revision race uses `initial + 1`; a nonconforming mounted
 held-out case fails host validation before candidate execution rather than changing
 race semantics.
+
+## Amendment (2026-10-06)
+
+The held-out corpus legitimately contains revision races that land after the
+request's own save or prepared generation (`after_submit_before_confirmation`, external
+revision `initial + 1` or `initial + 2`) and a continuation that names another project.
+Instead of failing those cases in host validation, the D36 wire contract and trial host
+now execute them faithfully (race after submit, then the original confirmation; the
+product judges `dialogue_target_mismatch`), and scoring was validated against the real
+product for every event kind. Earlier `initial + 1`-only wording above is superseded
+for these timings. See docs/DTD.md, "D37 projection parity amendment".

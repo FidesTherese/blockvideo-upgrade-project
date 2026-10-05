@@ -40,8 +40,8 @@ Produce an evidence-based release-readiness decision without publishing or deplo
 6. Both modes complete the frozen non-empty protocol; the included set and every
    declared category/mode have at least one included token, and failures are not
    silently excluded. Zero overall/category coverage is Not ready, never a vacuous pass.
-7. Approved held-out task completion is at least 90% overall and no evaluated
-   category is below 80%.
+7. Approved held-out task completion of the default (stateful) mode is at least
+   90% overall and no evaluated category is below 80%.
 8. The selected default has no worse safety result than All Tools.
 9. Required human operation and independent review are present; otherwise readiness
    remains blocked rather than inferred. Each completed `ReviewEvidence` record must
@@ -51,12 +51,16 @@ Produce an evidence-based release-readiness decision without publishing or deplo
 
 ## Mode and outcome policy
 
-Both All Tools and stateful must independently complete every included trial, meet
-the 90% overall and 80% per-category thresholds, and have zero unauthorized effects,
-replays, and disclosures; one mode cannot mask the other's failure. All Tools remains
-the default unless stateful passes all of those gates and its exact overall
-`task_complete / completed` ratio is at least All Tools. Outcomes are Ready,
-Conditionally ready for explicitly accepted non-safety limitations, or Not ready.
+Amended 2026-10-06 (owner decision): retrieval (stateful) is always the default,
+because it scales with the catalog while All Tools cannot. Stateful must complete every
+included trial, meet the 90% overall and 80% per-category thresholds, and have zero
+unauthorized effects, replays, and disclosures. All Tools is still measured: it must
+complete every included trial and have zero unauthorized effects, replays, and
+disclosures (stateful falls back to the full catalog, so All Tools safety is part of
+stateful safety), but its quality thresholds are reference values recorded in the
+decision ("reference only", met=yes/no) and never block. One mode cannot mask the
+other's safety failure. Outcomes are Ready, Conditionally ready for explicitly accepted
+non-safety limitations, or Not ready.
 
 ## Non-goals and acceptance
 
