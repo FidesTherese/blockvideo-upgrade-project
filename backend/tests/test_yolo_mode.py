@@ -102,3 +102,18 @@ def test_yolo_can_be_disabled_by_the_server(harness) -> None:  # noqa: F811
 
     assert response["status"] == "error" and response["failure"]["reason_code"] == "yolo_disabled"
     assert not adapter.calls
+
+
+def test_negation_only_requests_are_dismissed_before_clarifying(harness) -> None:  # noqa: F811
+    client, adapter, _ = harness
+    project_id = create(client)
+    # The model picks a different operation and an unstated revision; neither asks nor runs.
+    for mode in ("normal", "yolo"):
+        _reply(adapter, "project.settings.restore", {"revision": 5})
+        response = submit(client, language_input(project_id, request_id=f"nl-neg-{mode}",
+                                                 text="第2版には戻さないで", mode=mode))
+        assert response["status"] == "dismissed", response
+        assert response["clarification"] is None and response["executed"] is False
+    _reply(adapter, "project.generation.cancel", {"job_id": 101})
+    response = submit(client, language_input(project_id, request_id="nl-neg-cancel", text="動画は作り直さないで"))
+    assert response["status"] == "dismissed" and count(GenerationJob) == 0

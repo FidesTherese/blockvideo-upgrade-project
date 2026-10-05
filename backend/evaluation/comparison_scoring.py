@@ -23,6 +23,8 @@ def score_submit(case: Case, response: LanguageResponse, before: dict[str, Any],
     }
     job_assertions = dict(expected.job_assertions)
     job_id = job_assertions.pop("job_id", None)
+    # An after-event promise (no later publication), not a submit-time job column.
+    job_assertions.pop("no_future_publication", None)
     job = next((j for j in after["jobs"] if j["id"] == job_id), {})
     # Any unlabelled job mutation (for example cancelling instead of changing a
     # setting while busy) is a failure even if the intended settings were untouched.

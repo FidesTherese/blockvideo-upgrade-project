@@ -17,7 +17,7 @@ from app.language_operations.candidate_state import current_candidates
 from app.language_operations.contracts import (
     LanguageError, LanguageExecution, LanguageInput, LanguageResponse, YoloReport,
 )
-from app.language_operations.intent_guard import negative_control_reason
+from app.language_operations.intent_guard import negative_control_reason, only_negated_instructions
 from app.language_operations.references import reference_question
 from app.language_operations.pronunciation import merged_arguments, reading_question
 from app.language_operations.subtitle_values import subtitle_question
@@ -122,8 +122,14 @@ class LanguageOperationService:
 
                 plan_steps: list[OperationProposal] = []
                 negated_plan = False
+                negative_reason = None
                 if isinstance(outcome.proposal, OperationProposal):
-                    question, guard_code = vet(outcome.proposal)
+                    # A request made only of negations is dismissed before any clarifying
+                    # question: asking "which revision?" for "第2版には戻さないで" is wrong.
+                    if only_negated_instructions(request.text):
+                        negative_reason = negative_control_reason(request.text, outcome.proposal.operation_id)
+                    if negative_reason is None:
+                        question, guard_code = vet(outcome.proposal)
                 elif isinstance(outcome.proposal, PlanProposal):
                     for step in outcome.proposal.steps:
                         if negative_control_reason(request.text, step.operation_id) is not None:
@@ -136,8 +142,7 @@ class LanguageOperationService:
                         if question is not None:
                             break
                         plan_steps.append(step)
-                negative_reason = None
-                if question is None and isinstance(outcome.proposal, OperationProposal):
+                if question is None and negative_reason is None and isinstance(outcome.proposal, OperationProposal):
                     negative_reason = negative_control_reason(request.text, outcome.proposal.operation_id)
                 if question is None and isinstance(outcome.proposal, PlanProposal) and (negated_plan or not plan_steps):
                     negative_reason = "explicit_negative_intent"
@@ -169,7 +174,8 @@ class LanguageOperationService:
                     db.expire_all()
                     readiness = self.core.readiness(db, prepared_steps[0])
                     if readiness.readiness != Readiness.ready:
-                        response = response.model_copy(update={"status": "blocked", "failure": FailureView(
+                        response = response.model_copy(update={"status": "blocked", "requires_confirmation": False,
+                                                               "failure": FailureView(
                             reason_code=readiness.reason_code or "not_ready",
                             message="対象の状態が変わったか、この操作を現在実行できません。最新の状態を確認してください。")})
                 elif not isinstance(outcome.proposal, OperationProposal):
@@ -204,7 +210,9 @@ class LanguageOperationService:
                     db.expire_all()
                     readiness = self.core.readiness(db, prepared)
                     if readiness.readiness != Readiness.ready:
-                        response = response.model_copy(update={"status": "blocked", "failure": FailureView(
+                        # Nothing can be confirmed: the user has to ask again once the state allows it.
+                        response = response.model_copy(update={"status": "blocked", "requires_confirmation": False,
+                                                               "failure": FailureView(
                             reason_code=readiness.reason_code or "not_ready",
                             message="対象の状態が変わったか、この操作を現在実行できません。最新の状態を確認してください。")})
         except asyncio.CancelledError:
@@ -213,7 +221,7 @@ class LanguageOperationService:
             repository.finish_interpretation(db, request.request_id, owner, response)
             raise
         except OperationError as exc:
-            response = response.model_copy(update={"status": "blocked", "failure": FailureView(
+            response = response.model_copy(update={"status": "blocked", "requires_confirmation": False, "failure": FailureView(
                 reason_code=exc.reason_code, message=str(exc))})
         except Exception:
             # A transport/plugin may violate the safe exception contract. Never
