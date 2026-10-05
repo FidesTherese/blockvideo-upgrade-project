@@ -43,6 +43,8 @@ class InterpretationInput(StrictValue):
     candidates: tuple[CandidateRef, ...] = Field(min_length=1, max_length=MAX_CATALOG_OPERATIONS)
     state: MinimalState = Field(default_factory=MinimalState)
     dialogue: tuple[DialogueContextTurn, ...] = Field(default=(), max_length=8)
+    # Unattended mode: the model must not ask; it proposes its best guess instead.
+    guess_missing: bool = False
     candidate_state: CandidateReadinessSnapshot | None = None
 
     @model_validator(mode="after")

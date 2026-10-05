@@ -85,7 +85,8 @@ def language_service() -> LanguageOperationService:
         allow_all_tools=settings.language_retrieval_all_tools) if settings.language_retrieval_index else None
     return LanguageOperationService(operation_service, _LocalAdapter() if settings.language_model else None,
                                     review_all=settings.language_review_all, semantic=semantic,
-                                    readiness_annotations=settings.language_retrieval_readiness)
+                                    readiness_annotations=settings.language_retrieval_readiness,
+                                    yolo_enabled=settings.language_yolo_enabled)
 
 
 def _http_error(exc: LanguageError) -> None:

@@ -20,20 +20,24 @@ _RULES_PATH = Path(__file__).with_name("prompt_rules.json")
 
 
 @lru_cache(maxsize=2)
-def _rules(path: Path = _RULES_PATH) -> tuple[tuple[frozenset[str], str], ...]:
-    """Ordered prompt rules; a rule tagged with operations applies only when one is offered."""
+def _rules(path: Path = _RULES_PATH) -> tuple[tuple[frozenset[str], frozenset[str], str], ...]:
+    """Ordered prompt rules; a rule tagged with operations applies only when one is
+    offered, and a rule tagged with modes only in those modes (untagged: every mode)."""
     raw = json.loads(path.read_text(encoding="utf-8"))
     if raw.get("schema_version") != 1 or not isinstance(raw.get("rules"), list):
         raise ValueError("invalid prompt rules")
-    return tuple((frozenset(item["operations"]), item["text"]) for item in raw["rules"])
+    return tuple((frozenset(item["operations"]), frozenset(item.get("modes", ("normal", "yolo"))), item["text"])
+                 for item in raw["rules"])
 
 
-def system_prompt(offered: set[str]) -> str:
+def system_prompt(offered: set[str], mode: str = "normal") -> str:
     """General rules plus the rules of offered operations, in their fixed order.
 
-    With every catalog operation offered this is exactly the All Tools prompt.
+    With every catalog operation offered in normal mode this is exactly the All
+    Tools prompt; YOLO mode appends its precedence rules at the end.
     """
-    return "".join(text + "\n" for operations, text in _rules() if not operations or operations & offered)
+    return "".join(text + "\n" for operations, modes, text in _rules()
+                   if mode in modes and (not operations or operations & offered))
 
 
 _READINESS_SYSTEM = """
@@ -93,7 +97,8 @@ class Interpreter:
                 prompt.encode("utf-8")
             except UnicodeError:
                 raise InterpretationError("invalid_input") from None
-            base = system_prompt({item.operation_id for item in definitions})
+            base = system_prompt({item.operation_id for item in definitions},
+                                 "yolo" if request.guess_missing else "normal")
             system = base + _READINESS_SYSTEM if request.candidate_state is not None else base
             messages = (ModelMessage("system", system), ModelMessage("user", prompt))
             async with asyncio.timeout(self._timeout_seconds):

@@ -12,7 +12,9 @@ from app.interpretation.service import Interpreter
 from app.interpretation.transport import StructuredAdapter
 from app.language_operations import dialogue, observability, repository
 from app.language_operations.candidate_state import current_candidates
-from app.language_operations.contracts import LanguageError, LanguageExecution, LanguageInput, LanguageResponse
+from app.language_operations.contracts import (
+    LanguageError, LanguageExecution, LanguageInput, LanguageResponse, YoloReport,
+)
 from app.language_operations.intent_guard import negative_control_reason
 from app.language_operations.references import reference_question
 from app.language_operations.pronunciation import merged_arguments, reading_question
@@ -32,13 +34,14 @@ class LanguageOperationService:
     def __init__(
         self, core: OperationService, adapter: StructuredAdapter | None = None,
         *, review_all: bool = False, semantic: CandidateInterpreter | None = None,
-        readiness_annotations: bool = False,
+        readiness_annotations: bool = False, yolo_enabled: bool = True,
     ) -> None:
         self.core = core
         self.adapter = adapter
         self.review_all = review_all
         self.semantic = semantic
         self.readiness_annotations = readiness_annotations
+        self.yolo_enabled = yolo_enabled
 
     async def prepare(self, db: Session, request: LanguageInput) -> LanguageResponse:
         """Freeze a model proposal; this method never calls execute."""
@@ -48,8 +51,15 @@ class LanguageOperationService:
             return response
         started = perf_counter()
         guard_code = None
+        yolo = request.mode == "yolo"
+        bypassed: list[str] = []
+        unresolved: str | None = None
         try:
-            if request.continuation and request.continuation.relation == "dismiss":
+            if yolo and not self.yolo_enabled:
+                response = response.model_copy(update={"status": "error", "failure": FailureView(
+                    reason_code="yolo_disabled",
+                    message="確認なしの自動実行（YOLO）はこのサーバーで無効です。設定は変更していません。")})
+            elif request.continuation and request.continuation.relation == "dismiss":
                 response = response.model_copy(update={"status": "dismissed"})
             elif self.adapter is None:
                 response = response.model_copy(update={"status": "error", "failure": FailureView(
@@ -66,6 +76,7 @@ class LanguageOperationService:
                     text=request.text, state=state, dialogue=turns,
                     candidates=tuple(CandidateRef(operation_id=item.operation_id,
                                                   operation_version=item.operation_version) for item in definitions),
+                    guess_missing=yolo,
                 )
                 if self.semantic is None:
                     outcome = await Interpreter(catalog, self.adapter).preview(interpretation_input)
@@ -78,26 +89,32 @@ class LanguageOperationService:
                         response.diagnostics.model_copy(update={"retrieval": semantic.trace,
                             "candidates": list(semantic.candidates)})})
                 response = response.model_copy(update={"interpretation": outcome})
-                question = reference_question(dialogue.reference_text(request, turns, outcome.proposal), outcome.proposal) if isinstance(outcome.proposal, OperationProposal) else None
-                guard_code = "reference" if question else None
-                if question is None and isinstance(outcome.proposal, OperationProposal):
-                    question = subtitle_question(request.text, turns,
-                        request.continuation.relation if request.continuation else None, outcome.proposal)
-                    guard_code = "subtitle_value" if question else None
-                if question is None and isinstance(outcome.proposal, OperationProposal):
-                    question = settings_value_question(request.text, turns,
-                        request.continuation.relation if request.continuation else None, outcome.proposal)
-                    guard_code = "settings_value" if question else None
-                if question is None and isinstance(outcome.proposal, OperationProposal):
-                    question = pending_settings_question(turns,
-                        request.continuation.relation if request.continuation else None, outcome.proposal)
-                    guard_code = "pending_settings" if question else None
-                if question is None and isinstance(outcome.proposal, OperationProposal):
-                    question = reading_question([turn.text for turn in turns] + [request.text], outcome.proposal)
-                    guard_code = "reading" if question else None
-                    if load_policies().get(outcome.proposal.operation_id).requires_arguments and not outcome.proposal.arguments:
-                        question = ClarificationProposal(kind="clarification", question="どの設定を、どの値に変更しますか？", missing_fields=["arguments"])
-                        guard_code = "empty_settings"
+                question = None
+                if isinstance(outcome.proposal, OperationProposal):
+                    proposed = outcome.proposal
+                    relation = request.continuation.relation if request.continuation else None
+                    empty = ClarificationProposal(kind="clarification", question="どの設定を、どの値に変更しますか？",
+                                                  missing_fields=["arguments"])
+                    checks = (
+                        ("reference", lambda: reference_question(
+                            dialogue.reference_text(request, turns, proposed), proposed)),
+                        ("subtitle_value", lambda: subtitle_question(request.text, turns, relation, proposed)),
+                        ("settings_value", lambda: settings_value_question(request.text, turns, relation, proposed)),
+                        ("pending_settings", lambda: pending_settings_question(turns, relation, proposed)),
+                        ("reading", lambda: reading_question([turn.text for turn in turns] + [request.text], proposed)),
+                        ("empty_settings", lambda: empty if load_policies().get(proposed.operation_id).requires_arguments
+                         and not proposed.arguments else None),
+                    )
+                    for code, check in checks:
+                        found = check()
+                        if found is None:
+                            continue
+                        if yolo:
+                            # Unattended: the guessed value stands; the bypass is reported.
+                            bypassed.append(code)
+                            continue
+                        question, guard_code = found, code
+                        break
                 negative_reason = None
                 if question is None and isinstance(outcome.proposal, OperationProposal):
                     negative_reason = negative_control_reason(request.text, outcome.proposal.operation_id)
@@ -110,6 +127,8 @@ class LanguageOperationService:
                     response = response.model_copy(update={"status": "dismissed"})
                 elif not isinstance(outcome.proposal, OperationProposal):
                     clarification = outcome.proposal if isinstance(outcome.proposal, ClarificationProposal) else None
+                    if yolo and outcome.status in {"needs_input", "unsupported"}:
+                        unresolved = "自動実行モードでも、実行できる操作を推測できませんでした。"
                     if clarification and clarification.question.strip().rstrip("。.!?？") == request.text.strip().rstrip("。.!?？"):
                         clarification = clarification.model_copy(update={"question": "操作する対象を選択してください。" if clarification.missing_fields == ["target"]
                             else "変更する値や読み方など、不足している内容を指定してください。"})
@@ -129,8 +148,9 @@ class LanguageOperationService:
                         "status": "ready", "prepared_request": prepared,
                         "generate_after_save": proposal.generate_after_save,
                         "confirmation_token": confirmation,
-                        "requires_confirmation": self.review_all or request.review_all
-                            or load_policies().get(proposal.operation_id).requires_confirmation,
+                        # The server-wide review setting still wins over an unattended request.
+                        "requires_confirmation": self.review_all or (not yolo and (
+                            request.review_all or load_policies().get(proposal.operation_id).requires_confirmation)),
                     })
                     # Expire read snapshots before asking the core about the latest state.
                     db.rollback()
@@ -156,18 +176,37 @@ class LanguageOperationService:
         response = response.model_copy(update={"diagnostics": response.diagnostics.model_copy(update={
             "interpretation_ms": round((perf_counter() - started) * 1000), "guard_code": guard_code,
         })})
+        if yolo:
+            response = response.model_copy(update={"execution_mode": "yolo", "yolo_report": YoloReport(
+                guessing_allowed=self.yolo_enabled, bypassed_guards=bypassed, unresolved=unresolved)})
         response = repository.finish_interpretation(db, request.request_id, owner, response)
         observability.record(response, "prepared")
         return response
 
     async def submit(self, db: Session, request: LanguageInput) -> LanguageResponse:
-        """Execute an unambiguous non-confirming proposal using the common core."""
+        """Execute an unambiguous non-confirming proposal using the common core.
+
+        An unattended (YOLO) request confirms on the user's behalf, including the
+        follow-up generation after a settings save, and reports what it confirmed.
+        """
         response = await self.prepare(db, request)
         if response.status != "ready" or response.requires_confirmation or response.result is not None:
             return response
-        return await asyncio.to_thread(self.execute, db, request.request_id, LanguageExecution(
-            confirmation_token=response.confirmation_token,
+        yolo = response.execution_mode == "yolo"
+        confirmed = [response.prepared_request.operation_id] if response.prepared_request else []
+        response = await asyncio.to_thread(self.execute, db, request.request_id, LanguageExecution(
+            confirmation_token=response.confirmation_token, confirm_generation=yolo,
         ))
+        if not yolo:
+            return response
+        if (response.status == "ready" and response.generation_request is not None
+                and response.generation_result is None and response.confirmation_token is not None):
+            confirmed.append(response.generation_request.operation_id)
+            response = await asyncio.to_thread(self.execute, db, request.request_id, LanguageExecution(
+                confirmation_token=response.confirmation_token, confirm_generation=True,
+            ))
+        report = (response.yolo_report or YoloReport()).model_copy(update={"auto_confirmed": confirmed})
+        return repository.acknowledge(db, request.request_id, response.model_copy(update={"yolo_report": report}))
 
     def get(self, db: Session, request_id: str) -> LanguageResponse:
         return repository.lookup(db, request_id)

@@ -23,6 +23,9 @@ class LanguageInput(StrictValue):
     base_revision: int | None = Field(default=None, ge=1)
     review_all: bool = False
     continuation: Continuation | None = None
+    # "yolo": no human confirmation or clarification; missing values are guessed and
+    # reported. Explicit negations, schemas and pre-execution checks still apply.
+    mode: Literal["normal", "yolo"] = "normal"
 
 
 class LanguageExecution(StrictValue):
@@ -40,6 +43,18 @@ class LanguageDiagnostics(StrictValue):
     execution_ms: int | None = Field(default=None, ge=0)
     generation_execution_ms: int | None = Field(default=None, ge=0)
     guard_code: Literal["reference", "subtitle_value", "settings_value", "pending_settings", "reading", "empty_settings", "negative_intent"] | None = None
+
+
+GuardCode = Literal["reference", "subtitle_value", "settings_value", "pending_settings", "reading", "empty_settings"]
+
+
+class YoloReport(StrictValue):
+    """What an unattended (YOLO) request did on the user's behalf."""
+
+    guessing_allowed: bool = True
+    bypassed_guards: list[GuardCode] = Field(default_factory=list, max_length=8)
+    auto_confirmed: list[str] = Field(default_factory=list, max_length=8)
+    unresolved: str | None = Field(default=None, max_length=240)
 
 
 class LanguageResponse(StrictValue):
@@ -65,6 +80,8 @@ class LanguageResponse(StrictValue):
     superseded_by: str | None = None
     dialogue_available: bool = False
     diagnostics: LanguageDiagnostics = Field(default_factory=LanguageDiagnostics)
+    execution_mode: Literal["normal", "yolo"] = "normal"
+    yolo_report: YoloReport | None = None
 
 
 class LanguageError(ValueError):

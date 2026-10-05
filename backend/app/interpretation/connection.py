@@ -19,6 +19,8 @@ class ConnectionView(BaseModel):
     base_url: str | None = None
     cloud_fallback: Literal[False] = False
     operation_mode: Literal["all_tools", "semantic", "stateful"] = "all_tools"
+    # Whether the server accepts unattended (YOLO) requests from the UI toggle.
+    yolo_enabled: bool = False
 
 
 async def inspect_connection(

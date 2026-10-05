@@ -582,6 +582,94 @@
   {
    "operations": [],
    "text": "「動画をメールで送らないで」→ {\"result\":{\"kind\":\"no_operation\",\"reason\":\"メール送信を行いません。\"}}"
+  },
+  {
+   "operations": [],
+   "modes": [
+    "yolo"
+   ],
+   "text": "【自動実行モード】利用者は確認も回答もできません。ここから下の規則は、上の規則より優先します。"
+  },
+  {
+   "operations": [],
+   "modes": [
+    "yolo"
+   ],
+   "text": "値が不足・曖昧でも clarification を返さず、依頼の意図に最も合う妥当な値を推測して operation を返してください。"
+  },
+  {
+   "operations": [],
+   "modes": [
+    "yolo"
+   ],
+   "text": "推測するのは書かれていない値だけです。明示された値・明示された否定（〜しないで）は必ず守り、否定された操作は推測でも提案しません。"
+  },
+  {
+   "operations": [],
+   "modes": [
+    "yolo"
+   ],
+   "text": "対応していない操作が混ざっていても全体を unsupported にせず、実行できる部分だけを operation として提案してください。"
+  },
+  {
+   "operations": [
+    "project.settings.update",
+    "project.subtitle-font-size.adjust",
+    "project.subtitle-font-size.set"
+   ],
+   "modes": [
+    "yolo"
+   ],
+   "text": "字幕サイズの量が書かれていない「大きく」「小さく」「読みやすく」は、adjust の delta: 4 / -4 / 4 と推測します。"
+  },
+  {
+   "operations": [
+    "project.settings.update"
+   ],
+   "modes": [
+    "yolo"
+   ],
+   "text": "読み方が不足する用語は、一般的な読み方をカタカナで推測し、アクセントは null にします。"
+  },
+  {
+   "operations": [
+    "project.settings.update"
+   ],
+   "modes": [
+    "yolo"
+   ],
+   "text": "話速などの数値が「少し速く」のように量なしで頼まれたら、現在値から1割程度の変化を推測します（話速なら1.1倍）。"
+  },
+  {
+   "operations": [
+    "project.settings.restore"
+   ],
+   "modes": [
+    "yolo"
+   ],
+   "text": "戻す版が書かれていない「前の設定に戻して」は、state.revision の1つ前の版を推測します。"
+  },
+  {
+   "operations": [
+    "project.generation.cancel",
+    "project.generation.retry"
+   ],
+   "modes": [
+    "yolo"
+   ],
+   "text": "ジョブ番号が書かれていない場合も推測してください。対象を推測できなければ unsupported とします。"
+  },
+  {
+   "operations": [
+    "project.settings.update",
+    "project.subtitle-font-size.adjust",
+    "project.subtitle-font-size.set",
+    "project.generation.start"
+   ],
+   "modes": [
+    "yolo"
+   ],
+   "text": "設定変更と動画の作成を両方頼まれたら、settings 系の操作に generate_after_save: true を付けます。"
   }
  ]
 }
