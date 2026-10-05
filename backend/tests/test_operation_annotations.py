@@ -95,3 +95,14 @@ def test_hybrid_ranking_finds_the_annotated_operation_when_vectors_cannot(tmp_pa
         assert -1 <= ranking[0].score <= 1
     plain = rank_operations(index, (1.0, 0.0), scope, sources)
     assert {item.score for item in plain} == {1.0}
+
+
+def test_verified_index_is_reused_until_the_bundle_file_changes(tmp_path: Path) -> None:
+    sources = load_sources()
+    manifest = publish_index(tmp_path, sources, PROFILE, tuple((1.0, 0.0) for _ in sources.documents))
+    first = load_index(tmp_path, sources, PROFILE)
+    assert load_index(tmp_path, sources, PROFILE) is first
+    bundle = tmp_path / f"bundle-{manifest.bundle_sha256}.json"
+    bundle.write_bytes(bundle.read_bytes().replace(b"1.0", b"0.5", 1))
+    with pytest.raises(RetrievalError):
+        load_index(tmp_path, sources, PROFILE)
