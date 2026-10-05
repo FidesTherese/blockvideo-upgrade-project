@@ -96,6 +96,14 @@ class LanguageOperationService:
                 question = None
                 relation = request.continuation.relation if request.continuation else None
 
+                # Values the user stated: this request and, for an answer, the unsaved request it completes.
+                stated_texts = [request.text]
+                if relation == "answer":
+                    for turn in reversed(turns):
+                        if turn.settings_saved or turn.status == "completed":
+                            break
+                        stated_texts.append(turn.text)
+
                 def vet(proposed: OperationProposal) -> tuple[ClarificationProposal | None, str | None]:
                     """The first clarifying guard that fires; in YOLO it is recorded and skipped."""
                     empty = ClarificationProposal(kind="clarification", question="どの設定を、どの値に変更しますか？",
@@ -114,7 +122,7 @@ class LanguageOperationService:
                         found = check()
                         if found is None:
                             continue
-                        if yolo and not explicit_conflict([request.text], proposed):
+                        if yolo and not explicit_conflict(stated_texts, proposed):
                             # Unattended: a guessed (missing) value stands; the bypass is reported.
                             # A value contradicting what the user wrote is never bypassed.
                             bypassed.append(code)

@@ -64,7 +64,29 @@ proposal when the request consists only of negated instructions: removing every
 `negation_residue_pattern` (punctuation, polite endings; both regexes live in
 `operation_policies.json`). "ジョブ7は止めないで" blocks a proposed cancel or
 retry; "字幕は変えないで動画だけ作り直して" still allows generation. The rule applies in
-normal mode, YOLO mode and to every plan step.
+normal mode, YOLO mode and to every plan step. A negation-only request is dismissed
+before any clarifying guard runs, and a model clarification for it is dismissed too.
+The negated-clause pattern cannot extend across a te-form request ("…して"), so
+"字幕を60pxにして動画は生成しないで" keeps its positive part. A save proposal with
+`generate_after_save` whose request negates the follow-up generation operation is
+prepared as a save only (YOLO lists the generation in `dropped_steps`).
+
+### Guessing versus contradicting (YOLO)
+
+YOLO bypasses a clarifying guard only when `explicit_values.explicit_conflict` finds
+no contradiction with the request text: a stated reference ("動画3", "ジョブ7") that
+differs from the proposed argument, a stated pixel size that differs from the
+proposed absolute size or delta, or other stated numbers that do not include a
+proposed numeric setting. A contradiction keeps the guard's question.
+
+### Catalog scale stages
+
+With at most 32 eligible operations the stages are initial (5), expanded (8) and
+all_tools. Above 32 the last stage is `wide` (the top 32 ranked operations). Only if
+every stage answered `unsupported` does the outcome stay unsupported (trace reason
+`unsupported_without_full_scope`); otherwise the request gets a question. The ONNX
+embedder accepts up to `MAX_INDEX_DOCUMENTS` documents per build. A synthetic
+1,010-operation catalog (4,271 documents) builds in about 25 seconds on CPU.
 
 ### Unattended (YOLO) mode
 

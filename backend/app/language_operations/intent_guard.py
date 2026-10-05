@@ -35,6 +35,8 @@ def negative_control_reason(text: str, operation_id: str) -> str | None:
         return "explicit_negative_intent"
     if any(phrase in normalized for phrase in policy.negative_phrases):
         return "explicit_negative_intent"
+    if any(re.search(pattern, normalized) for pattern in policy.negative_patterns):
+        return "explicit_negative_intent"
     if only_negated_instructions(text):
         return "explicit_negative_intent"
     return None

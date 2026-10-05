@@ -61,6 +61,8 @@ class OperationPolicy(_Strict):
     allows_generate_after_save: bool = False
     requires_arguments: bool = False
     negative_phrases: tuple[str, ...] = ()
+    # Regexes for negations that name a target ("動画3には戻さない"), matched on normalized text.
+    negative_patterns: tuple[str, ...] = ()
     reference: ReferenceBinding | None = None
     settings_views: dict[int, SettingsView] = Field(default_factory=dict)
 
@@ -79,6 +81,8 @@ class OperationPolicies(_Strict):
     # pattern (punctuation, polite endings). Both are matched on normalized text.
     negated_clause_pattern: str | None = None
     negation_residue_pattern: str | None = None
+    # Where a stated number for a setting is found: after a keyword, or in the regex's group.
+    setting_keywords: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     follow_up_generation: FollowUpGeneration
     references: dict[str, ReferenceKind]
     operations: dict[str, OperationPolicy]
@@ -90,7 +94,9 @@ class OperationPolicies(_Strict):
         for policy in self.operations.values():
             if policy.reference is not None and policy.reference.kind not in self.references:
                 raise ValueError("operation policy references an unknown reference kind")
-        for pattern in (self.negated_clause_pattern, self.negation_residue_pattern):
+        for pattern in (self.negated_clause_pattern, self.negation_residue_pattern,
+                        *(item for policy in self.operations.values() for item in policy.negative_patterns),
+                        *(item for items in self.setting_keywords.values() for item in items)):
             if pattern is not None:
                 re.compile(pattern)
         if self.follow_up_generation.operation_id not in self.operations:
