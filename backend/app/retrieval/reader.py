@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from app.operations.limits import MAX_INDEX_BUNDLE_BYTES
 from app.retrieval.contracts import EmbeddingProfile, IndexBundle, IndexDocument, IndexManifest, SearchScope
 from app.retrieval.serialization import RetrievalError, canonical, decode, digest, read_bytes
 from app.retrieval.sources import IndexSources
@@ -52,7 +53,7 @@ def load_index(directory: Path, sources: IndexSources, profile: EmbeddingProfile
         check_sources(manifest, sources)
         if manifest.profile != profile:
             raise RetrievalError("embedding_profile_mismatch")
-        payload = read_bytes(directory / f"bundle-{manifest.bundle_sha256}.json", 64_000_000)
+        payload = read_bytes(directory / f"bundle-{manifest.bundle_sha256}.json", MAX_INDEX_BUNDLE_BYTES)
         if digest(payload) != manifest.bundle_sha256:
             raise RetrievalError("bundle_hash_mismatch")
         bundle = IndexBundle.model_validate(decode(payload))

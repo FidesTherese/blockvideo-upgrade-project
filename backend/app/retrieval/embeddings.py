@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from app.operations.limits import MAX_INDEX_DOCUMENTS
 from app.retrieval.contracts import EmbeddingProfile
 from app.retrieval.serialization import RetrievalError, decode
 from app.retrieval.vectors import normalize_vector
@@ -39,7 +40,7 @@ class LocalEmbeddingAdapter:
 
     async def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         """Sequential batches; a failure never returns or publishes partial vectors."""
-        if not texts or len(texts) > 4096 or any(
+        if not texts or len(texts) > MAX_INDEX_DOCUMENTS or any(
             not isinstance(t, str) or not t.strip() or len(t.encode("utf-8")) > 1200 for t in texts
         ):
             raise RetrievalError("invalid_embedding_input")

@@ -9,7 +9,7 @@ from app.interpretation.contracts import CandidateRef, InterpretationOutcome, St
 from app.retrieval.contracts import Digest
 from app.retrieval.ranking import RankedCandidate
 from app.operations.contracts import CandidateReadinessSnapshot
-from app.operations.limits import MAX_PROMPT_CANDIDATES
+from app.operations.limits import MAX_CATALOG_OPERATIONS, MAX_PROMPT_CANDIDATES
 
 
 class SearchStage(StrictValue):
@@ -26,7 +26,7 @@ class SearchStage(StrictValue):
 class SearchTrace(StrictValue):
     policy: Literal["semantic-3-6-all-v1", "semantic-5-8-all-v1", "all-tools-v1"] = "semantic-5-8-all-v1"
     index_sha256: Digest | None = None
-    ranking: tuple[RankedCandidate, ...] = Field(default=(), max_length=256, strict=False)
+    ranking: tuple[RankedCandidate, ...] = Field(default=(), max_length=MAX_CATALOG_OPERATIONS, strict=False)
     stages: tuple[SearchStage, ...] = Field(default=(), max_length=3, strict=False)
     expansion_count: int = Field(default=0, ge=0, le=1)
     all_tools_count: int = Field(default=0, ge=0, le=1)

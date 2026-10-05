@@ -5,6 +5,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.operations.limits import MAX_CATALOG_OPERATIONS, MAX_INDEX_DOCUMENTS
+
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Identifier = Annotated[str, Field(pattern=r"^[a-z][a-z0-9.-]{0,127}$")]
 Version = Annotated[int, Field(ge=1, strict=True)]
@@ -31,7 +33,7 @@ class ScopeBinding(OperationRef):
 class CatalogScope(FrozenModel):
     format_version: Literal[1]
     app_id: Identifier
-    bindings: tuple[ScopeBinding, ...] = Field(min_length=1, max_length=256)
+    bindings: tuple[ScopeBinding, ...] = Field(min_length=1, max_length=MAX_CATALOG_OPERATIONS)
 
 
 class SearchScope(FrozenModel):
@@ -65,8 +67,8 @@ class IndexDocument(OperationRef):
 
 
 class IndexBundle(FrozenModel):
-    documents: tuple[IndexDocument, ...] = Field(min_length=1, max_length=4096)
-    vectors: tuple[tuple[Scalar, ...], ...] = Field(min_length=1, max_length=4096)
+    documents: tuple[IndexDocument, ...] = Field(min_length=1, max_length=MAX_INDEX_DOCUMENTS)
+    vectors: tuple[tuple[Scalar, ...], ...] = Field(min_length=1, max_length=MAX_INDEX_DOCUMENTS)
 
 
 class IndexManifest(FrozenModel):
@@ -81,8 +83,8 @@ class IndexManifest(FrozenModel):
     # Bound when the catalog carries operation annotations (index documents of kind "annotation").
     annotations_sha256: Digest | None = None
     profile: EmbeddingProfile
-    operation_count: int = Field(ge=1, le=256, strict=True)
-    document_count: int = Field(ge=1, le=4096, strict=True)
+    operation_count: int = Field(ge=1, le=MAX_CATALOG_OPERATIONS, strict=True)
+    document_count: int = Field(ge=1, le=MAX_INDEX_DOCUMENTS, strict=True)
     documents_sha256: Digest
     vectors_sha256: Digest
     bundle_sha256: Digest

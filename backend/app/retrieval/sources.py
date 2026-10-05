@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from app.operations.annotations import OperationAnnotations, parse_annotations
 from app.operations.catalog import CatalogError, OperationCatalog, load_catalog
+from app.operations.limits import MAX_INDEX_DOCUMENTS
 from app.retrieval.contracts import CatalogScope, IndexDocument
 from app.retrieval.serialization import RetrievalError, canonical, decode, digest, read_bytes
 
@@ -88,7 +89,7 @@ def extract_documents(catalog: OperationCatalog, scope: CatalogScope,
                         definition_sha256=definition_hash,
                     ))
                     ordinal += 1
-    if not documents or len(documents) > 4096:
+    if not documents or len(documents) > MAX_INDEX_DOCUMENTS:
         raise RetrievalError("document_limit")
     return tuple(documents)
 
