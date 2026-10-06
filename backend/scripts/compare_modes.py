@@ -25,7 +25,7 @@ from evaluation.comparison import MODES, POLICY
 from evaluation.comparison_runner import run_trial
 from evaluation.contracts import Case
 from evaluation.corpus import corpus_digest
-from evaluation.development_probe import approved_development
+from evaluation.development_probe import approved_development, unreviewed_development
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -81,7 +81,13 @@ def trial_stop_reason(record: dict[str, Any]) -> str | None:
 async def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.output.exists():
         raise ValueError("use a new output directory; existing experiments are immutable")
-    cases, gate = approved_development(args.cases, args.human, args.ai)
+    unreviewed = getattr(args, "unreviewed", False)
+    if unreviewed:
+        cases, gate = unreviewed_development(args.cases)
+    elif args.human is None or args.ai is None:
+        raise ValueError("approved runs need --human and --ai; use --unreviewed for an unofficial run")
+    else:
+        cases, gate = approved_development(args.cases, args.human, args.ai)
     if args.case_id:
         if not set(args.case_id) <= {c.case_id for c in cases}:
             raise ValueError("selected cases must have both current approvals")
@@ -109,9 +115,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                     instance_details = {key: model.get(key) for key in ("key", "quantization", "format", "size_bytes", "loaded_instances")}
     args.output.mkdir(parents=True)
     manifest = {"schema_version": 1, "created_at": datetime.now(timezone.utc).isoformat(),
-        "scope": "approved_development_only", "held_out_used": False, "approval_gate": gate,
+        "scope": "unreviewed_development_unofficial" if unreviewed else "approved_development_only",
+        "held_out_used": False, "approval_gate": gate,
         "selected_case_ids": [c.case_id for c in cases], "selected_subset_sha256": corpus_digest(cases),
-        "approval_files_sha256": {name: digest(getattr(args, name).read_bytes()) for name in ("cases", "human", "ai")},
+        "approval_files_sha256": {name: digest(getattr(args, name).read_bytes()) for name in ("cases", "human", "ai")
+                                  if getattr(args, name) is not None},
         "modes": {m: asdict(MODES[m]) for m in args.modes}, "common_policy": POLICY,
         "model": {"id": args.model, "base_url": base, "temperature": 0, "max_tokens": 768, "reasoning_effort": "none",
                   "server_reported_instance": instance_details,
@@ -187,8 +195,12 @@ async def execute_trials(args: argparse.Namespace, cases: list[Case], manifest: 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("cases", "human", "ai", "output", "index", "profile"):
+    for name in ("cases", "output", "index", "profile"):
         parser.add_argument(f"--{name}", type=Path, required=True)
+    for name in ("human", "ai"):
+        parser.add_argument(f"--{name}", type=Path)
+    parser.add_argument("--unreviewed", action="store_true",
+                        help="Unofficial: every development case, approval gate skipped (never an approved score)")
     parser.add_argument("--assets", type=Path, default=Path("storage/embedding-models/multilingual-e5-small"))
     parser.add_argument("--model", required=True)
     parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")

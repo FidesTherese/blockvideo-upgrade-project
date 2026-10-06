@@ -254,6 +254,11 @@ python -m uv run python -m scripts.probe_language_dialogue --model blockvideo-d1
   確かめます。紛らわしい合成操作 1,000 件を混ぜたカタログでも、実モデルで正しい操作を選べることを
   開発用問題で確認しています（設計書 9-2）。
 - **リリース判定（D40）**: 既定は RAG（stateful）。All Tools は安全性の比較用で、正解率は参考値です。
+- **縮小版評価の再現（非公式）**: `backend` で次を実行します（公開の開発用問題だけを使い、held-out は読みません）。
+  - 実製品の流れで開発用 100 問を通す: `python -m scripts.operation_index build --profile app/retrieval/e5-profile.json --weights storage/embedding-models/multilingual-e5-small/model.onnx --index <索引の出力先>` の後、
+    `python -m scripts.compare_modes --unreviewed --cases ../evaluation/d24/development.jsonl --output <新しい出力先> --index <索引> --profile app/retrieval/e5-profile.json --model <LM Studio のモデル名> --modes P1`
+    （`--unreviewed` は承認台帳の関門を外した非公式実行で、承認済みの点数にはなりません）
+  - 1,000 操作規模: `python -m scripts.probe_catalog_scale --model <モデル名> --output <新しい JSON>`
 - **YOLO モード**: 依頼欄の「確認なしで最後まで実行（YOLO）」をオンにすると（既定はオフ・このブラウザーに記憶）、
   確認や質問をせず、書かれていない値は推測して、設定の保存から動画の生成まで続けて実行します。
   明示された否定（「〜しないで」）、書かれた値・番号との一致、引数の形、実行直前の状態確認、サーバー全体の
