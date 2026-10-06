@@ -120,3 +120,18 @@ def test_polite_negations_are_negation_only(text: str, expected: bool) -> None:
 ])
 def test_restore_negations_name_their_target(text: str, operation_id: str, blocked: bool) -> None:
     assert (negative_control_reason(text, operation_id) is not None) is blocked
+
+
+def test_sixth_review_cases() -> None:
+    restore_video = ["動画3に戻して、話速を1.2倍にしてから作り直して"]
+    assert plan_drops_stated(restore_video, [_proposal("project.artifact.restore", {"artifact_id": 3}),
+                                             _proposal("project.generation.start", {"kind": "full"})])
+    assert explicit_conflict(["確認用に話速を1.2倍にして"], _proposal(UPDATE, {"voicevox_speed_scale": 1.5}))
+    forbidden = ["字幕は64pxにしないで、少し大きくして"]
+    assert explicit_conflict(forbidden, _proposal(ADJUST, {"delta": 2}), current_subtitle=62)
+    assert not explicit_conflict(forbidden, _proposal(ADJUST, {"delta": 4}), current_subtitle=62)
+    assert not explicit_conflict(["話速を少し上げて、もう1回生成して"], _proposal(UPDATE, {"voicevox_speed_scale": 1.1}))
+    corrected = ["話速は1.2倍、いや、話速は1.5倍にして。状態も教えて"]
+    assert not plan_drops_stated(corrected, [_proposal(UPDATE, {"voicevox_speed_scale": 1.5}),
+                                             _proposal("project.status.get", {})])
+    assert explicit_conflict(corrected, _proposal(UPDATE, {"voicevox_speed_scale": 1.2}))

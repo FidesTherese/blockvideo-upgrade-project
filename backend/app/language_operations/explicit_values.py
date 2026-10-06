@@ -23,7 +23,11 @@ _DOWN = r"小さ|下げ|減ら|縮小"
 _SUBTITLE = r"字幕|フォント|文字の大きさ|文字サイズ"
 _NEGATION = r"ないで|なくて|しない|ません"
 # A clause that only checks a result ("64pxになったか確認して") states no new value.
-_CHECK_ONLY = r"確認|なったか|なっているか|なったこと"
+_CHECK_ONLY = r"なったか|なっているか|なったこと|か確認|か教えて"
+# "いや" / "やっぱり" corrects the value stated just before.
+_CORRECTION = r"^(?:いや|やっぱり|訂正して|訂正)\s*$|^(?:いや|やっぱり)"
+# A number carried over from the next clause must not count something else ("もう1回").
+_COUNTED = r"\s*(?:回|件|個|つ|人|分|番|版|日|時|本|枚目)"
 # "動画3ではなく動画4に" names 3 only to exclude it.
 _EXCLUDED = r"\d+\s*(?:番)?\s*(?:では|じゃ)なく(?:て)?"
 
@@ -54,8 +58,13 @@ def _read(texts: list[str], policies: OperationPolicies) -> _Stated:
     references = [pattern for kind in policies.references.values() for pattern in kind.patterns]
     pending: list[str] = []  # a keyword whose number comes in the next clause ("音量を調整して0.8倍にして")
     subtitle_context = False  # "字幕を2px変えて小さくして": the direction follows in the next clause
+    correcting = False
     for clause in (part for text in texts for part in clauses(text)):
         negated = bool(re.search(_NEGATION, clause))
+        if re.search(_CORRECTION, clause):
+            correcting = True
+            if re.fullmatch(_CORRECTION, clause):
+                continue
         if re.search(_CHECK_ONLY, clause):
             pending, subtitle_context = [], False
             continue
@@ -81,12 +90,18 @@ def _read(texts: list[str], policies: OperationPolicies) -> _Stated:
                 stated.down |= bool(re.search(_DOWN, clause))
         subtitle_context = about_subtitle
         if not hits:
-            numbers = re.findall(_NUMBER, plain)
+            numbers = [match.group() for match in re.finditer(_NUMBER, plain)
+                       if not re.match(_COUNTED, plain[match.end():])]
             if numbers and len(pending) == 1:
                 _record(stated, pending[0], float(numbers[-1]), negated)
             pending = []
             continue
         pending = []
+        if correcting:
+            # "話速は1.2倍、いや、話速は1.5倍にして": the corrected value replaces the earlier one.
+            for _, _, name, _ in hits:
+                stated.settings.pop(name, None)
+            correcting = False
         for index, (_, end, name, captured) in enumerate(hits):
             if captured is not None:
                 value = float(captured)
@@ -116,10 +131,12 @@ def _reference_conflict(texts: list[str], proposal: OperationProposal, policies:
     return bool(stated) and stated != {proposal.arguments.get(binding.argument)}
 
 
-def _subtitle_conflict(stated: _Stated, values: dict[str, Any]) -> bool:
+def _subtitle_conflict(stated: _Stated, values: dict[str, Any], current_subtitle: int | None) -> bool:
     absolute, delta = values.get("subtitle_font_size"), values.get("subtitle_font_size_delta")
-    if absolute is not None and absolute in stated.negated_pixels:
-        return True  # "字幕を64pxにしないで"
+    reached = absolute if absolute is not None else (
+        current_subtitle + delta if delta is not None and current_subtitle is not None else None)
+    if reached is not None and reached in stated.negated_pixels:
+        return True  # "字幕は64pxにしないで" also forbids reaching 64px by a delta
     if absolute is not None and ((stated.targets and absolute not in stated.targets)
                                  or (stated.pixels and absolute not in stated.pixels
                                      and not (stated.up or stated.down))):
@@ -134,12 +151,12 @@ def _subtitle_conflict(stated: _Stated, values: dict[str, Any]) -> bool:
 
 
 def _settings_conflict(stated: _Stated, proposal: OperationProposal, policies: OperationPolicies,
-                       require_all: bool) -> bool:
+                       require_all: bool, current_subtitle: int | None) -> bool:
     view = policies.settings_view(proposal.operation_id, proposal.operation_version)
     if view is None:
         return False
     values = settings_values(view, proposal.arguments)
-    if _subtitle_conflict(stated, values):
+    if _subtitle_conflict(stated, values, current_subtitle):
         return True
     if require_all and stated.pixels and values.get("subtitle_font_size") is None \
             and values.get("subtitle_font_size_delta") is None:
@@ -158,25 +175,26 @@ def _settings_conflict(stated: _Stated, proposal: OperationProposal, policies: O
     return False
 
 
-def explicit_conflict(texts: list[str], proposal: OperationProposal, *, require_all: bool = True) -> bool:
+def explicit_conflict(texts: list[str], proposal: OperationProposal, *, require_all: bool = True,
+                      current_subtitle: int | None = None) -> bool:
     """True when the proposal contradicts (or, for a whole request, drops) a stated value or reference.
 
     ``texts`` lists the current request first, then any unsaved request it answers.
     """
     policies = load_policies()
     return (_reference_conflict(texts, proposal, policies)
-            or _settings_conflict(_read(texts, policies), proposal, policies, require_all))
+            or _settings_conflict(_read(texts, policies), proposal, policies, require_all, current_subtitle))
 
 
 def plan_drops_stated(texts: list[str], steps: list[OperationProposal]) -> bool:
     """True when the plan leaves out a stated setting value or subtitle size.
 
-    A plan that restores a saved version or video may reach stated values through
-    the restore, so only plans without a restore step are checked.
+    A plan that restores a saved settings version may reach stated values through
+    the restore, so such plans are not checked; restoring a video changes no settings.
     """
     policies = load_policies()
     if any(policies.get(step.operation_id).reference is not None
-           and policies.get(step.operation_id).reference.kind in {"revision", "artifact"} for step in steps):
+           and policies.get(step.operation_id).reference.kind == "revision" for step in steps):
         return False
     stated = _read(texts, policies)
     carried: dict[str, set[float]] = {}

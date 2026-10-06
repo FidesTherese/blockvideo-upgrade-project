@@ -128,7 +128,8 @@ class LanguageOperationService:
                         ("empty_settings", lambda: empty if load_policies().get(proposed.operation_id).requires_arguments
                          and not proposed.arguments else None),
                         ("explicit_value", lambda: _STATED_VALUE_QUESTION if explicit_conflict(
-                            stated_texts, proposed, require_all=whole_request) else None),
+                            stated_texts, proposed, require_all=whole_request,
+                            current_subtitle=state.subtitle_font_size) else None),
                     )
                     for code, check in checks:
                         found = check()
