@@ -21,7 +21,7 @@ import pydantic
 from pydantic import ValidationError
 
 from evaluation.release_candidate.contracts import (
-    CANDIDATE_COMMIT_SUBJECT,
+    CANDIDATE_COMMIT_SUBJECTS,
     CandidateControl,
     CompletionMarker,
     FreezeManifest,
@@ -193,7 +193,7 @@ def _candidate_identity(candidate_root: Path, control: CandidateControl) -> tupl
     status = _git(candidate_root, "status", "--porcelain=v1", "--untracked-files=all").stdout
     if commit != control.git_commit:
         raise ValueError("candidate commit does not match candidate control")
-    if subject != control.git_commit_subject or subject != CANDIDATE_COMMIT_SUBJECT:
+    if subject != control.git_commit_subject or subject not in CANDIDATE_COMMIT_SUBJECTS:
         raise ValueError("candidate commit subject does not match candidate control")
     if status:
         raise ValueError("candidate checkout is not clean")

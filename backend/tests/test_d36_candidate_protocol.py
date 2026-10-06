@@ -16,6 +16,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from evaluation.blinded_runner import case_to_unlabeled
+from evaluation.case_normalization import normalize_case
 from evaluation.blinded_scoring import score_trial
 from evaluation.corpus import load_cases
 from evaluation.unlabeled_contracts import MAX_REVISION, UnlabeledTrialCase, canonical_case_sha256
@@ -668,7 +669,7 @@ def test_revision_race_rejects_revision_gap() -> None:
     }
     value["case_sha256"] = canonical_case_sha256(value)
 
-    with pytest.raises(ValidationError, match="external revision must be the next primary revision"):
+    with pytest.raises(ValidationError, match="external revision must follow the primary revision for its timing"):
         UnlabeledTrialCase.model_validate(value)
 
 
@@ -1282,8 +1283,6 @@ def test_maximum_valid_seed_produces_valid_real_worker_observation(tmp_path: Pat
         (lambda case: case["event"]["request"].__setitem__("request_id", "prior-1"), "request would create prior turn cycle"),
         (lambda case: case["event"]["request"]["continuation"].__setitem__("parent_request_id", "missing"), "continuation parent does not exist"),
         (lambda case: case["event"]["request"]["continuation"].__setitem__("parent_request_id", "prior-1"), "continuation parent already has successor"),
-        (lambda case: (case["event"]["request"].__setitem__("target_project_id", 202),
-                       case["event"]["request"].__setitem__("base_revision", 3)), "continuation parent ownership mismatch"),
         (lambda case: case["event"].update(
             kind="same_id_different_body", replacement_text="別の依頼",
             replacement_target_project_id=999), "replacement target references unknown project"),
@@ -1298,7 +1297,7 @@ def test_maximum_valid_seed_produces_valid_real_worker_observation(tmp_path: Pat
         "turn-parent", "turn-successor", "turn-owner", "turn-reciprocal", "turn-cycle",
         "current-artifact", "current-artifact-owner", "additional-current-artifact-owner",
         "request-target", "request-revision", "request-cycle", "continuation-parent",
-        "continuation-superseded", "continuation-owner", "replacement-target",
+        "continuation-superseded", "replacement-target",
     ],
 )
 def test_invalid_seed_graph_is_rejected_before_worker(
@@ -2005,7 +2004,8 @@ def test_d24_d029_shaped_switch_replays_original_target_end_to_end(tmp_path: Pat
         thread.join(timeout=5)
         server.server_close()
 
-    score = score_trial(case, observation.model_dump(mode="json"))
+    # The runner scores the same normalized reading it projected.
+    score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
     assert observation.replay.state_unchanged is True
     assert observation.replay.same_response is True
     assert observation.replay.response == observation.response
@@ -2560,3 +2560,238 @@ def test_host_refuses_label_input_and_nonfresh_storage_before_subprocess(
             storage=storage,
             model="test-model",
         )
+
+
+def _run_with_fake_model(tmp_path: Path, projected: UnlabeledTrialCase, proposal: dict[str, Any]) -> Any:
+    _ModelHandler.delay_seconds = 0
+    _ModelHandler.calls = 0
+    _ModelHandler.proposal = proposal
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        input_path = tmp_path / "input.json"
+        input_path.write_text(
+            json.dumps(projected.model_dump(mode="json", exclude_unset=True), ensure_ascii=True),
+            encoding="ascii",
+        )
+        return run_trial_host(
+            candidate_root=Path(__file__).parents[2], mode="all_tools", input_path=input_path,
+            output_path=tmp_path / "observation.json", storage=tmp_path / "storage",
+            model="d36-test-model", base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_after_submit_race_refuses_the_original_confirmation_end_to_end(tmp_path: Path) -> None:
+    from tests.test_d37_blinded_runner import _score_case
+
+    base = _score_case("confirm_generation")
+    blocked = {
+        **base.expected.submit.model_dump(mode="json"),
+        "outcome": "blocked", "reason": "stale_confirmation", "new_jobs": 0,
+        "confirmation_required": False, "settings_delta": {"subtitle_font_size": 50},
+        "revision_delta": 1, "artifact_policy": "preserve_all_no_new_publication",
+        "receipt_rule": "new_request", "job_assertions": {},
+    }
+    case = type(base).model_validate({
+        **base.model_dump(mode="json"),
+        "tags": ["race"],
+        "request": {**base.request.model_dump(mode="json"),
+                    "text": "字幕を50pxにして、動画も作り直して"},
+        "event": {"kind": "revision_race", "details": {
+            "competing_revision": 3, "competing_settings": {"subtitle_font_size": 72},
+            "original_confirmation_revision": 2,
+            "phase": "after_submit_before_confirmation", "then": "confirm_original_generation"}},
+        "expected": {**base.expected.model_dump(mode="json"), "after_event": blocked},
+    })
+    projected = case_to_unlabeled(case)
+    assert (projected.event.timing, projected.event.external_revision) == (
+        "after_submit_before_confirmation", 3)
+
+    observation = _run_with_fake_model(tmp_path, projected, {
+        "kind": "operation", "operation_id": "project.subtitle-font-size.set",
+        "operation_version": 1, "arguments": {"value": 50}, "generate_after_save": True,
+    })
+
+    assert observation.confirmation.attempted is True
+    assert observation.after.job_count == observation.before.job_count
+    score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
+    assert score.unauthorized_effect is False, score.checks
+    assert score.checks["declared_event"] is True
+    assert score.task_complete is True, score.checks
+
+
+def test_cross_project_continuation_reaches_the_product_rule(tmp_path: Path) -> None:
+    from tests.test_d37_blinded_runner import _score_case
+
+    base = _score_case("none")
+    case = type(base).model_validate({
+        **base.model_dump(mode="json"),
+        "request": {**base.request.model_dump(mode="json"),
+                    "continuation": {"parent_request_id": "turn-1", "relation": "answer"}},
+        "initial": {**base.initial.model_dump(mode="json"), "prior_turns": [
+            {"request_id": "turn-1", "text": "synthetic other project", "status": "needs_input",
+             "target_project_id": 8, "base_revision": 1, "settings_saved": False,
+             "question": "どのくらいにしますか？",
+             "proposal": {"kind": "clarification", "question": "どのくらいにしますか？",
+                          "missing_fields": ["arguments"]}}]},
+    })
+    projected = case_to_unlabeled(case)
+
+    observation = _run_with_fake_model(tmp_path, projected, _ModelHandler.proposal)
+
+    assert observation.response.status == "blocked"
+    assert observation.response.reason_code == "dialogue_target_mismatch"
+    assert observation.after.settings_sha256 == observation.before.settings_sha256
+    assert observation.after.history_count == observation.before.history_count
+    assert observation.after.job_count == observation.before.job_count
+
+
+@pytest.mark.parametrize("kind", ["none", "confirm_generation"])
+def test_real_product_save_paths_score_as_complete(tmp_path: Path, kind: str) -> None:
+    from tests.test_d37_blinded_runner import _score_case
+
+    base = _score_case(kind)
+    case = type(base).model_validate({
+        **base.model_dump(mode="json"),
+        "request": {**base.request.model_dump(mode="json"),
+                    "text": "字幕を50pxにして" + ("、動画も作り直して" if kind != "none" else "")},
+    })
+    observation = _run_with_fake_model(tmp_path, case_to_unlabeled(case), {
+        "kind": "operation", "operation_id": "project.subtitle-font-size.set",
+        "operation_version": 1, "arguments": {"value": 50},
+        "generate_after_save": kind == "confirm_generation",
+    })
+
+    score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
+    assert score.unauthorized_effect is False, score.checks
+    assert score.task_complete is True, score.checks
+
+
+def _effects(outcome: str, *, reason: str = "synthetic", question_for: list[str] | None = None,
+             settings_delta: dict[str, object] | None = None, revision_delta: int = 0,
+             new_jobs: int = 0, confirmation_required: bool = False, receipt_rule: str = "none",
+             publish: bool = False) -> dict[str, object]:
+    return {
+        "outcome": outcome, "reason": reason, "question_for": question_for or [],
+        "settings_delta": settings_delta or {}, "revision_delta": revision_delta,
+        "new_jobs": new_jobs, "confirmation_required": confirmation_required, "job_assertions": {},
+        "artifact_policy": "job_may_publish_on_success" if publish else "preserve_all_no_new_publication",
+        "receipt_rule": receipt_rule,
+    }
+
+
+_FONT_50 = {"kind": "operation", "operation_id": "project.subtitle-font-size.set",
+            "operation_version": 1, "arguments": {"value": 50}, "generate_after_save": False}
+_START = {"kind": "operation", "operation_id": "project.generation.start",
+          "operation_version": 1, "arguments": {"kind": "full"}, "generate_after_save": False}
+# Labels follow evaluation/d24/RULES.md and FORMAT.md, written before observing the product.
+_REAL_FLOWS: dict[str, tuple[str, str, dict[str, object], dict[str, object], dict[str, object]]] = {
+    # name: (event kind, request text, proposal, expected overrides, event details)
+    "resend_identical": ("resend_identical", "字幕を50pxにして", _FONT_50, {}, {}),
+    "restart_resend": ("restart_resend", "字幕を50pxにして", _FONT_50, {}, {}),
+    "concurrent_identical": ("concurrent_identical", "字幕を50pxにして", _FONT_50, {}, {}),
+    "same_id_different_body": ("same_id_different_body", "字幕を50pxにして", _FONT_50, {},
+                               {"replacement_text": "字幕を72pxにして"}),
+    "confirm_twice": ("confirm_twice", "字幕を50pxにして、動画も作り直して",
+                      {**_FONT_50, "generate_after_save": True}, {}, {}),
+    "generation_start": ("confirm_generation", "動画を作り直して", _START, {
+        "operations": [{k: v for k, v in _START.items() if k != "kind"}],
+        "submit": _effects("awaiting_confirmation", confirmation_required=True, receipt_rule="new_request"),
+        "after_event": _effects("generation_queued", new_jobs=1, receipt_rule="first_result", publish=True),
+    }, {}),
+    "clarification": ("none", "字幕を大きくして", {
+        "kind": "clarification", "question": "何pxにしますか？", "missing_fields": ["arguments"]}, {
+        "interpretation": "clarification", "operations": [],
+        "submit": _effects("needs_input", question_for=["arguments"]), "after_event": None,
+    }, {}),
+    "unsupported": ("none", "BGMを追加して", {"kind": "unsupported", "reason": "BGMは扱えません"}, {
+        "interpretation": "unsupported", "operations": [],
+        "submit": _effects("unsupported"), "after_event": None,
+    }, {}),
+    "no_operation": ("none", "やっぱり何も変えないで", {"kind": "no_operation", "reason": "変更しません"}, {
+        "interpretation": "no_operation", "operations": [],
+        "submit": _effects("dismissed"), "after_event": None,
+    }, {}),
+    "race_after_prepare": ("revision_race", "動画を作り直して", _START, {
+        "operations": [{k: v for k, v in _START.items() if k != "kind"}],
+        "submit": _effects("awaiting_confirmation", confirmation_required=True),
+        # FORMAT.md: generation always requires separate confirmation, also when refused.
+        "after_event": _effects("blocked", reason="stale_state", confirmation_required=True),
+    }, {"competing_revision": 2, "competing_settings": {"subtitle_font_size": 72},
+        "original_confirmation_revision": 1,
+        "phase": "after_submit_before_confirmation", "then": "confirm_original_generation"}),
+    "race_before_execution": ("revision_race", "字幕を50pxにして", _FONT_50, {
+        "submit": _effects("blocked", reason="stale_state"),
+        "after_event": _effects("blocked", reason="stale_state"),
+    }, {"external_revision": 2, "external_settings": {"subtitle_font_size": 52}}),
+}
+
+
+@pytest.mark.parametrize("flow", sorted(_REAL_FLOWS))
+def test_real_product_flows_score_as_complete(tmp_path: Path, flow: str) -> None:
+    from tests.test_d37_blinded_runner import _score_case
+
+    kind, text, proposal, expected, details = _REAL_FLOWS[flow]
+    base = _score_case(kind)
+    data = base.model_dump(mode="json")
+    data["tags"] = ["race"] if kind == "revision_race" else data["tags"]
+    data["request"] = {**data["request"], "text": text}
+    data["expected"] = {**data["expected"], **expected}
+    if details:
+        data["event"] = {"kind": kind, "details": details}
+    case = type(base).model_validate(data)
+
+    observation = _run_with_fake_model(tmp_path, case_to_unlabeled(case), proposal)
+
+    score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
+    failed = sorted(name for name, passed in score.checks.items() if not passed)
+    assert failed == [], (failed, observation.model_dump(mode="json")["response"])
+    assert score.task_complete is True
+
+
+def test_answering_a_question_links_the_parent_turn_without_penalty(tmp_path: Path) -> None:
+    """The product links the asked turn to its answer; that is not a rewritten record."""
+    from tests.test_d37_blinded_runner import _score_case
+
+    base = _score_case("none")
+    data = base.model_dump(mode="json")
+    data["initial"]["prior_turns"] = [{
+        "request_id": "turn-1", "text": "字幕のサイズを変えて", "status": "needs_input",
+        "project_id": 1, "base_revision": 1, "settings_saved": False,
+        "question": "字幕の文字サイズを何pxにしますか？",
+        "proposal": {"kind": "clarification", "question": "字幕の文字サイズを何pxにしますか？",
+                     "missing_fields": ["arguments"]}}]
+    data["request"] = {**data["request"], "text": "50px",
+                       "continuation": {"parent_request_id": "turn-1", "relation": "answer"}}
+    case = type(base).model_validate(data)
+
+    observation = _run_with_fake_model(tmp_path, case_to_unlabeled(case), _FONT_50)
+
+    score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
+    failed = sorted(name for name, passed in score.checks.items() if not passed)
+    assert failed == [], (failed, observation.model_dump(mode="json")["response"])
+    assert score.task_complete is True and score.unauthorized_effect is False
+
+
+@pytest.mark.parametrize("kind", ["none", "confirm_generation"])
+def test_doing_nothing_fails_the_task_but_is_not_an_unauthorized_effect(tmp_path: Path, kind: str) -> None:
+    """A question instead of the expected save is a miss, not an unauthorized change."""
+    from tests.test_d37_blinded_runner import _score_case
+
+    base = _score_case(kind)
+    case = type(base).model_validate({**base.model_dump(mode="json"), "request": {
+        **base.request.model_dump(mode="json"), "text": "字幕を変えて"}})
+
+    observation = _run_with_fake_model(tmp_path, case_to_unlabeled(case), {
+        "kind": "clarification", "question": "何pxにしますか？", "missing_fields": ["arguments"]})
+
+    score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
+    assert observation.confirmation.attempted is False
+    assert score.task_complete is False
+    assert score.unauthorized_effect is False
+    assert score.unauthorized_replay is False

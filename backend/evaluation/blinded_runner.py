@@ -72,6 +72,7 @@ from evaluation.tool_attestation import (
     fingerprint_file,
     validate_git_repository,
 )
+from evaluation.case_normalization import complete_settings, normalize_case
 from evaluation.unlabeled_contracts import (
     UnlabeledTrialCase,
     canonical_case_sha256,
@@ -190,15 +191,48 @@ def _assert_no_forbidden_wire_keys(value: object) -> None:
 
 def _wire_settings(value: dict[str, object]) -> dict[str, object]:
     return {
-        "subtitle_font_size": value["subtitle_font_size"],
-        "voicevox_speed_scale": value["voicevox_speed_scale"],
-        "voicevox_speaker_id": value["voicevox_speaker_id"],
+        **value,
         "pronunciation_overrides": tuple(value["pronunciation_overrides"]),
-        "narration_pacing_mode": value["narration_pacing_mode"],
-        "narration_sentence_pause_seconds": value[
-            "narration_sentence_pause_seconds"
-        ],
     }
+
+
+def _wire_projects(case: Case) -> tuple[dict[str, object], ...]:
+    """Seed other projects referenced by jobs exactly as the D24 development seed does."""
+    seen = {case.initial.project_id}
+    additional = []
+    for job in case.initial.jobs:
+        if job["project_id"] in seen:
+            continue
+        seen.add(job["project_id"])
+        additional.append({
+            "project_id": job["project_id"],
+            "revision": job["input_revision"],
+            "settings": _wire_settings(job["input_settings"]),
+            "project_status": "generating"
+            if job["status"] in {"pending", "running"} else "failed",
+        })
+    # Prior turns and a changed request may name a project that only exists in prose;
+    # seed it with product defaults so the reference is representable.
+    referenced = [
+        (turn["project_id"], max(turn["base_revision"], turn.get("result_revision") or 1))
+        for turn in case.initial.prior_turns
+    ]
+    replacement = case.event.details.get("replacement_target_project_id")
+    if case.event.kind == "same_id_different_body" and type(replacement) is int:
+        referenced.append((replacement, 1))
+    for project_id, revision in referenced:
+        if project_id in seen:
+            continue
+        seen.add(project_id)
+        additional.append({
+            "project_id": project_id,
+            "revision": max(
+                [revision] + [r for p, r in referenced if p == project_id]
+            ),
+            "settings": _wire_settings(complete_settings({})),
+            "project_status": "completed",
+        })
+    return tuple(additional)
 
 
 def _wire_prior_turn(value: dict[str, object]) -> dict[str, object]:
@@ -252,6 +286,7 @@ def _wire_prior_turn(value: dict[str, object]) -> dict[str, object]:
 
 def case_to_unlabeled(case: Case) -> UnlabeledTrialCase:
     """Project one label-bearing D24 case through an explicit wire allowlist."""
+    case = normalize_case(case)
     if case.split != "held_out" or not case.tags:
         raise ValueError("only categorized held-out cases can be projected")
     request = case.request.model_dump(mode="json")
@@ -270,6 +305,7 @@ def case_to_unlabeled(case: Case) -> UnlabeledTrialCase:
         event.update(
             {
                 "external_revision": details["external_revision"],
+                "timing": details["timing"],
                 "external_settings": {
                     **details["external_settings"],
                     **(
@@ -291,16 +327,14 @@ def case_to_unlabeled(case: Case) -> UnlabeledTrialCase:
                 "action": details["action"],
             }
         )
-    initial = {
+    additional_projects = _wire_projects(case)
+    initial: dict[str, object] = {
         "project_id": case.initial.project_id,
         "revision": case.initial.revision,
         "settings": _wire_settings(case.initial.settings),
         "project_status": case.initial.project_status,
         "jobs": tuple(
-            {
-                **item,
-                "input_settings": _wire_settings(item["input_settings"]),
-            }
+            {**item, "input_settings": _wire_settings(item["input_settings"])}
             for item in case.initial.jobs
         ),
         "history": tuple(
@@ -310,6 +344,8 @@ def case_to_unlabeled(case: Case) -> UnlabeledTrialCase:
         "artifact_revisions": tuple(case.initial.artifact_revisions),
         "prior_turns": tuple(_wire_prior_turn(item) for item in case.initial.prior_turns),
     }
+    if additional_projects:
+        initial["additional_projects"] = additional_projects
     payload: dict[str, object] = {
         "schema_version": 1,
         "case_id": case.case_id,
@@ -793,7 +829,7 @@ async def _run_trial(
             observation, _ = _observation(output_path)
             if observation.mode != mode or observation.case_sha256 != projected.case_sha256:
                 raise ValueError("trial observation does not match its invocation")
-            score = score_trial(case, observation.model_dump(mode="json"))
+            score = score_trial(normalize_case(case), observation.model_dump(mode="json"))
             candidate_snapshot = observation.candidate_snapshot_sha256
         except (OSError, ValidationError, ValueError):
             outcome = "transport_failure"
@@ -953,6 +989,11 @@ async def _run_blinded_evaluation_anchored(
         token_by_id = {
             case.case_id: opaque_case_token(key, case.case_id) for case in cases
         }
+    # Reject unprojectable included cases before any protocol or trial is written.
+    included_tokens = set(included)
+    for case in cases:
+        if token_by_id[case.case_id] in included_tokens:
+            case_to_unlabeled(case)
     case_tokens = tuple(binding.case_token for binding in bindings)
     category_tokens = tuple(sorted({binding.category_token for binding in bindings}))
     protocol = EvaluationProtocol(

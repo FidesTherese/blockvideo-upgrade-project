@@ -194,3 +194,30 @@ def test_real_owned_chrome_tab_enter_and_version(tmp_path: Path, synthetic_agent
         server.shutdown()
         server.server_close()
         thread.join(5)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='installed Windows Chrome native seam')
+def test_installed_chrome_opens_devtools_under_the_group_environment(tmp_path: Path) -> None:
+    # Chrome resolves its default data folder from %USERPROFILE%\AppData\Local; without
+    # that layout it treats every profile as default and refuses remote debugging.
+    import subprocess
+    from evaluation import release_verification as release
+    from evaluation.scripts import d39_smoke as producer
+    try:
+        chrome = producer._installed_browser(None)
+    except ValueError:
+        pytest.skip('no installed Chrome; native browser seam not run')
+    env = release.build_group_environment(tmp_path, python_executable=Path(sys._base_executable), node_executable=None)
+    profile = tmp_path / 'profile'
+    profile.mkdir()
+    process = subprocess.Popen([str(chrome), '--headless=new', '--no-first-run', '--remote-debugging-address=127.0.0.1',
+                                '--remote-debugging-port=0', '--user-data-dir=' + str(profile), 'about:blank'],
+                               env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline and not (profile / 'DevToolsActivePort').exists():
+            time.sleep(0.2)
+        assert (profile / 'DevToolsActivePort').exists()
+    finally:
+        process.kill()
+        process.wait(timeout=30)

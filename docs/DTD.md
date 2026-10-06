@@ -1075,7 +1075,10 @@ class CandidateControl(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal[1]
     git_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
-    git_commit_subject: Literal["[DONE] Mission 35 Add recovery-oriented operational UI"]
+    git_commit_subject: Literal[
+        "[DONE] Mission 35 Add recovery-oriented operational UI",
+        "[DONE] Mission 35.1 Fix release-candidate verification blockers",
+    ]
     git_tree_clean: Literal[True]
 
 class FileFingerprint(BaseModel):
@@ -1100,6 +1103,105 @@ class CompletionMarker(BaseModel):
     schema_version: Literal[1]
     files: list[FileFingerprint]  # exact sorted canonical artifact fingerprints
 ```
+
+#### D36 successor candidate amendment (2026-10-03)
+
+The frozen D35 commit cannot pass D39 (credential-shaped test literals, a
+build-time rewrite of tracked `frontend/vite.config.js`, README prerequisites and
+README links to documents outside the inventory), and D35 bytes are never edited. An
+authorized successor candidate is therefore allowed: a commit on top of D35 whose
+subject is exactly `[DONE] Mission 35.1 Fix release-candidate verification blockers`
+and which changes only those blockers. `CANDIDATE_COMMIT_SUBJECTS` lists the two
+authorized subjects; the strict `CandidateControl` literal, the freezer and the
+runtime materializer (which now reconstructs the control from the candidate
+commit's own subject) accept only them. Any other subject is refused.
+
+The inventory also includes tracked documentation under `docs/` with `.md`, `.png`,
+`.jpg`, `.jpeg`, `.gif` or `.svg` suffixes, so README links resolve inside the
+materialized runtime. This changes the inventory and aggregate of any re-freeze
+(including D35), so earlier D36 evidence stays valid only for the tooling that
+produced it. No gate, threshold or pin changes.
+
+#### D37 projection parity amendment (2026-10-04)
+
+D37's first held-out run stopped before any trial because `case_to_unlabeled` was
+stricter than the D24 case format. The D24 development seed is the reference reading
+of a case's initial state, so the projection now matches it: partial job
+`input_settings` complete from the owning project's settings, partial history
+settings complete from the selected project's current settings, a job of another
+project seeds that project in `additional_projects` (product defaults plus the job
+snapshot, revision from the job, `generating` when active and `failed` otherwise), a
+missing job `kind` is `full`, and prior turns without `project_id`, `base_revision`
+or `settings_saved` take the selected project, a revision derived from
+`result_revision` (minus one when the turn saved settings) or the current revision,
+and `false`. Event details, prior-turn statuses and proposal kinds outside the wire
+contract still fail closed; the frozen D36 trial host and wire contract are unchanged.
+
+A content-free check of the held-out corpus at `b9ac596` then reported 22 of 200
+cases still unprojectable, in seven structural patterns. Case reading now lives in
+`evaluation/case_normalization.py`, used by both projection and scoring so the trial
+input and the expected state cannot diverge: author spellings of event details
+(`competing_revision`/`competing_settings`, `switched_project_id`, `changed_request`)
+map to the wire names, `switch_target` defaults its only action, prior turns take
+`project_id` from `target_project_id`, a null `base_revision` is derived like a missing
+one, and an explicit successor link to the case's own request is dropped because the
+host links the continuation itself. The D36 wire contract and trial host also change:
+`voicevox_pitch_scale`, a catalog setting of `project.settings.update`, joins the wire
+settings, patches, v1 arguments and history fields, and prior turns may carry
+`unsupported` and `no_operation` proposals, seeded with the matching outcome status.
+Because these are D36 trial sources, the successor must be re-frozen and D39 rerun
+against the new freeze; earlier D36/D39 evidence stays valid only for its tooling.
+
+A third check (at `4c34ae6`, against the r2 freeze) left 7 of 200 cases in four
+patterns, all handled in the D37 reading without touching D36 sources: a competing
+full-project snapshot reduces to the modeled settings it changes (all modeled keys when
+none change); a successor link to a request not seeded in the case is dropped; and a
+project named only by a prior turn or by a changed request is seeded with product
+defaults (`completed`, revision at least the turn's base/result revision, else 1).
+Changes to unmodeled settings stay outside the wire state, as before.
+
+A fourth check (at `39e7144`) left 4 cases. Three describe a race after the request's
+own save: the request saves (initial+1) and awaits generation confirmation, an external
+save lands (initial+2), and the original confirmation is then attempted. The wire race
+event gains `timing` (`before_execution` default, or `after_submit_before_confirmation`,
+read from the author's `phase`/`when` label and requiring `external_revision` =
+initial+2); the host applies such a race after submit and then posts the original
+confirmation, and scoring treats it as a confirmation event with the request's save
+persisted before the race. The fourth answers a clarification about another project;
+the product rejects that at runtime (`dialogue_target_mismatch`), so the wire no longer
+pre-rejects a continuation whose parent belongs to another project.
+
+Testing the race end to end against the real product exposed scorer assumptions that
+had only been checked against canned observations. Each is now covered by a
+real-product scoring test whose labels were written from RULES.md before running it,
+across none, resend, restart resend, concurrent, same-id/different-body, confirm,
+confirm-twice, generation start, clarification, unsupported, no-operation and both
+race timings:
+
+- The product records the pre-change revision as a history row before the first save
+  or job when none exists; expected history now includes it.
+- `executed` is true once the request's own settings save ran, including while
+  generation awaits confirmation or after that confirmation is refused.
+- Queuing a job may change the primary project's `current_stage` and `progress`.
+- The host's cancellation effect also registers a queued or removed job.
+- Saving and then confirming generation adds two receipts.
+- Concurrent identical submissions: the host now settles an in-flight duplicate by
+  reading its stored response (bounded polling) before comparing, and scoring relies on
+  the persisted checks rather than a before/after state comparison that spans the one
+  execution.
+
+Host and wire changes are D36 sources, so the successor is re-frozen (r3) and D39 rerun.
+
+A sixth check (at `91bae4b`) left one after-submit race whose request only prepared a
+generation (original confirmation revision = initial), so the external save is
+initial+1. After-submit races now accept initial+1 or initial+2; scoring expects +2 only
+when the request's own save persisted, and the host never reuses a revision the request
+just recorded. A real-product test covers this prepare-only race. Re-frozen as r4.
+
+The runner now projects every included case before writing the protocol, so an
+unprojectable corpus stops before any trial. `scripts/check_blinded_projection.py`
+reports failures by case ID, field location, key name and identifier-shaped labels
+only, so an evaluator can share the report without revealing held-out text or labels.
 
 `evaluation/release_candidate/freeze.py` reads bounded control bytes once, validates
 the detached lowercase 64-hex digest before parsing, requires byte-for-byte canonical

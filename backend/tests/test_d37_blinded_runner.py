@@ -28,6 +28,7 @@ from evaluation.blinded_io import (
     ensure_writable_directory as _ensure_writable_directory,
     publish_immutable as _publish_immutable,
 )
+from evaluation.case_normalization import normalize_case
 from evaluation.blinded_runner import (
     _D36_SOURCE_PATHS,
     _D37_SOURCE_PATHS,
@@ -1197,14 +1198,16 @@ def _score_observation(event_kind: str) -> dict[str, object]:
     same_response = event_kind != "same_id_different_body"
     replay_reason = "request_id_conflict" if event_kind == "same_id_different_body" else None
     language_additions = 1
-    receipt_additions = 1
+    # Real product: saving then confirming generation executes two operations.
+    receipt_additions = 2 if confirmation else 1
     observation = {
         "schema_version": 1,
         "response": {
             "http_status": 200,
             "status": "ready" if confirmation else "completed",
             "mode": "all_tools",
-            "executed": not confirmation,
+            # The request's own settings save ran even while generation awaits confirmation.
+            "executed": True,
             "requires_confirmation": confirmation,
             "operation_id": "project.subtitle-font-size.set",
             "operation_version": 1,
@@ -1218,7 +1221,7 @@ def _score_observation(event_kind: str) -> dict[str, object]:
         "before": _redacted_state("before"),
         "after": _redacted_state(
             "after",
-            history_count=1,
+            history_count=2,
             job_count=1 if confirmation else 0,
             receipt_count=receipt_additions,
             language_request_count=language_additions,
@@ -1228,7 +1231,8 @@ def _score_observation(event_kind: str) -> dict[str, object]:
             "settings": 1,
             "revision": 1,
             "jobs": int(confirmation),
-            "cancellations": 0,
+            # The host's cancellation effect also registers a newly queued job.
+            "cancellations": int(confirmation),
             "receipts": receipt_additions,
             "artifacts": 0,
             "external_calls": 0,
@@ -1318,6 +1322,14 @@ def _score_observation(event_kind: str) -> dict[str, object]:
     initial_settings = _score_case(event_kind).initial.settings
     saved_settings = {**initial_settings, "subtitle_font_size": 50}
     observation["after"]["history_entries"] = [
+        # The product records the pre-change revision before the first save.
+        {
+            "project_id": 1,
+            "revision": 1,
+            "settings_sha256": _settings_sha256(initial_settings),
+            "changed_fields": [],
+            "restored_from_revision": None,
+        },
         {
             "project_id": 1,
             "revision": 2,
@@ -1555,7 +1567,7 @@ def test_score_requires_expected_project_status_and_exact_history_projection() -
     case = _score_case("none")
     observation = _score_observation("none")
     observation["after"]["project_status"] = "failed"
-    observation["after"]["history_entries"][0]["changed_fields"] = []
+    observation["after"]["history_entries"][-1]["changed_fields"] = []
 
     score = score_trial(case, observation)
 
@@ -1585,7 +1597,7 @@ def test_score_preserves_initial_history_and_requires_exact_sequence() -> None:
     observation["after"]["history_count"] = 2
     observation["after"]["history_entries"] = [
         initial_entry,
-        observation["after"]["history_entries"][0],
+        observation["after"]["history_entries"][-1],
     ]
 
     passing = score_trial(case, observation)
@@ -2529,13 +2541,28 @@ def _write_task4_inputs(root: Path, case: Case) -> tuple[Path, Path, Path, Path,
     return corpus, review_paths[0], review_paths[1], index, key
 
 
+def _host_settings_observation(case: Case, observation: dict[str, object]) -> dict[str, object]:
+    """Rehash canned settings as the real host does: over the projected (completed) fields."""
+    raw = dict(case.initial.settings)
+    completed = dict(normalize_case(case).initial.settings)
+    replacements = {
+        _settings_sha256(raw): _settings_sha256(completed),
+        _settings_sha256({**raw, "subtitle_font_size": 50}):
+            _settings_sha256({**completed, "subtitle_font_size": 50}),
+    }
+    text = json.dumps(observation)
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return json.loads(text)
+
+
 def _task4_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *, mutate_candidate: bool = False,
 ) -> dict[str, object]:
     case = _score_case("none")
-    observation = _score_observation("none")
+    observation = _host_settings_observation(case, _score_observation("none"))
     candidate, candidate_commit, candidate_files = _make_task4_candidate(tmp_path)
     tool_repo, _, d36_attestation = _make_task4_tool_repo(
         tmp_path, observation, mutate_candidate=mutate_candidate

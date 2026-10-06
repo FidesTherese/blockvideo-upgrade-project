@@ -263,3 +263,25 @@ def test_l10_screenshot_fingerprint_rejects_ancestor_junction(tmp_path: Path) ->
             producer._screenshot_fingerprint(link / '390-waiting.png')
     finally:
         link.rmdir()
+
+
+def test_group_cleanup_unlinks_directory_and_file_symlinks_without_following(tmp_path: Path) -> None:
+    # With symlink privilege (Developer Mode) pytest's `*current` links and the D34
+    # contract tests leave directory symlinks in the group; only the links go away.
+    from evaluation import release_verification as release
+    group = tmp_path / 'group'
+    group.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'keep.txt').write_text('keep')
+    (group / 'real').mkdir()
+    (group / 'real' / 'x.txt').write_text('x')
+    try:
+        os.symlink(group / 'real', group / 'current', target_is_directory=True)
+        os.symlink(outside, group / 'escape', target_is_directory=True)
+        os.symlink(outside / 'keep.txt', group / 'escape.txt')
+    except OSError:
+        pytest.skip('symlink creation unavailable')
+    release._remove_group_directory(group, material._open_anchor(group))
+    assert not group.exists()
+    assert (outside / 'keep.txt').read_text() == 'keep'

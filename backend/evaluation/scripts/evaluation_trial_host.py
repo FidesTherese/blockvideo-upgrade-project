@@ -280,10 +280,10 @@ class RedactedHistoryEntry(_StrictRecord):
     revision: int = Field(ge=1, le=10**12)
     settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     changed_fields: tuple[Literal[
-        "subtitle_font_size", "voicevox_speed_scale", "voicevox_speaker_id",
-        "pronunciation_overrides", "narration_pacing_mode",
+        "subtitle_font_size", "voicevox_speed_scale", "voicevox_pitch_scale",
+        "voicevox_speaker_id", "pronunciation_overrides", "narration_pacing_mode",
         "narration_sentence_pause_seconds",
-    ], ...] = Field(max_length=6, strict=False)
+    ], ...] = Field(max_length=7, strict=False)
     restored_from_revision: int | None = Field(default=None, ge=1, le=10**12)
 
     @model_validator(mode="after")
@@ -523,6 +523,14 @@ _VOLATILE_LOGICAL_FIELDS = frozenset({
     "created_at", "updated_at", "started_at", "finished_at", "lease_until", "owner_token",
 })
 _OPAQUE_LOGICAL_FIELDS = frozenset({"confirmation_token", "core_request_id"})
+
+
+def _identity_view(collection: str, item: Any) -> Any:
+    """Answering a question links the parent turn to its successor; that link is the
+    product's normal chaining, not a rewrite of the earlier record."""
+    if collection == "language_turns" and isinstance(item, dict):
+        return {key: value for key, value in item.items() if key != "successor_request_id"}
+    return item
 
 
 def _record_identity(value: object) -> str:
@@ -1087,17 +1095,22 @@ def _candidate_worker(model_call_budget: int) -> int:
             settings.language_embedding_base_url = os.environ["LANGUAGE_EMBEDDING_BASE_URL"]
         model_budget = _ModelCallBudget(model_call_budget)
         race_applied = False
+        after_submit_race = False
 
         def apply_external_race() -> None:
             nonlocal race_applied
             if race_applied or event["kind"] != "revision_race":
+                return
+            if event.get("timing", "before_execution") != "before_execution" and not after_submit_race:
                 return
             race_applied = True
             with get_session_factory()() as race_db:
                 project = race_db.get(Project, initial["project_id"])
                 for key, value in event["external_settings"].items():
                     setattr(project, key, value)
-                project.revision = event["external_revision"]
+                # After submit, never reuse a revision the request itself just recorded.
+                project.revision = (max(event["external_revision"], project.revision + 1)
+                                    if after_submit_race else event["external_revision"])
                 race_db.add(SettingsRevision(project_id=project.id, revision=project.revision,
                                               settings_json=configuration(project), changed_fields=sorted(event["external_settings"])))
                 race_db.commit()
@@ -1210,7 +1223,8 @@ def _candidate_worker(model_call_budget: int) -> int:
                 for index, turn in enumerate(initial["prior_turns"]):
                     proposal = turn.get("proposal")
                     outcome = InterpretationOutcome.model_validate({
-                        "status": "proposed" if proposal and proposal["kind"] == "operation" else "needs_input",
+                        "status": {"operation": "proposed", "unsupported": "unsupported",
+                                   "no_operation": "dismissed"}.get(proposal["kind"] if proposal else "", "needs_input"),
                         "proposal": proposal,
                     })
                     response = LanguageResponse(request_id=turn["request_id"], core_request_id="seed-" + turn["request_id"],
@@ -1384,7 +1398,7 @@ def _candidate_worker(model_call_budget: int) -> int:
                           _record_identity(item) for item in value["language_requests"]
                       ),
                       "language_turn_identity_sha256s": sorted(
-                          _record_identity(item) for item in value["language_turns"]
+                          _record_identity(_identity_view("language_turns", item)) for item in value["language_turns"]
                       )}
             for name in ("projects", "history", "jobs", "receipts", "artifacts", "external_calls", "language_requests", "language_turns"):
                 result[f"{name}_sha256"] = _hash(value[name])
@@ -1459,9 +1473,18 @@ def _candidate_worker(model_call_budget: int) -> int:
                     submitted = list(executor.map(
                         lambda _: client.post("/api/language/requests", json=payload), range(2)
                     ))
-                response_http = submitted[0]
+                # One submission usually observes the other in flight; read its final
+                # stored response (bounded) so both sides are compared after completion.
+                settled = []
+                for item in submitted:
+                    for _ in range(600):
+                        if item.json().get("status") != "interpreting":
+                            break
+                        time.sleep(0.05)
+                        item = client.get(f"/api/language/requests/{request['request_id']}")
+                    settled.append(item)
+                response_http, concurrent_http = settled
                 response = response_http.json()
-                concurrent_http = submitted[1]
                 concurrent_response = concurrent_http.json()
             else:
                 response_http = client.post("/api/language/requests", json=payload)
@@ -1471,6 +1494,7 @@ def _candidate_worker(model_call_budget: int) -> int:
             after_submit = canonical_state()
             confirmation_http: Any | None = None
             confirmation_response: dict[str, Any] | None = None
+            confirmed_state: dict[str, Any] | None = None
             duplicate_confirmation_http: Any | None = None
             duplicate_confirmation: dict[str, Any] | None = None
             replay_http: Any | None = None
@@ -1496,10 +1520,19 @@ def _candidate_worker(model_call_budget: int) -> int:
                 return 0
 
             kind = event["kind"]
-            if kind in {"confirm_generation", "confirm_twice"} and response.get("confirmation_token"):
+            if kind == "revision_race" and event.get("timing") == "after_submit_before_confirmation":
+                after_submit_race = True
+                apply_external_race()
+                if response.get("confirmation_token"):
+                    permission = {"confirmation_token": response["confirmation_token"], "confirm_generation": True}
+                    confirmation_http = client.post(f"/api/language/requests/{request['request_id']}/execute", json=permission)
+                    confirmation_response = confirmation_http.json()
+                    confirmed_state = canonical_state()
+            elif kind in {"confirm_generation", "confirm_twice"} and response.get("confirmation_token"):
                 permission = {"confirmation_token": response["confirmation_token"], "confirm_generation": True}
                 confirmation_http = client.post(f"/api/language/requests/{request['request_id']}/execute", json=permission)
                 confirmation_response = confirmation_http.json()
+                confirmed_state = canonical_state()
                 if kind == "confirm_twice":
                     duplicate_confirmation_http = client.post(
                         f"/api/language/requests/{request['request_id']}/execute", json=permission
@@ -1540,11 +1573,11 @@ def _candidate_worker(model_call_budget: int) -> int:
                 "receipts", "external_calls", "language_requests", "language_turns"
             )
             before_identities = {
-                name: {_record_identity(item) for item in before[name]}
+                name: {_record_identity(_identity_view(name, item)) for item in before[name]}
                 for name in opaque_collections
             }
             after_identities = {
-                name: {_record_identity(item) for item in after[name]}
+                name: {_record_identity(_identity_view(name, item)) for item in after[name]}
                 for name in opaque_collections
             }
             additions = {
@@ -1592,7 +1625,8 @@ def _candidate_worker(model_call_budget: int) -> int:
                     "response": replay_projection, "failure_class": None},
                 "confirmation": {"attempted": confirmation_projection is not None,
                     "duplicate_attempted": duplicate_confirmation_projection is not None,
-                    "state_sha256": _hash(after) if confirmation_projection is not None else None,
+                    "state_sha256": _hash(confirmed_state if confirmed_state is not None else after)
+                    if confirmation_projection is not None else None,
                     "duplicate_same_response": (
                         confirmation_projection["response_sha256"] == duplicate_confirmation_projection["response_sha256"]
                     ) if duplicate_confirmation_projection is not None and confirmation_projection is not None else None,
