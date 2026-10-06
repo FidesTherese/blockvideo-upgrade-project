@@ -135,3 +135,11 @@ def test_sixth_review_cases() -> None:
     assert not plan_drops_stated(corrected, [_proposal(UPDATE, {"voicevox_speed_scale": 1.5}),
                                              _proposal("project.status.get", {})])
     assert explicit_conflict(corrected, _proposal(UPDATE, {"voicevox_speed_scale": 1.2}))
+
+
+def test_seventh_review_cases_keep_their_bindings() -> None:
+    assert explicit_conflict(["話者を変更して、3番にして"], _proposal(UPDATE, {"voicevox_speaker_id": 4}))
+    assert not explicit_conflict(["話者を変更して、3番にして"], _proposal(UPDATE, {"voicevox_speaker_id": 3}))
+    assert explicit_conflict(["話速を1.2倍にして。いや、話速だけ変えて、ほかはそのままにして"],
+                             _proposal(UPDATE, {"voicevox_speed_scale": 1.5}))
+    assert explicit_conflict(["字幕を64pxにできるか教えて"], _proposal(SET, {"value": 80}))

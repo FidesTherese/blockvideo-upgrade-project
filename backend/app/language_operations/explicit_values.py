@@ -23,11 +23,11 @@ _DOWN = r"小さ|下げ|減ら|縮小"
 _SUBTITLE = r"字幕|フォント|文字の大きさ|文字サイズ"
 _NEGATION = r"ないで|なくて|しない|ません"
 # A clause that only checks a result ("64pxになったか確認して") states no new value.
-_CHECK_ONLY = r"なったか|なっているか|なったこと|か確認|か教えて"
+_CHECK_ONLY = r"なったか|なっているか|なったこと"
 # "いや" / "やっぱり" corrects the value stated just before.
 _CORRECTION = r"^(?:いや|やっぱり|訂正して|訂正)\s*$|^(?:いや|やっぱり)"
 # A number carried over from the next clause must not count something else ("もう1回").
-_COUNTED = r"\s*(?:回|件|個|つ|人|分|番|版|日|時|本|枚目)"
+_COUNTED = r"\s*(?:回|件|個|つ|人|分|版|日|時|本|枚目)"
 # "動画3ではなく動画4に" names 3 only to exclude it.
 _EXCLUDED = r"\d+\s*(?:番)?\s*(?:では|じゃ)なく(?:て)?"
 
@@ -97,11 +97,7 @@ def _read(texts: list[str], policies: OperationPolicies) -> _Stated:
             pending = []
             continue
         pending = []
-        if correcting:
-            # "話速は1.2倍、いや、話速は1.5倍にして": the corrected value replaces the earlier one.
-            for _, _, name, _ in hits:
-                stated.settings.pop(name, None)
-            correcting = False
+        before = {name: len(values) for name, values in stated.settings.items()} if correcting else {}
         for index, (_, end, name, captured) in enumerate(hits):
             if captured is not None:
                 value = float(captured)
@@ -113,6 +109,13 @@ def _read(texts: list[str], policies: OperationPolicies) -> _Stated:
                     continue
                 value = float(numbers[-1])  # "1.2倍から1.5倍に" asks for the last one
             _record(stated, name, value, negated)
+        if correcting:
+            # "話速は1.2倍、いや、話速は1.5倍にして": a corrected value replaces the earlier one;
+            # a correction without a new number keeps the earlier value.
+            for name, values in stated.settings.items():
+                if len(values) > before.get(name, 0):
+                    stated.settings[name] = values[before.get(name, 0):]
+            correcting = False
     return stated
 
 
