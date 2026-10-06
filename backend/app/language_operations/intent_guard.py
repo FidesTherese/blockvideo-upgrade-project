@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from app.language_operations.clauses import clauses
 from app.operations.policies import load_policies
 
 _APOSTROPHE_TRANSLATION = str.maketrans({"‘": "'", "’": "'", "＇": "'"})
@@ -35,7 +36,8 @@ def negative_control_reason(text: str, operation_id: str) -> str | None:
         return "explicit_negative_intent"
     if any(phrase in normalized for phrase in policy.negative_phrases):
         return "explicit_negative_intent"
-    if any(re.search(pattern, normalized) for pattern in policy.negative_patterns):
+    # A named negation must sit in one clause: "設定を第2版に戻して動画は戻さないで" negates only the video.
+    if any(re.search(pattern, clause) for pattern in policy.negative_patterns for clause in clauses(text)):
         return "explicit_negative_intent"
     if only_negated_instructions(text):
         return "explicit_negative_intent"

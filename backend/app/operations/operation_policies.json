@@ -10,7 +10,7 @@
   ],
   "negated_clause_pattern": "(?:(?!(?:して|って|んで|いて|えて|けて|せて|めて|べて|れて|きて|みて|にて|ちて|うえで|上で|てから|たら)(?!いただかな|もらわな|くれな|ほしくな))[^、。,.!！?？])*?(?:ないで|ないこと|なくていい|なくてよい|なくても(?:いい|よい|大丈夫)|なくて大丈夫)(?:です|ください|ね|ほしい|おいて)?",
   "negation_residue_pattern": "[ 、。,.!！?？]*(?:です|ね|よ|お願いします)?[ 、。,.!！?？]*",
-  "setting_keywords": {"voicevox_speed_scale": ["話速|速度|速さ|スピード|読み上げ.{0,3}速", "(\\d+(?:\\.\\d+)?)\\s*倍速", "(\\d+(?:\\.\\d+)?)\\s*倍の(?:話速|速度|速さ|スピード)"], "voicevox_volume_scale": ["音量|ボリューム", "(\\d+(?:\\.\\d+)?)\\s*倍の(?:音量|ボリューム)"], "voicevox_pitch_scale": ["ピッチ|声の高さ|音の高さ"], "voicevox_intonation_scale": ["抑揚|イントネーション"], "voicevox_speaker_id": ["話者|スピーカー"], "subtitle_max_chars_per_line": ["1行の文字数|一行の文字数|行あたりの文字数|文字数"], "max_slides_per_block": ["スライド"], "min_display_seconds": ["最低表示時間|表示時間"], "pre_margin_seconds": ["前の余白|前余白|前のマージン"], "post_margin_seconds": ["後の余白|後余白|後ろの余白|後のマージン"], "narration_sentence_pause_seconds": ["文の間|文間|ポーズ|間隔"]},
+  "setting_keywords": {"voicevox_speed_scale": ["話速|速度|速さ|スピード|読み上げ.{0,3}速", "(\\d+(?:\\.\\d+)?)\\s*倍速", "(\\d+(?:\\.\\d+)?)\\s*倍の(?:話速|速度|速さ|スピード)"], "voicevox_volume_scale": ["音量|ボリューム", "(\\d+(?:\\.\\d+)?)\\s*倍の(?:音量|ボリューム)"], "voicevox_pitch_scale": ["ピッチ|声の高さ|音の高さ"], "voicevox_intonation_scale": ["抑揚|イントネーション"], "voicevox_speaker_id": ["話者|スピーカー"], "subtitle_max_chars_per_line": ["1行の文字数|一行の文字数|行あたりの文字数|字幕の文字数"], "max_slides_per_block": ["スライド"], "min_display_seconds": ["最低表示時間|表示時間"], "pre_margin_seconds": ["前の余白|前余白|前のマージン"], "post_margin_seconds": ["後の余白|後余白|後ろの余白|後のマージン"], "narration_sentence_pause_seconds": ["文の間|文間|ポーズ|間隔"]},
   "follow_up_generation": {
     "operation_id": "project.generation.start",
     "operation_version": 1,

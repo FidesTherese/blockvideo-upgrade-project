@@ -2,109 +2,153 @@
 
 Unattended (YOLO) requests may guess values the request leaves out, but never
 override or drop a number or reference the user stated. Normal requests use the
-same check as a clarifying guard. This module only reports a conflict; it never
-fills or converts arguments.
+same check as a clarifying guard. Every statement is read within its own clause
+(see ``clauses``), so a negation or direction in one clause never applies to
+another. This module only reports a conflict; it never fills or converts arguments.
 """
 from __future__ import annotations
 
 import re
-import unicodedata
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.interpretation.contracts import OperationProposal
+from app.language_operations.clauses import clauses, normalized
 from app.operations.policies import OperationPolicies, load_policies, settings_base, settings_values
 
 _PX = r"(?<![\d.])([0-9]+)\s*(?:px|ピクセル)(?![a-z])"
 _NUMBER = r"(?<![\d.])[-+]?\d+(?:\.\d+)?(?![\d.])"
 _UP = r"大き|上げ|増や|拡大"
 _DOWN = r"小さ|下げ|減ら|縮小"
-_CLAUSE_END = r"[、。,!！?？\n]"
+_SUBTITLE = r"字幕|フォント|文字の大きさ|文字サイズ"
 _NEGATION = r"ないで|なくて|しない|ません"
 # "動画3ではなく動画4に" names 3 only to exclude it.
 _EXCLUDED = r"\d+\s*(?:番)?\s*(?:では|じゃ)なく(?:て)?"
 
 
-def _normalized(text: str) -> str:
-    return unicodedata.normalize("NFKC", text).casefold()
+@dataclass
+class _Stated:
+    """What the user wrote, clause by clause."""
+
+    pixels: set[int] = field(default_factory=set)
+    targets: set[int] = field(default_factory=set)
+    up: bool = False
+    down: bool = False
+    settings: dict[str, set[float]] = field(default_factory=dict)
+    negated: dict[str, set[float]] = field(default_factory=dict)
 
 
-def _reference_conflict(text: str, proposal: OperationProposal, policies: OperationPolicies) -> bool:
+def _read(texts: list[str], policies: OperationPolicies) -> _Stated:
+    stated = _Stated()
+    for clause in (part for text in texts for part in clauses(text)):
+        negated = bool(re.search(_NEGATION, clause))
+        # Pixel sizes count only where the clause is about subtitles, or is just a size ("64px").
+        if re.search(_SUBTITLE, clause) or re.fullmatch(r"\s*" + _PX + r"\s*(?:で|に)?\s*(?:お願いします|して)?\s*", clause):
+            if not negated:
+                stated.pixels |= {int(value) for value in re.findall(_PX, clause)}
+                stated.targets |= {int(value) for value in re.findall(_PX + r"\s*(?:に|へ|で)", clause)}
+                stated.up |= bool(re.search(_UP, clause))
+                stated.down |= bool(re.search(_DOWN, clause))
+        plain = re.sub(_PX, " ", clause)
+        hits: list[tuple[int, int, str, str | None]] = []
+        for name, patterns in policies.setting_keywords.items():
+            for pattern in patterns:
+                hits.extend((match.start(), match.end(), name, match.group(1) if match.groups() else None)
+                            for match in re.finditer(pattern, plain))
+        hits.sort()
+        for index, (_, end, name, captured) in enumerate(hits):
+            if captured is not None:
+                value = float(captured)
+            else:
+                limit = hits[index + 1][0] if index + 1 < len(hits) else len(plain)
+                numbers = re.findall(_NUMBER, plain[end:limit])
+                if not numbers:
+                    continue
+                value = float(numbers[-1])  # "1.2倍から1.5倍に" asks for the last one
+            (stated.negated if negated else stated.settings).setdefault(name, set()).add(value)
+    return stated
+
+
+def _references(text: str, kind_patterns: tuple[str, ...]) -> set[int]:
+    chosen = re.sub(_EXCLUDED, " ", normalized(text))
+    return {int(value) for pattern in kind_patterns for value in re.findall(pattern, chosen, re.IGNORECASE)}
+
+
+def _reference_conflict(texts: list[str], proposal: OperationProposal, policies: OperationPolicies) -> bool:
     binding = policies.get(proposal.operation_id).reference
     if binding is None:
         return False
-    kind = policies.references[binding.kind]
-    chosen = re.sub(_EXCLUDED, " ", text)
-    stated = {int(value) for pattern in kind.patterns for value in re.findall(pattern, chosen, re.IGNORECASE)}
+    patterns = policies.references[binding.kind].patterns
+    # An answer's own reference settles an ambiguity the earlier request left open.
+    stated = next((found for found in (_references(text, patterns) for text in texts) if found), set())
     return bool(stated) and stated != {proposal.arguments.get(binding.argument)}
 
 
-def _subtitle_conflict(text: str, values: dict[str, Any], require_all: bool) -> bool:
-    pixels = {int(value) for value in re.findall(_PX, text)}
-    # "64pxに" / "64pxで" names the size itself, even next to "大きく".
-    targets = {int(value) for value in re.findall(_PX + r"\s*(?:に|へ|で)", text)}
+def _subtitle_conflict(stated: _Stated, values: dict[str, Any]) -> bool:
     absolute, delta = values.get("subtitle_font_size"), values.get("subtitle_font_size_delta")
-    up, down = bool(re.search(_UP, text)), bool(re.search(_DOWN, text))
-    if require_all and pixels and absolute is None and delta is None:
-        return True
-    if absolute is not None and ((targets and absolute not in targets)
-                                 or (pixels and absolute not in pixels and not (up or down))):
+    if absolute is not None and ((stated.targets and absolute not in stated.targets)
+                                 or (stated.pixels and absolute not in stated.pixels
+                                     and not (stated.up or stated.down))):
         return True
     if delta is not None:
-        if (delta > 0 and down and not up) or (delta < 0 and up and not down):
+        if (delta > 0 and stated.down and not stated.up) or (delta < 0 and stated.up and not stated.down):
             return True
-        if pixels and (abs(delta) not in pixels or not (up or down) or bool(targets)):
+        if stated.pixels and (abs(delta) not in stated.pixels or not (stated.up or stated.down)
+                              or bool(stated.targets)):
             return True
     return False
 
 
-def _stated_settings(text: str, policies: OperationPolicies) -> dict[str, tuple[float, bool]]:
-    """Each setting keyword takes the first number after it, within its clause.
-
-    The flag tells a negated statement ("話速を1.2倍にしないで") from a request.
-    """
-    plain = re.sub(_PX, " ", text)
-    hits: list[tuple[int, int, str, str | None]] = []
-    for name, patterns in policies.setting_keywords.items():
-        for pattern in patterns:
-            for match in re.finditer(pattern, plain):
-                hits.append((match.start(), match.end(), name, match.group(1) if match.groups() else None))
-    hits.sort()
-    stated: dict[str, tuple[float, bool]] = {}
-    for index, (start, end, name, captured) in enumerate(hits):
-        negated = bool(re.search(_NEGATION, re.split(_CLAUSE_END, plain[start:], maxsplit=1)[0]))
-        if captured is not None:
-            stated.setdefault(name, (float(captured), negated))
-            continue
-        limit = hits[index + 1][0] if index + 1 < len(hits) else len(plain)
-        window = re.split(_CLAUSE_END, plain[end:limit], maxsplit=1)[0]
-        number = re.search(_NUMBER, window)
-        if number is not None:
-            stated.setdefault(name, (float(number.group()), negated))
-    return stated
-
-
-def _settings_conflict(text: str, proposal: OperationProposal, policies: OperationPolicies,
+def _settings_conflict(stated: _Stated, proposal: OperationProposal, policies: OperationPolicies,
                        require_all: bool) -> bool:
     view = policies.settings_view(proposal.operation_id, proposal.operation_version)
     if view is None:
         return False
-    if _subtitle_conflict(text, settings_values(view, proposal.arguments), require_all):
+    values = settings_values(view, proposal.arguments)
+    if _subtitle_conflict(stated, values):
+        return True
+    if require_all and stated.pixels and values.get("subtitle_font_size") is None \
+            and values.get("subtitle_font_size_delta") is None:
         return True
     proposed = settings_base(view, proposal.arguments) or {}
-    for name, (value, negated) in _stated_settings(text, policies).items():
+    for name, current in proposed.items():
+        if type(current) in {int, float} and float(current) in stated.negated.get(name, set()):
+            return True  # sets exactly what the user said not to
+    for name, allowed in stated.settings.items():
         current = proposed.get(name)
-        matches = type(current) in {int, float} and float(current) == value
-        if negated:
-            if matches:
-                return True  # sets exactly what the user said not to
-        elif (current is None and require_all) or (current is not None and not matches):
-            return True  # a stated value that is dropped or changed is never a guess
+        if current is None:
+            if require_all:
+                return True  # a stated value that is dropped is never a guess
+        elif type(current) not in {int, float} or float(current) not in allowed:
+            return True
     return False
 
 
 def explicit_conflict(texts: list[str], proposal: OperationProposal, *, require_all: bool = True) -> bool:
-    """True when the proposal contradicts (or, for a whole request, drops) a stated value or reference."""
+    """True when the proposal contradicts (or, for a whole request, drops) a stated value or reference.
+
+    ``texts`` lists the current request first, then any unsaved request it answers.
+    """
     policies = load_policies()
-    text = _normalized("\n".join(texts))
-    return (_reference_conflict(text, proposal, policies)
-            or _settings_conflict(text, proposal, policies, require_all))
+    return (_reference_conflict(texts, proposal, policies)
+            or _settings_conflict(_read(texts, policies), proposal, policies, require_all))
+
+
+def plan_drops_stated(texts: list[str], steps: list[OperationProposal]) -> bool:
+    """True when no step of a plan carries a stated setting or subtitle size."""
+    policies = load_policies()
+    stated = _read(texts, policies)
+    carried: dict[str, set[float]] = {}
+    subtitle = False
+    for step in steps:
+        view = policies.settings_view(step.operation_id, step.operation_version)
+        if view is None:
+            continue
+        values = settings_values(view, step.arguments)
+        subtitle |= values.get("subtitle_font_size") is not None or values.get("subtitle_font_size_delta") is not None
+        for name, value in (settings_base(view, step.arguments) or {}).items():
+            if type(value) in {int, float}:
+                carried.setdefault(name, set()).add(float(value))
+    if stated.pixels and not subtitle:
+        return True
+    return any(not (carried.get(name, set()) & allowed) for name, allowed in stated.settings.items())

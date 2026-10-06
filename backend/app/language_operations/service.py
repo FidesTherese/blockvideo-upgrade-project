@@ -17,7 +17,7 @@ from app.language_operations.candidate_state import current_candidates
 from app.language_operations.contracts import (
     LanguageError, LanguageExecution, LanguageInput, LanguageResponse, YoloReport,
 )
-from app.language_operations.explicit_values import explicit_conflict
+from app.language_operations.explicit_values import explicit_conflict, plan_drops_stated
 from app.language_operations.intent_guard import negative_control_reason, only_negated_instructions
 from app.language_operations.references import reference_question
 from app.language_operations.pronunciation import merged_arguments, reading_question
@@ -31,6 +31,11 @@ from app.operations.policies import load_policies
 from app.operations.service import OperationService
 from app.semantic_interpretation.interface import CandidateInterpreter
 
+
+
+_STATED_VALUE_QUESTION = ClarificationProposal(
+    kind="clarification", missing_fields=["arguments"],
+    question="依頼に書かれた値や番号と、提案された内容が一致しません。値をもう一度指定してください。まだ何も変更していません。")
 
 
 class LanguageOperationService:
@@ -113,8 +118,6 @@ class LanguageOperationService:
                     """
                     empty = ClarificationProposal(kind="clarification", question="どの設定を、どの値に変更しますか？",
                                                   missing_fields=["arguments"])
-                    contradiction = ClarificationProposal(kind="clarification", missing_fields=["arguments"],
-                        question="依頼に書かれた値や番号と、提案された内容が一致しません。値をもう一度指定してください。まだ何も変更していません。")
                     checks = (
                         ("reference", lambda: reference_question(
                             dialogue.reference_text(request, turns, proposed), proposed)),
@@ -124,7 +127,7 @@ class LanguageOperationService:
                         ("reading", lambda: reading_question([turn.text for turn in turns] + [request.text], proposed)),
                         ("empty_settings", lambda: empty if load_policies().get(proposed.operation_id).requires_arguments
                          and not proposed.arguments else None),
-                        ("explicit_value", lambda: contradiction if explicit_conflict(
+                        ("explicit_value", lambda: _STATED_VALUE_QUESTION if explicit_conflict(
                             stated_texts, proposed, require_all=whole_request) else None),
                     )
                     for code, check in checks:
@@ -168,6 +171,9 @@ class LanguageOperationService:
                         if question is not None:
                             break
                         plan_steps.append(step)
+                    if question is None and plan_steps and plan_drops_stated(stated_texts, plan_steps):
+                        # The plan as a whole must carry every value the user stated.
+                        question, guard_code = _STATED_VALUE_QUESTION, "explicit_value"
                 if question is None and negative_reason is None and isinstance(outcome.proposal, OperationProposal):
                     negative_reason = negative_control_reason(request.text, outcome.proposal.operation_id)
                 if question is None and isinstance(outcome.proposal, PlanProposal) and (negated_plan or not plan_steps):
