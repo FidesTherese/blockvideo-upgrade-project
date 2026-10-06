@@ -78,6 +78,12 @@ point is not one) and after a te-form request ("〜して"), "〜ないで", "�
 "〜うえで". A te-form that runs into a polite negation or a request ending
 ("止めていただかなくていい", "してください") stays in one clause. Stated values,
 subtitle directions, pixel sizes and named negations are read within one clause.
+Quoted text (「…」) is never split, "について" / "において" are not te-form requests,
+and a negated te-form ("言っていません") stays with its clause. A keyword whose number
+comes in the next clause ("音量を調整して0.8倍にして") and a subtitle direction in the
+next clause carry over; a carried number must not count something else ("もう1回").
+"いや、" / "やっぱり" replace the value stated just before. These rules are a
+supporting check, not a parser: unusual phrasings can still be missed or over-asked.
 
 ### Guessing versus contradicting (YOLO)
 
