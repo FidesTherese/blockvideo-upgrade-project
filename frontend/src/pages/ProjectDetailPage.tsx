@@ -5,6 +5,8 @@ import { Layout } from '@/components/Layout';
 import { useProject, useProjectBlocks, useProjectHistory } from '@/api/hooks';
 import { useProjectOperation } from '@/api/useProjectOperation';
 import { useLanguageRequest } from '@/api/useLanguageRequest';
+import { useQuery } from '@tanstack/react-query';
+import { api } from '@/api/client';
 import { LanguagePanel } from '@/components/LanguagePanel';
 import { LanguageConnection } from '@/components/LanguageConnection';
 import { LanguageTargetSelect } from '@/components/LanguageTargetSelect';
@@ -28,6 +30,10 @@ function ProjectMonitor({ id }: { id: number }) {
   const history = useProjectHistory(id);
   const command = useProjectOperation(id);
   const language = useLanguageRequest(id);
+  // Same cached query as the connection panel; YOLO is offered only if the server allows it.
+  const connection = useQuery({ queryKey: ['language-connection'], queryFn: () => api.languageConnection(),
+    retry: false, staleTime: Infinity, refetchOnWindowFocus: false });
+  const yoloAvailable = connection.data?.yolo_enabled === true;
   const actionRevalidation = useRef(false);
   const [revalidatingAction, setRevalidatingAction] = useState(false);
   const [actionRefreshRequired, setActionRefreshRequired] = useState(false);
@@ -141,7 +147,7 @@ function ProjectMonitor({ id }: { id: number }) {
       </div>
       <LanguageTargetSelect projectId={id} />
       <LanguageConnection />
-      <LanguagePanel project={p} history={history.data} controller={language}
+      <LanguagePanel project={p} history={history.data} controller={language} yoloAvailable={yoloAvailable}
         disabled={command.locked} unavailable={!history.data || !!history.error || viewsDiffer} running={running} />
       <div className="mt-6 rounded-lg border border-slate-200 bg-white p-4">
         <ProgressBar progress={p.progress} stage={p.current_stage} status={p.status} />
@@ -171,7 +177,8 @@ function ProjectMonitor({ id }: { id: number }) {
         <p>「{command.pending.label}」の応答が未確認です。同じ要求を再送して結果を確認できます。二重には実行されません。</p>
         <button type="button" className="btn-secondary" onClick={command.resend}>同じ要求を再送する</button>
       </div>}
-      {history.data && <ProjectOutputHistory projectId={id} history={history.data} legacyVideo={!!p.output_video_path} />}
+      {history.data && <ProjectOutputHistory projectId={id} history={history.data} legacyVideo={!!p.output_video_path}
+        disabled={blocked} onRestore={(artifactId) => command.execute('project.artifact.restore', revision, { artifact_id: artifactId }, '完成動画を戻す')} />}
       <ProjectSettingsEditor key={`${id}:${p.revision}`} project={p} disabled={blocked}
         onSave={(changes) => command.execute('project.settings.update', p.revision, changes, '設定保存')} />
       {history.data && <>

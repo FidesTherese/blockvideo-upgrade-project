@@ -2,8 +2,9 @@
 import { api } from '@/api/client';
 import type { ProjectHistory } from '@/lib/types';
 
-export function ProjectOutputHistory({ projectId, history, legacyVideo }: {
+export function ProjectOutputHistory({ projectId, history, legacyVideo, onRestore, disabled = false }: {
   projectId: number; history: ProjectHistory; legacyVideo: boolean;
+  onRestore?: (artifactId: number) => void; disabled?: boolean;
 }) {
   const latest = history.artifacts.find((artifact) => artifact.id === history.current_artifact_id) ?? history.artifacts[0];
   const showLegacy = !latest && legacyVideo && history.current_artifact_id == null && history.output_state !== 'missing';
@@ -33,6 +34,8 @@ export function ProjectOutputHistory({ projectId, history, legacyVideo }: {
             {artifact.available ? <div className="flex gap-2">
               <a className="btn-secondary" href={artifact.video_url}>動画 {artifact.id} を開く・保存</a>
               {artifact.subtitle_url && <a className="btn-secondary" href={artifact.subtitle_url}>字幕</a>}
+              {onRestore && artifact.id !== history.current_artifact_id && <button type="button" className="btn-secondary"
+                disabled={disabled} onClick={() => onRestore(artifact.id)}>動画 {artifact.id} を現在の動画に戻す</button>}
             </div> : <span className="text-red-600">ファイルが見つかりません</span>}
           </li>
         ))}

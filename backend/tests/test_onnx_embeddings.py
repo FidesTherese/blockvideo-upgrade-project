@@ -101,3 +101,14 @@ async def test_invalid_query_never_reaches_encoder(encoder, value: object) -> No
     with pytest.raises(RetrievalError, match="query_too_long_or_empty"):
         await adapter.embed_query(value)
     assert not seen
+
+
+async def test_document_batch_limit_matches_the_index_limit(encoder) -> None:
+    from app.operations.limits import MAX_INDEX_DOCUMENTS
+
+    adapter, _ = encoder
+    # A 1,000-operation catalog has more than 4,096 documents; the index accepts them.
+    vectors = await adapter.embed_documents(tuple(f"文書{i}" for i in range(5000)))
+    assert len(vectors) == 5000
+    with pytest.raises(RetrievalError, match="invalid_embedding_input"):
+        await adapter.embed_documents(tuple("x" for _ in range(MAX_INDEX_DOCUMENTS + 1)))

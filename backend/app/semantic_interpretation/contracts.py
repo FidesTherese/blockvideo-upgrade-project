@@ -9,11 +9,12 @@ from app.interpretation.contracts import CandidateRef, InterpretationOutcome, St
 from app.retrieval.contracts import Digest
 from app.retrieval.ranking import RankedCandidate
 from app.operations.contracts import CandidateReadinessSnapshot
+from app.operations.limits import MAX_CATALOG_OPERATIONS, MAX_PROMPT_CANDIDATES
 
 
 class SearchStage(StrictValue):
-    name: Literal["initial", "expanded", "all_tools"]
-    candidates: tuple[CandidateRef, ...] = Field(max_length=32, strict=False)
+    name: Literal["initial", "expanded", "wide", "all_tools"]
+    candidates: tuple[CandidateRef, ...] = Field(max_length=MAX_PROMPT_CANDIDATES, strict=False)
     candidate_state: CandidateReadinessSnapshot | None = None
     result: Literal["proposed", "needs_input", "unsupported", "dismissed", "error"]
     chat_calls: int = Field(ge=0, le=2)
@@ -25,7 +26,7 @@ class SearchStage(StrictValue):
 class SearchTrace(StrictValue):
     policy: Literal["semantic-3-6-all-v1", "semantic-5-8-all-v1", "all-tools-v1"] = "semantic-5-8-all-v1"
     index_sha256: Digest | None = None
-    ranking: tuple[RankedCandidate, ...] = Field(default=(), max_length=256, strict=False)
+    ranking: tuple[RankedCandidate, ...] = Field(default=(), max_length=MAX_CATALOG_OPERATIONS, strict=False)
     stages: tuple[SearchStage, ...] = Field(default=(), max_length=3, strict=False)
     expansion_count: int = Field(default=0, ge=0, le=1)
     all_tools_count: int = Field(default=0, ge=0, le=1)
@@ -34,7 +35,8 @@ class SearchTrace(StrictValue):
     chat_calls: int = Field(default=0, ge=0, le=4)
     elapsed_ms: int = Field(default=0, ge=0)
     reason: Literal["ranked", "candidate_insufficient", "search_unavailable", "no_candidates",
-                    "integrity_failure", "fallback_unavailable", "deadline", "model_failure"] = "ranked"
+                    "integrity_failure", "fallback_unavailable", "deadline", "model_failure",
+                    "unsupported_without_full_scope"] = "ranked"
 
 
 class SemanticOutcome(StrictValue):

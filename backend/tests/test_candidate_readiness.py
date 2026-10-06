@@ -144,7 +144,7 @@ def test_all_fallback_stages_keep_blocked_and_refresh_same_revision(harness: Any
     response = client.post("/api/language/requests", json={"request_id": "changing", "text": "話速を1.2倍にして",
         "target": {"project_id": project["id"]}, "base_revision": 1, "review_all": True}).json()
     stages = response["diagnostics"]["retrieval"]["stages"]
-    assert [len(s["candidates"]) for s in stages] == [5, 8, 9]
+    assert [len(s["candidates"]) for s in stages] == [5, 8, 10]
     settings = [next(c for c in s["candidate_state"]["candidates"]
                      if c["operation_id"] == "project.settings.update" and c["operation_version"] == 1) for s in stages]
     assert [c["revision"] for c in settings] == [1, 1, 1]

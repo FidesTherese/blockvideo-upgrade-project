@@ -100,4 +100,5 @@ def test_catalog_exposes_every_patchable_setting_without_extra_handlers() -> Non
     definition = next(item for item in operation_service.list_definitions()
                       if item.operation_id == "project.settings.update")
     assert set(definition.input_schema["properties"]) == set(ProjectPatch.model_fields)
-    assert len({item.operation_id for item in operation_service.list_definitions()}) == 8
+    # Settings stay one operation; the ninth ID is the later artifact restore.
+    assert len({item.operation_id for item in operation_service.list_definitions()}) == 9

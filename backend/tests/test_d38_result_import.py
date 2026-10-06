@@ -283,6 +283,7 @@ D38_PATHS = (
     "backend/app/operations/catalog.py",
     "backend/app/operations/contracts.py",
     "backend/app/operations/definitions.json",
+    "backend/app/operations/limits.py",
     "backend/app/operations/schema_validation.py",
     "backend/evaluation/__init__.py",
     "backend/evaluation/blinded_contracts.py",

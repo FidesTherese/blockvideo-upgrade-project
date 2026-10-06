@@ -1,53 +1,13 @@
-"""Deterministic negative-control intent guard."""
+"""Deterministic negative-control intent guard driven by operation policies."""
 from __future__ import annotations
 
 import re
 import unicodedata
 
-_APOSTROPHE_TRANSLATION = str.maketrans({"\u2018": "'", "\u2019": "'", "\uff07": "'"})
+from app.language_operations.clauses import clauses
+from app.operations.policies import load_policies
 
-MUTATING_OPERATIONS: frozenset[str] = frozenset({
-    "project.subtitle-font-size.adjust",
-    "project.subtitle-font-size.set",
-    "project.settings.update",
-    "project.generation.start",
-    "project.generation.cancel",
-    "project.generation.retry",
-    "project.settings.restore",
-})
-RETRY_OPERATIONS: frozenset[str] = frozenset({"project.generation.retry"})
-CANCELLATION_OPERATIONS: frozenset[str] = frozenset({"project.generation.cancel"})
-GENERATION_OPERATIONS: frozenset[str] = frozenset({"project.generation.start"})
-
-GLOBAL_NEGATIVE_PHRASES: frozenset[str] = frozenset({
-    "何もしない",
-    "実行しない",
-    "変更しない",
-    "do nothing",
-    "do not execute",
-    "don't execute",
-})
-RETRY_NEGATIVE_PHRASES: frozenset[str] = frozenset({
-    "再試行しない",
-    "再実行しない",
-    "やり直さない",
-    "do not retry",
-    "don't retry",
-})
-CANCELLATION_NEGATIVE_PHRASES: frozenset[str] = frozenset({
-    "キャンセルしない",
-    "取り消さない",
-    "停止しない",
-    "do not cancel",
-    "don't cancel",
-})
-GENERATION_NEGATIVE_PHRASES: frozenset[str] = frozenset({
-    "生成しない",
-    "開始しない",
-    "作り直さない",
-    "do not generate",
-    "don't generate",
-})
+_APOSTROPHE_TRANSLATION = str.maketrans({"‘": "'", "’": "'", "＇": "'"})
 
 
 def normalized_intent(text: str) -> str:
@@ -56,17 +16,29 @@ def normalized_intent(text: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
-def negative_control_reason(text: str, operation_id: str) -> str | None:
-    if operation_id not in MUTATING_OPERATIONS:
-        return None
+def only_negated_instructions(text: str) -> bool:
+    """True when the request contains a negated instruction and nothing else to do."""
+    policies = load_policies()
+    negated, residue = policies.negated_clause_pattern, policies.negation_residue_pattern
+    if negated is None or residue is None:
+        return False
+    remainder, removed = re.subn(negated, "", normalized_intent(text))
+    return removed > 0 and re.fullmatch(residue, remainder) is not None
 
+
+def negative_control_reason(text: str, operation_id: str) -> str | None:
+    policies = load_policies()
+    policy = policies.get(operation_id)
+    if not policy.mutates:
+        return None
     normalized = normalized_intent(text)
-    if any(phrase in normalized for phrase in GLOBAL_NEGATIVE_PHRASES):
+    if any(phrase in normalized for phrase in policies.global_negative_phrases):
         return "explicit_negative_intent"
-    if operation_id in RETRY_OPERATIONS and any(phrase in normalized for phrase in RETRY_NEGATIVE_PHRASES):
+    if any(phrase in normalized for phrase in policy.negative_phrases):
         return "explicit_negative_intent"
-    if operation_id in CANCELLATION_OPERATIONS and any(phrase in normalized for phrase in CANCELLATION_NEGATIVE_PHRASES):
+    # A named negation must sit in one clause: "設定を第2版に戻して動画は戻さないで" negates only the video.
+    if any(re.search(pattern, clause) for pattern in policy.negative_patterns for clause in clauses(text)):
         return "explicit_negative_intent"
-    if operation_id in GENERATION_OPERATIONS and any(phrase in normalized for phrase in GENERATION_NEGATIVE_PHRASES):
+    if only_negated_instructions(text):
         return "explicit_negative_intent"
     return None

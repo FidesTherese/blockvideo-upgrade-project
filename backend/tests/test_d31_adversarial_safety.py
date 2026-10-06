@@ -613,7 +613,9 @@ def test_normalized_intent(raw: str, expected: str) -> None:
 
 @pytest.mark.parametrize(("text", "operation_id", "expected"), [
     ("ジョブ7は再試行しないで", "project.generation.retry", "explicit_negative_intent"),
-    ("ジョブ7は再試行しないで", "project.generation.cancel", None),
+    # A request made only of negated instructions blocks every mutating proposal.
+    ("ジョブ7は再試行しないで", "project.generation.cancel", "explicit_negative_intent"),
+    ("ジョブ7は再試行しないでキャンセルして", "project.generation.cancel", None),
     ("キャンセルしないで", "project.generation.cancel", "explicit_negative_intent"),
     ("動画を生成しないで", "project.generation.start", "explicit_negative_intent"),
     ("何もしないで", "project.settings.update", "explicit_negative_intent"),

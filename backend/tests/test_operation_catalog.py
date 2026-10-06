@@ -42,6 +42,7 @@ def test_package_catalog_loads_versioned_operations() -> None:
     path = Path(__file__).parents[1] / "app" / "operations" / "definitions.json"
     catalog = load_catalog(path)
     assert [item.operation_id for item in catalog.definitions] == [
+        "project.artifact.restore",
         "project.generation.cancel",
         "project.generation.retry",
         "project.generation.start",

@@ -88,10 +88,11 @@ async def run(runner: SemanticInterpreter, adapter: Replies, text: str = "字幕
 async def test_narrow_failure_expands_once_then_full_and_only_final_is_proposal(setup, first) -> None:
     runner, encoder, *_ = setup
     adapter = Replies([first, UNSUPPORTED, SET])
-    result = await run(runner, adapter)
+    # No lexical overlap with any annotation, so uniform vectors decide the stages.
+    result = await run(runner, adapter, text="zq")
     assert result.interpretation.status == "proposed"
     assert result.interpretation.proposal.arguments == {"value": 56}
-    assert [len(c["candidates"]) for c in adapter.calls] == [5, 8, 9]
+    assert [len(c["candidates"]) for c in adapter.calls] == [5, 8, 10]
     assert encoder.calls == result.trace.embedding_calls == 1
     assert result.trace.chat_calls == 3
     assert result.trace.expansion_count == result.trace.all_tools_count == 1
@@ -122,6 +123,22 @@ async def test_no_all_tools_returns_question_not_unsupported(setup) -> None:
     assert result.interpretation.status == "needs_input" and result.trace.chat_calls == 2
     assert result.trace.reason == "fallback_unavailable"
     assert result.trace.all_tools_count == 0
+
+
+@pytest.mark.parametrize("replies,status,text", [([UNSUPPORTED] * 3, "unsupported", "動画をメールして"),
+                                                  ([QUESTION, UNSUPPORTED, UNSUPPORTED], "needs_input", "動画をメールして"),
+                                                  ([UNSUPPORTED, UNSUPPORTED, SET], "proposed", "字幕を56pxにして")])
+async def test_catalog_too_large_for_all_tools_trusts_only_unanimous_unsupported(setup, monkeypatch,
+                                                                                replies, status, text) -> None:
+    runner, *_ = setup
+    # Pretend the 9-operation catalog cannot be shown at once (as with 1,000 operations).
+    monkeypatch.setattr("app.semantic_interpretation.service.MAX_PROMPT_CANDIDATES", 5)
+    result = await run(runner, Replies(list(replies)), text)
+    assert result.interpretation.status == status and result.trace.all_tools_count == 0
+    assert [stage.name for stage in result.trace.stages] == ["initial", "expanded", "wide"]
+    assert result.trace.reason == {"unsupported": "unsupported_without_full_scope",
+                                   "needs_input": "fallback_unavailable",
+                                   "proposed": "candidate_insufficient"}[status]
 
 
 @pytest.mark.parametrize("reason", ["connection_failed", "timeout", "http_error", "model_mismatch"])
@@ -193,7 +210,7 @@ async def test_prompt_order_is_canonical_even_when_ranking_is_different(setup, m
     from app.semantic_interpretation import service
     runner, _, scope, sources, _ = setup
     ranking = rank_operations(runner._load(sources), (1.0, 0.0), scope, sources)
-    monkeypatch.setattr(service, "rank_operations", lambda *_args: tuple(reversed(ranking)))
+    monkeypatch.setattr(service, "rank_operations", lambda *_args, **_kwargs: tuple(reversed(ranking)))
     adapter = Replies([SET])
     result = await run(runner, adapter)
     actual = [(r["operation_id"], r["operation_version"]) for r in adapter.calls[0]["candidates"]]
@@ -224,10 +241,10 @@ def test_ranking_deduplicates_versions_and_keeps_stable_ties(setup) -> None:
     runner, _, scope, sources, _ = setup
     index = runner._load(sources)
     ranked = rank_operations(index, (4.0, 0.0), scope, sources)
-    assert len(ranked) == 9 and all(c.score == 1.0 for c in ranked)
+    assert len(ranked) == 10 and all(c.score == 1.0 for c in ranked)
     assert [r.key for r in ranked] == sorted({d.key for d in sources.documents})
     assert len([r for r in ranked if r.operation_id == "project.settings.update"]) == 2
-    assert [r.score for r in rank_operations(index, (-1.0, 0.0), scope, sources)] == [-1.0] * 9
+    assert [r.score for r in rank_operations(index, (-1.0, 0.0), scope, sources)] == [-1.0] * 10
     with pytest.raises(RetrievalError):
         rank_operations(index, (float("nan"), 0.0), scope, sources)
 

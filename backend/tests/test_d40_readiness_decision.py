@@ -198,11 +198,11 @@ def _decide(world: dict[str, Any], **overrides: Any) -> decision.ReadinessDecisi
     return decision.decide_readiness(**arguments)
 
 
-def test_every_gate_passing_is_ready_with_all_tools_default(world: dict[str, Any]) -> None:
+def test_every_gate_passing_is_ready_with_stateful_default(world: dict[str, Any]) -> None:
     world["freeze"]
-    # Both modes pass; stateful 14/15 is below all-tools 15/15, so all-tools stays default.
+    # Stateful is the default by decision even when All Tools scores higher (15/15 vs 14/15).
     result = _decide(world, bundle=_bundle(world, stateful=((10, 9), (5, 5))))
-    assert result.outcome == "Ready" and result.blockers == [] and result.selected_default == "all_tools"
+    assert result.outcome == "Ready" and result.blockers == [] and result.selected_default == "stateful"
     assert result.decision_tool_sha256 == world["tool"]["aggregate_sha256"]
     assert set(result.input_sha256) == {"freeze_manifest", "d38_accepted_result", "d38_validation", "d38_tool_attestation",
                                         "d39_verification_manifest", "d39_verifier_tool_attestation",
@@ -210,33 +210,41 @@ def test_every_gate_passing_is_ready_with_all_tools_default(world: dict[str, Any
     assert len(result.gates) <= 64 and [gate.name for gate in result.gates][:2] == ["decision_tool_attestation", "freeze_manifest"]
 
 
-def test_stateful_is_default_only_when_it_passes_with_equal_or_better_ratio(world: dict[str, Any]) -> None:
+def test_stateful_default_must_pass_its_own_quality_gates(world: dict[str, Any]) -> None:
     world["freeze"]
-    assert _decide(world).selected_default == "stateful"  # exact tie
+    assert _decide(world).selected_default == "stateful"
     worse = _bundle(world, stateful=((10, 10), (5, 3)))
     result = _decide(world, bundle=worse)
-    assert result.outcome == "Not ready" and result.selected_default == "all_tools"
+    assert result.outcome == "Not ready" and result.selected_default == "stateful"
     assert "stateful_category_quality" in result.blockers
+
+
+def test_all_tools_quality_is_recorded_but_does_not_block(world: dict[str, Any]) -> None:
+    world["freeze"]
+    result = _decide(world, bundle=_bundle(world, all_tools=((10, 5), (5, 2))))
+    assert result.outcome == "Ready" and result.blockers == []
+    gate = next(item for item in result.gates if item.name == "all_tools_quality")
+    assert gate.passed and gate.detail.startswith("reference only") and gate.detail.endswith("met=no")
 
 
 @pytest.mark.parametrize(("first", "passed"), [(9, True), (8, False)])
 def test_overall_quality_uses_exact_integer_threshold(world: dict[str, Any], first: int, passed: bool) -> None:
     world["freeze"]
     # Exactly 18/20 = 90% passes; 17/20 fails. Both categories stay at or above 80%.
-    bundle = _bundle(world, sizes=(10, 10), all_tools=((10, first), (10, 9)))
+    bundle = _bundle(world, sizes=(10, 10), stateful=((10, first), (10, 9)))
     result = _decide(world, bundle=bundle)
-    assert ("all_tools_quality" in result.blockers) is (not passed)
-    assert "all_tools_category_quality" not in result.blockers
+    assert ("stateful_quality" in result.blockers) is (not passed)
+    assert "stateful_category_quality" not in result.blockers
 
 
 @pytest.mark.parametrize(("size", "task", "passed"), [(5, 4, True), (5, 3, False), (25, 20, True), (24, 19, False)])
 def test_category_quality_requires_eighty_percent(world: dict[str, Any], size: int, task: int, passed: bool) -> None:
     # 20/25 is exactly 80%; 19/24 (79.2%) is the nearest integer case just below it.
     world["freeze"]
-    result = _decide(world, bundle=_bundle(world, sizes=(10, size), all_tools=((10, 10), (size, task))))
-    assert ("all_tools_category_quality" in result.blockers) is (not passed)
+    result = _decide(world, bundle=_bundle(world, sizes=(10, size), stateful=((10, 10), (size, task))))
+    assert ("stateful_category_quality" in result.blockers) is (not passed)
     if not passed:
-        gate = next(item for item in result.gates if item.name == "all_tools_category_quality")
+        gate = next(item for item in result.gates if item.name == "stateful_category_quality")
         assert gate.detail.startswith("failed categories=1; first=")
 
 

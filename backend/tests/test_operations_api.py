@@ -42,6 +42,7 @@ def test_lists_definitions_from_the_catalog(client: TestClient) -> None:
     response = client.get("/api/operations")
     assert response.status_code == 200
     assert [item["operation_id"] for item in response.json()] == [
+        "project.artifact.restore",
         "project.generation.cancel",
         "project.generation.retry",
         "project.generation.start",

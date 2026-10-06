@@ -12,6 +12,8 @@ from app.interpretation.service import Interpreter
 from app.interpretation.transport import ModelMessage, StructuredAdapter
 from app.operations.catalog import OperationCatalog
 from app.operations.contracts import CandidateReadinessSnapshot
+from app.operations.limits import MAX_PROMPT_CANDIDATES
+from app.operations.policies import load_policies
 from app.retrieval.contracts import OperationRef, SearchScope
 from app.retrieval.ranking import rank_operations
 from app.retrieval.reader import VerifiedIndex, check_sources
@@ -109,18 +111,22 @@ class SemanticInterpreter:
                     trace = trace.model_copy(update={"reason": "search_unavailable"})
                 else:
                     # Integrity failure here must NOT become an encoder fallback.
-                    ranking = rank_operations(index, vector, scope, await asyncio.to_thread(self._sources))
+                    ranking = rank_operations(index, vector, scope, await asyncio.to_thread(self._sources), query_text=query)
                     trace = trace.model_copy(update={"ranking": ranking})
                 finally:
                     trace = trace.model_copy(update={"embedding_ms": round((perf_counter() - embed_started) * 1000)})
                 ranked_refs = tuple(CandidateRef(operation_id=r.operation_id, operation_version=r.operation_version) for r in ranking)
                 stages: list[tuple[str, tuple[CandidateRef, ...]]] = []
+                unsupported_stages = 0
                 if ranked_refs:
                     stages.append(("initial", ranked_refs[:5]))
                     if len(ranked_refs) > 5:
                         stages.append(("expanded", ranked_refs[:8]))
-                if self._allow_all and len(all_refs) <= 32 and (not stages or len(stages[-1][1]) < len(all_refs)):
+                if self._allow_all and len(all_refs) <= MAX_PROMPT_CANDIDATES and (not stages or len(stages[-1][1]) < len(all_refs)):
                     stages.append(("all_tools", all_refs))
+                elif self._allow_all and len(ranked_refs) > 8:
+                    # Too many operations to show at once: the widest ranked window stands in.
+                    stages.append(("wide", ranked_refs[:MAX_PROMPT_CANDIDATES]))
                 for name, refs in stages:
                     # Retrieval chooses membership; preserve canonical grammar branch
                     # order (including v1 before v2), as in the All Tools baseline.
@@ -146,8 +152,9 @@ class SemanticInterpreter:
                             chat_calls=meter.calls - before[0], request_bytes=meter.request_bytes - before[1],
                             response_bytes=meter.response_bytes - before[2], elapsed_ms=round((perf_counter() - stage_started) * 1000)))})
                     check_sources(index.manifest, await asyncio.to_thread(self._sources))
+                    follow_up = load_policies().follow_up_generation.operation_id
                     if (isinstance(outcome.proposal, OperationProposal) and outcome.proposal.generate_after_save
-                            and not any(r.operation_id == "project.generation.start" for r in all_refs)):
+                            and not any(r.operation_id == follow_up for r in all_refs)):
                         # Follow-up generation must not escape the host capability scope.
                         outcome = _question()
                         trace = trace.model_copy(update={"reason": "fallback_unavailable"})
@@ -158,11 +165,18 @@ class SemanticInterpreter:
                         break
                     if full or outcome.status in {"proposed", "dismissed"}:
                         break
+                    unsupported_stages += outcome.status == "unsupported"
                     trace = trace.model_copy(update={"reason": "candidate_insufficient"})
                 else:
-                    # Missing candidates or an unavailable full-scope check is not unsupported.
-                    outcome = _question()
-                    trace = trace.model_copy(update={"reason": "fallback_unavailable"})
+                    if (len(all_refs) > MAX_PROMPT_CANDIDATES and stages and stages[-1][0] == "wide"
+                            and unsupported_stages == len(stages)):
+                        # A catalog too large to show at once has no full-scope check; every stage,
+                        # up to the widest ranked window, agreeing on "unsupported" is the strongest answer.
+                        trace = trace.model_copy(update={"reason": "unsupported_without_full_scope"})
+                    else:
+                        # Missing candidates or an unavailable full-scope check is not unsupported.
+                        outcome = _question()
+                        trace = trace.model_copy(update={"reason": "fallback_unavailable"})
         except TimeoutError:
             trace = trace.model_copy(update={"reason": "deadline"})
             outcome = _failure("retrieval_deadline")

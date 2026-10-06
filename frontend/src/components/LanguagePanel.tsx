@@ -4,13 +4,29 @@ import type { LanguageController } from '@/api/useLanguageRequest';
 import type { ProjectDetail, ProjectHistory } from '@/lib/types';
 import { LanguageResultCard } from '@/components/LanguageResultCard';
 import { LanguageWaiting } from '@/components/LanguageWaiting';
+import { LanguageYoloReport } from '@/components/LanguageYoloReport';
+import { LanguagePlanCard } from '@/components/LanguagePlanCard';
 
-export function LanguagePanel({ project, history, controller, disabled, unavailable, running }: {
+const YOLO_KEY = 'blockvideo.language.yolo';
+
+function readYolo(): boolean {
+  try { return localStorage.getItem(YOLO_KEY) === 'on'; } catch { return false; }
+}
+
+function saveYolo(value: boolean): void {
+  try { localStorage.setItem(YOLO_KEY, value ? 'on' : 'off'); } catch { /* per-viewer convenience only */ }
+}
+
+export function LanguagePanel({ project, history, controller, disabled, unavailable, running, yoloAvailable = false }: {
   project: ProjectDetail; history?: ProjectHistory; controller: LanguageController;
   disabled: boolean; unavailable: boolean; running: boolean;
+  /** The server accepts unattended (YOLO) requests; the toggle itself defaults off. */
+  yoloAvailable?: boolean;
 }) {
   const [text, setText] = useState('');
   const [mode, setMode] = useState<'new' | 'answer' | 'correction'>('new');
+  const [yoloChosen, setYoloChosen] = useState(readYolo);
+  const yolo = yoloAvailable && yoloChosen && mode === 'new';
   const input = useRef<HTMLTextAreaElement>(null);
   const { session, response, busy, issue, uncertain, locked } = controller;
   const eligible = !!response?.dialogue_available && !response.superseded_by;
@@ -24,14 +40,15 @@ export function LanguagePanel({ project, history, controller, disabled, unavaila
   const edit = () => { setMode(canCorrect ? 'correction' : 'new'); setText(session?.request.text ?? ''); input.current?.focus(); };
   const send = () => {
     if (disabled || unavailable) return;
-    const sent = mode === 'new' ? controller.submit(text, project.revision) : controller.continueRequest(text, project.revision, mode);
+    const sent = mode === 'new' ? controller.submit(text, project.revision, yolo) : controller.continueRequest(text, project.revision, mode);
     if (sent) setText('');
   };
   return <section className="mt-6 rounded-xl border border-indigo-200 bg-indigo-50/40 p-4 sm:p-5" aria-label="自然言語で操作">
     <div className="flex flex-wrap items-start justify-between gap-2">
       <div><h2 className="text-base font-semibold text-slate-900">言葉で操作する</h2>
         <p className="mt-1 text-sm text-slate-600">対象: <strong>{project.title}</strong> · 設定の版 {project.revision}</p></div>
-      <span className="rounded-full bg-white px-3 py-1 text-xs text-indigo-700">設定の保存と動画生成を分けて確認</span>
+      <span className={yolo ? 'rounded-full bg-amber-100 px-3 py-1 text-xs text-amber-900' : 'rounded-full bg-white px-3 py-1 text-xs text-indigo-700'}>
+        {yolo ? 'YOLO：確認なしで最後まで実行' : '設定の保存と動画生成を分けて確認'}</span>
     </div>
     {eligible && !locked && <div className="mt-3 flex flex-wrap gap-2" aria-label="依頼の続け方">
       <button type="button" className="btn-secondary" aria-pressed={mode === 'new'} onClick={() => { setMode('new'); setText(''); }}>新しい依頼</button>
@@ -53,11 +70,19 @@ export function LanguagePanel({ project, history, controller, disabled, unavaila
         maxLength={2000} value={text} onChange={(event) => setText(event.target.value)}
         disabled={busy || uncertain} aria-describedby={`language-help-${project.id}`} />
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
-        <p id={`language-help-${project.id}`} className="text-xs text-slate-500">設定は送信後に保存します。動画生成は確認後に開始します。</p>
+        <p id={`language-help-${project.id}`} className="text-xs text-slate-500">{yolo
+          ? '確認や質問をせず、書かれていない値は推測して、設定の保存から動画の生成まで続けて実行します。'
+          : '設定は送信後に保存します。動画生成は確認後に開始します。'}</p>
         <button type="submit" className="btn-primary" disabled={disabled || unavailable || locked || !text.trim()}>
-          {busy ? session?.action === 'confirm' ? '開始要求を確認中…' : '依頼を確認中…' : mode === 'answer' ? '回答を送信' : mode === 'correction' ? '訂正を送信' : '依頼を送信'}
+          {busy ? session?.action === 'confirm' ? '開始要求を確認中…' : yolo ? '自動実行中…' : '依頼を確認中…'
+            : mode === 'answer' ? '回答を送信' : mode === 'correction' ? '訂正を送信' : yolo ? '確認なしで実行' : '依頼を送信'}
         </button>
       </div>
+      {yoloAvailable && mode === 'new' && <label className="mt-2 flex items-center gap-2 text-sm text-slate-700">
+        <input type="checkbox" checked={yoloChosen} disabled={busy}
+          onChange={(event) => { setYoloChosen(event.target.checked); saveYolo(event.target.checked); }} />
+        確認なしで最後まで実行（YOLO）
+      </label>}
     </form>
     {running && <p className="mt-3 text-sm text-amber-800">生成中です。状態の確認はできますが、設定変更は完了または停止後に行ってください。</p>}
     {session && <p className="mt-3 whitespace-pre-wrap break-words text-sm text-slate-600">今回の依頼: {session.request.text}</p>}
@@ -73,7 +98,11 @@ export function LanguagePanel({ project, history, controller, disabled, unavaila
         <button type="button" className="btn-secondary" onClick={controller.resend}>同じ要求を再送する</button>
       </div>
     </div>}
-    {response && <LanguageResultCard response={response} project={project} history={history}
+    {response && <LanguageYoloReport response={response} />}
+    {response?.plan && <LanguagePlanCard response={response} project={project} busy={busy}
+      disabled={disabled || running} unavailable={unavailable}
+      onConfirm={() => controller.confirm(project.revision)} onEdit={edit} />}
+    {response && !response.plan && <LanguageResultCard response={response} project={project} history={history}
       busy={busy} disabled={disabled || running} unavailable={unavailable}
       onConfirm={() => controller.confirm(project.revision)} onEdit={edit} />}
   </section>;

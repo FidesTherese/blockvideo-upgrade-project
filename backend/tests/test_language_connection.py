@@ -75,7 +75,8 @@ def test_route_exposes_only_allowlisted_config(monkeypatch: Any) -> None:
     app.include_router(routes.router, prefix="/api")
     body = TestClient(app).get("/api/language/connection").json()
     assert body == {"status": "configured", "model": "chosen",
-                    "base_url": "http://127.0.0.1:1234/v1", "cloud_fallback": False, "operation_mode": "all_tools"}
+                    "base_url": "http://127.0.0.1:1234/v1", "cloud_fallback": False, "operation_mode": "all_tools",
+                    "yolo_enabled": True}
 
 
 @pytest.mark.parametrize("index,readiness,mode", [(None, True, "all_tools"),

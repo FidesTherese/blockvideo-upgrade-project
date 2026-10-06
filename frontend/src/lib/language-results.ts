@@ -7,6 +7,7 @@ export const operationNames: Record<string, string> = {
   'project.subtitle-font-size.adjust': '字幕サイズの調整', 'project.settings.update': '設定の変更',
   'project.settings.restore': '設定の復元', 'project.generation.start': '動画の生成',
   'project.generation.retry': '現在の設定で再試行', 'project.generation.cancel': '生成のキャンセル',
+  'project.artifact.restore': '完成動画を戻す',
 };
 export const generationKinds: Record<string, string> = {
   full: '保存済みの設定で動画を生成', rerender: '動画のレンダリングを再実行',

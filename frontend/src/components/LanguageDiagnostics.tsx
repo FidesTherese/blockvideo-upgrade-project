@@ -26,7 +26,7 @@ export function LanguageDiagnostics({ response }: { response: LanguageResponse }
       <ol className="list-inside list-decimal break-all">{retrieval.ranking.map(c => <li key={`${c.operation_id}@${c.operation_version}`}>
         {c.operation_id} v{c.operation_version}: {c.score.toFixed(4)}
       </li>)}</ol>
-      {retrieval.stages.map(s => <div key={s.name} className="break-all"><p>{({ initial: '最初の候補', expanded: '候補を拡張', all_tools: '全操作' })[s.name]}:
+      {retrieval.stages.map(s => <div key={s.name} className="break-all"><p>{({ initial: '最初の候補', expanded: '候補を拡張', wide: '上位32件まで拡張', all_tools: '全操作' })[s.name]}:
         {s.candidates.length}件・呼出し{s.chat_calls}回・{duration(s.elapsed_ms)}・結果 {s.result}・入力{s.request_bytes} / 出力{s.response_bytes}バイト</p>
         {s.candidate_state && <p>この段階で残した実行不可の候補: {s.candidate_state.candidates.filter(c => c.readiness === 'blocked').length}件（判断時点の記録）</p>}
       </div>)}

@@ -120,8 +120,10 @@ async def test_minimal_payload_and_schema_are_candidate_specific(catalog: Operat
     payload = json.loads(messages[1].content)
     assert payload["state"] == {"selected_project_id": 101, "revision": 7, "subtitle_font_size": 48}
     candidate = payload["candidates"][0]
+    # Public metadata only; annotations shape retrieval, not the payload.
     assert set(candidate) == {"operation_id", "operation_version", "description", "examples", "arguments_schema"}
-    assert len(schema["properties"]["result"]["anyOf"]) == 4
+    # One operation, clarification, unsupported, no_operation and the plan branch.
+    assert len(schema["properties"]["result"]["anyOf"]) == 5
     branch = schema["properties"]["result"]["anyOf"][0]
     assert branch["properties"]["arguments"] == catalog.require(SET, 1).input_schema
     assert branch["properties"]["operation_id"]["enum"] == [SET]
@@ -186,13 +188,15 @@ def test_every_catalog_schema_can_be_offered_without_handlers(catalog: Operation
     refs = tuple(CandidateRef(operation_id=item.operation_id, operation_version=item.operation_version)
                  for item in catalog.definitions)
     schema = response_schema(select_candidates(catalog, refs))
-    assert len(schema["properties"]["result"]["anyOf"]) == len(catalog.definitions) + 3
+    assert len(schema["properties"]["result"]["anyOf"]) == len(catalog.definitions) + 4  # + plan
     assert "handler_key" not in json.dumps(schema)
 
 
 def test_interpretation_imports_no_execution_capability() -> None:
     root = CATALOG_PATH.parents[1] / "interpretation"
-    allowed_operations = {"app.operations.catalog", "app.operations.contracts"}
+    # Catalog-side metadata only (policies and limits hold no handlers or executors).
+    allowed_operations = {"app.operations.catalog", "app.operations.contracts",
+                          "app.operations.policies", "app.operations.limits", "app.operations.annotations"}
     for file in root.glob("*.py"):
         for node in ast.walk(ast.parse(file.read_text(encoding="utf-8"))):
             imports = [node.module or ""] if isinstance(node, ast.ImportFrom) else (

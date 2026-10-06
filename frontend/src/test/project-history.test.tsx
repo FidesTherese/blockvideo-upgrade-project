@@ -61,6 +61,20 @@ describe('output history', () => {
     expect(container.querySelector('video')).toHaveAttribute('src', '/api/video20');
   });
 
+  it('offers restoring an earlier available video as the current one', () => {
+    const onRestore = vi.fn();
+    const history = historyFixture({ output_state: 'current', current_artifact_id: 20, artifacts: [
+      { id: 20, job_id: 8, revision: 3, created_at: '2026-09-19T00:03:00Z', video_url: '/api/video20', subtitle_url: null, is_current: true, available: true },
+      { id: 19, job_id: 7, revision: 2, created_at: '2026-09-19T00:02:00Z', video_url: '/api/video19', subtitle_url: null, is_current: false, available: true },
+      { id: 18, job_id: 6, revision: 1, created_at: '2026-09-19T00:01:00Z', video_url: '/api/video18', subtitle_url: null, is_current: false, available: false },
+    ] });
+    render(<ProjectOutputHistory projectId={4} history={history} legacyVideo={false} onRestore={onRestore} />);
+    expect(screen.queryByRole('button', { name: '動画 20 を現在の動画に戻す' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '動画 18 を現在の動画に戻す' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '動画 19 を現在の動画に戻す' }));
+    expect(onRestore).toHaveBeenCalledWith(19);
+  });
+
   it('labels legacy videos whose settings were never recorded', () => {
     render(<ProjectOutputHistory projectId={4} history={historyFixture()} legacyVideo />);
     expect(screen.getByText('設定の対応未確認の以前の動画')).toBeInTheDocument();

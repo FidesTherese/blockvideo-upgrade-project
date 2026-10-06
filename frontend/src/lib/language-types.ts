@@ -7,6 +7,18 @@ export interface LanguageRequest {
   target: { selected_project_id: number };
   base_revision: number;
   continuation?: { parent_request_id: string; relation: 'answer' | 'correction' | 'dismiss' };
+  /** 'yolo': no confirmation or clarification; missing values are guessed and reported. */
+  mode?: 'normal' | 'yolo';
+}
+
+export type YoloGuardCode = 'reference' | 'subtitle_value' | 'settings_value' | 'pending_settings' | 'reading' | 'empty_settings';
+
+export interface YoloReport {
+  guessing_allowed: boolean;
+  bypassed_guards: YoloGuardCode[];
+  auto_confirmed: string[];
+  dropped_steps?: string[];
+  unresolved: string | null;
 }
 
 export interface LanguageConfirmation {
@@ -62,6 +74,11 @@ export interface LanguageResponse {
   failure: { reason_code: string; message: string; http_status?: number | null } | null;
   executed: boolean;
   generate_after_save?: boolean;
+  execution_mode?: 'normal' | 'yolo';
+  yolo_report?: YoloReport | null;
+  /** A multi-step plan, run in order after one confirmation (or unattended). */
+  plan?: OperationRequest[] | null;
+  plan_results?: Array<OperationResult & { changed?: boolean; base_revision?: number | null }>;
   generation_request?: OperationRequest | null;
   generation_result?: LanguageResponse['result'];
   diagnostics?: {
@@ -69,7 +86,7 @@ export interface LanguageResponse {
       policy: 'semantic-3-6-all-v1' | 'semantic-5-8-all-v1' | 'all-tools-v1';
       index_sha256: string | null;
       ranking: Array<{ operation_id: string; operation_version: number; score: number; document_id: string }>;
-      stages: Array<{ name: 'initial' | 'expanded' | 'all_tools'; candidates: Array<{ operation_id: string; operation_version: number }>;
+      stages: Array<{ name: 'initial' | 'expanded' | 'wide' | 'all_tools'; candidates: Array<{ operation_id: string; operation_version: number }>;
         candidate_state?: CandidateReadinessSnapshot | null;
         result: string; chat_calls: number; elapsed_ms: number; request_bytes: number; response_bytes: number }>;
       expansion_count: number; all_tools_count: number; embedding_calls: number;

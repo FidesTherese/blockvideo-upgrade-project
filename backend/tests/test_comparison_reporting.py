@@ -164,3 +164,13 @@ async def test_dismiss_is_excluded_from_model_agreement_without_relabelling(setu
     assert row["score"]["submit_effects_match"] and not row["score"]["proposal_match"]
     assert summary["model_called_trials"] == summary["model_proposals_match"] == 0
     assert summary["model_not_called_trials"] == 1
+
+
+async def test_running_job_cancel_ignores_the_after_event_publication_promise(setup: Any, tmp_path: Path) -> None:
+    case = CASES["D24-D061"]
+    assert case.expected.submit.job_assertions.get("no_future_publication") is True
+    proposal = {"kind": "operation", "operation_id": "project.generation.cancel", "operation_version": 1,
+                "arguments": {"job_id": 7}}
+    row = await run_trial(case, "B0", setup[0], Replies([proposal]), tmp_path / "cancel-running")
+    assert row["after_submit"]["jobs"][0]["cancel_requested"] is True
+    assert row["score"]["submit_effects_match"], row["score"]["checks"]

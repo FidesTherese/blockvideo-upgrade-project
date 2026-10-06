@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.operations.contracts import CandidateReadinessSnapshot
+from app.operations.limits import MAX_CATALOG_OPERATIONS, MAX_PLAN_STEPS
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=240, pattern=r"\S")]
 
@@ -39,9 +40,11 @@ class InterpretationInput(StrictValue):
     """One interpretation request with explicitly selected candidates."""
 
     text: str = Field(min_length=1, max_length=2000, pattern=r"\S")
-    candidates: tuple[CandidateRef, ...] = Field(min_length=1, max_length=32)
+    candidates: tuple[CandidateRef, ...] = Field(min_length=1, max_length=MAX_CATALOG_OPERATIONS)
     state: MinimalState = Field(default_factory=MinimalState)
     dialogue: tuple[DialogueContextTurn, ...] = Field(default=(), max_length=8)
+    # Unattended mode: the model must not ask; it proposes its best guess instead.
+    guess_missing: bool = False
     candidate_state: CandidateReadinessSnapshot | None = None
 
     @model_validator(mode="after")
@@ -91,8 +94,16 @@ class NoOperationProposal(StrictValue):
     reason: ShortText
 
 
+class PlanProposal(StrictValue):
+    """Ordered steps the application runs one by one; each step is an ordinary
+    operation proposal. The model never wires results between steps."""
+
+    kind: Literal["plan"]
+    steps: list[OperationProposal] = Field(min_length=2, max_length=MAX_PLAN_STEPS)
+
+
 Proposal = Annotated[
-    OperationProposal | ClarificationProposal | UnsupportedProposal | NoOperationProposal,
+    OperationProposal | ClarificationProposal | UnsupportedProposal | NoOperationProposal | PlanProposal,
     Field(discriminator="kind"),
 ]
 

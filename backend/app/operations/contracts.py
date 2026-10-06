@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.operations.limits import MAX_PROMPT_CANDIDATES
+
 
 class Readiness(str, Enum):
     """Final operation availability after target, value, and state checks."""
@@ -92,7 +94,7 @@ class CandidateReadinessSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     observed_at: float = Field(ge=0)
-    candidates: tuple[CandidateReadiness, ...] = Field(max_length=32, strict=False)
+    candidates: tuple[CandidateReadiness, ...] = Field(max_length=MAX_PROMPT_CANDIDATES, strict=False)
 
 
 class OperationResult(BaseModel):

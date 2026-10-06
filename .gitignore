@@ -41,3 +41,15 @@ tools/mermaid/node_modules/
 # Personal helper that reads local key files — not for distribution.
 scripts/run_blvd.py
 *.tsbuildinfo
+
+# Private development records: kept locally, never published.
+/AGENTS.md
+/specification.md
+/development_guideline.md
+/docs/plan-c/
+/docs/modules/
+/docs/DTD.md
+/docs/implementation-plan-*.md
+/evaluation/
+/backend/scripts/probe_catalog_scale.py
+/backend/tests/test_unofficial_probes.py

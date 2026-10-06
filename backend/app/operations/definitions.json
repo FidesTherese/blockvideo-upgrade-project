@@ -2,6 +2,34 @@
   "operations": [
     {
       "schema_version": 1,
+      "operation_id": "project.artifact.restore",
+      "operation_version": 1,
+      "description": "Make an earlier successful final video from the output history the project's current video, without changing settings or generating.",
+      "examples": [
+        "Make an earlier successful final video from the output history the project's current video."
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "additionalProperties": false
+      },
+      "handler_key": "project.restore_artifact",
+      "affected_artifacts": [
+        "video"
+      ],
+      "precondition_key": "project_editable",
+      "postcondition_key": "artifact_restored"
+    },
+    {
+      "schema_version": 1,
       "operation_id": "project.subtitle-font-size.adjust",
       "operation_version": 1,
       "description": "Resolve a relative subtitle change once using request_id and base_revision.",

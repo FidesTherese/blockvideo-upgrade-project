@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     language_base_url: str = "http://127.0.0.1:1234/v1"
     language_reasoning_effort: Literal["none"] | None = "none"
     language_review_all: bool = False
+    # Unattended requests (UI toggle, off per request by default) may run end to end.
+    language_yolo_enabled: bool = True
     # D27 opt-in: local verified index only; absence preserves All Tools.
     language_retrieval_index: Path | None = None
     language_retrieval_profile: Path = PROJECT_ROOT / "app/retrieval/e5-profile.json"

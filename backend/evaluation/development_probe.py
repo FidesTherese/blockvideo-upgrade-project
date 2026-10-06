@@ -9,6 +9,17 @@ from evaluation.contracts import Case
 from evaluation.corpus import eligibility, load_cases, load_review
 
 
+def unreviewed_development(cases_path: Path) -> tuple[list[Case], dict[str, Any]]:
+    """Every development case, for unofficial regression runs when approvals are stale.
+
+    The result is never an approved score: callers must label it unofficial.
+    """
+    cases = load_cases(cases_path)
+    if any(case.split != "development" for case in cases):
+        raise ValueError("development probe refuses held-out material")
+    return cases, {"unofficial": True, "approval_gate": "skipped", "total": len(cases)}
+
+
 def approved_development(cases_path: Path, human_path: Path, ai_path: Path) -> tuple[list[Case], dict[str, Any]]:
     cases = load_cases(cases_path)
     if any(case.split != "development" for case in cases):
