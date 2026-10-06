@@ -22,6 +22,8 @@ _UP = r"大き|上げ|増や|拡大"
 _DOWN = r"小さ|下げ|減ら|縮小"
 _SUBTITLE = r"字幕|フォント|文字の大きさ|文字サイズ"
 _NEGATION = r"ないで|なくて|しない|ません"
+# A clause that only checks a result ("64pxになったか確認して") states no new value.
+_CHECK_ONLY = r"確認|なったか|なっているか|なったこと"
 # "動画3ではなく動画4に" names 3 only to exclude it.
 _EXCLUDED = r"\d+\s*(?:番)?\s*(?:では|じゃ)なく(?:て)?"
 
@@ -32,30 +34,59 @@ class _Stated:
 
     pixels: set[int] = field(default_factory=set)
     targets: set[int] = field(default_factory=set)
+    negated_pixels: set[int] = field(default_factory=set)
     up: bool = False
     down: bool = False
-    settings: dict[str, set[float]] = field(default_factory=dict)
+    settings: dict[str, list[float]] = field(default_factory=dict)
     negated: dict[str, set[float]] = field(default_factory=dict)
+
+
+def _record(stated: _Stated, name: str, value: float, negated: bool) -> None:
+    if negated:
+        stated.negated.setdefault(name, set()).add(value)
+    else:
+        stated.settings.setdefault(name, []).append(value)
 
 
 def _read(texts: list[str], policies: OperationPolicies) -> _Stated:
     stated = _Stated()
+    # References ("動画1", "ジョブ7", "第2版") are never setting values.
+    references = [pattern for kind in policies.references.values() for pattern in kind.patterns]
+    pending: list[str] = []  # a keyword whose number comes in the next clause ("音量を調整して0.8倍にして")
+    subtitle_context = False  # "字幕を2px変えて小さくして": the direction follows in the next clause
     for clause in (part for text in texts for part in clauses(text)):
         negated = bool(re.search(_NEGATION, clause))
-        # Pixel sizes count only where the clause is about subtitles, or is just a size ("64px").
-        if re.search(_SUBTITLE, clause) or re.fullmatch(r"\s*" + _PX + r"\s*(?:で|に)?\s*(?:お願いします|して)?\s*", clause):
-            if not negated:
-                stated.pixels |= {int(value) for value in re.findall(_PX, clause)}
-                stated.targets |= {int(value) for value in re.findall(_PX + r"\s*(?:に|へ|で)", clause)}
-                stated.up |= bool(re.search(_UP, clause))
-                stated.down |= bool(re.search(_DOWN, clause))
+        if re.search(_CHECK_ONLY, clause):
+            pending, subtitle_context = [], False
+            continue
         plain = re.sub(_PX, " ", clause)
+        for pattern in references:
+            plain = re.sub(pattern, " ", plain, flags=re.IGNORECASE)
         hits: list[tuple[int, int, str, str | None]] = []
         for name, patterns in policies.setting_keywords.items():
             for pattern in patterns:
                 hits.extend((match.start(), match.end(), name, match.group(1) if match.groups() else None)
                             for match in re.finditer(pattern, plain))
         hits.sort()
+        # Pixel sizes count only where the clause is about subtitles, or is just a size ("64px").
+        about_subtitle = bool(re.search(_SUBTITLE, clause)) or (subtitle_context and not hits)
+        if about_subtitle or re.fullmatch(r"\s*" + _PX + r"\s*(?:で|に)?\s*(?:お願いします|して)?\s*", clause):
+            pixels = {int(value) for value in re.findall(_PX, clause)}
+            if negated:
+                stated.negated_pixels |= pixels
+            else:
+                stated.pixels |= pixels
+                stated.targets |= {int(value) for value in re.findall(_PX + r"\s*(?:に|へ|で)", clause)}
+                stated.up |= bool(re.search(_UP, clause))
+                stated.down |= bool(re.search(_DOWN, clause))
+        subtitle_context = about_subtitle
+        if not hits:
+            numbers = re.findall(_NUMBER, plain)
+            if numbers and len(pending) == 1:
+                _record(stated, pending[0], float(numbers[-1]), negated)
+            pending = []
+            continue
+        pending = []
         for index, (_, end, name, captured) in enumerate(hits):
             if captured is not None:
                 value = float(captured)
@@ -63,9 +94,10 @@ def _read(texts: list[str], policies: OperationPolicies) -> _Stated:
                 limit = hits[index + 1][0] if index + 1 < len(hits) else len(plain)
                 numbers = re.findall(_NUMBER, plain[end:limit])
                 if not numbers:
+                    pending = [name] if index + 1 == len(hits) else pending
                     continue
                 value = float(numbers[-1])  # "1.2倍から1.5倍に" asks for the last one
-            (stated.negated if negated else stated.settings).setdefault(name, set()).add(value)
+            _record(stated, name, value, negated)
     return stated
 
 
@@ -86,6 +118,8 @@ def _reference_conflict(texts: list[str], proposal: OperationProposal, policies:
 
 def _subtitle_conflict(stated: _Stated, values: dict[str, Any]) -> bool:
     absolute, delta = values.get("subtitle_font_size"), values.get("subtitle_font_size_delta")
+    if absolute is not None and absolute in stated.negated_pixels:
+        return True  # "字幕を64pxにしないで"
     if absolute is not None and ((stated.targets and absolute not in stated.targets)
                                  or (stated.pixels and absolute not in stated.pixels
                                      and not (stated.up or stated.down))):
@@ -119,7 +153,7 @@ def _settings_conflict(stated: _Stated, proposal: OperationProposal, policies: O
         if current is None:
             if require_all:
                 return True  # a stated value that is dropped is never a guess
-        elif type(current) not in {int, float} or float(current) not in allowed:
+        elif type(current) not in {int, float} or float(current) not in set(allowed):
             return True
     return False
 
@@ -135,8 +169,15 @@ def explicit_conflict(texts: list[str], proposal: OperationProposal, *, require_
 
 
 def plan_drops_stated(texts: list[str], steps: list[OperationProposal]) -> bool:
-    """True when no step of a plan carries a stated setting or subtitle size."""
+    """True when the plan leaves out a stated setting value or subtitle size.
+
+    A plan that restores a saved version or video may reach stated values through
+    the restore, so only plans without a restore step are checked.
+    """
     policies = load_policies()
+    if any(policies.get(step.operation_id).reference is not None
+           and policies.get(step.operation_id).reference.kind in {"revision", "artifact"} for step in steps):
+        return False
     stated = _read(texts, policies)
     carried: dict[str, set[float]] = {}
     subtitle = False
@@ -151,4 +192,5 @@ def plan_drops_stated(texts: list[str], steps: list[OperationProposal]) -> bool:
                 carried.setdefault(name, set()).add(float(value))
     if stated.pixels and not subtitle:
         return True
-    return any(not (carried.get(name, set()) & allowed) for name, allowed in stated.settings.items())
+    # Every stated value must appear: "話速を1.2倍に…話速を1.5倍に" needs both steps.
+    return any(not set(allowed) <= carried.get(name, set()) for name, allowed in stated.settings.items())
