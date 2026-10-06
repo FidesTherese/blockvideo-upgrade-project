@@ -71,6 +71,14 @@ The negated-clause pattern cannot extend across a te-form request ("…して"),
 `generate_after_save` whose request negates the follow-up generation operation is
 prepared as a save only (YOLO lists the generation in `dropped_steps`).
 
+### Clauses
+
+`language_operations.clauses` splits a normalized request at punctuation (a decimal
+point is not one) and after a te-form request ("〜して"), "〜ないで", "〜てから" or
+"〜うえで". A te-form that runs into a polite negation or a request ending
+("止めていただかなくていい", "してください") stays in one clause. Stated values,
+subtitle directions, pixel sizes and named negations are read within one clause.
+
 ### Guessing versus contradicting (YOLO)
 
 YOLO bypasses a clarifying guard only when `explicit_values.explicit_conflict` finds
@@ -83,7 +91,12 @@ proposed as a delta without a direction word; a delta against the stated directi
 changes or drops. Numbers are bound to settings through the policy file's
 `setting_keywords` (a keyword takes the first number after it within its clause, or
 a regex group such as "1.5倍速"). A setting with a keyword but no number may be
-guessed. A conflict keeps the guard's question.
+guessed. Pixel sizes count only in subtitle clauses (or a bare "64px" answer); a
+setting takes the last number of its clause ("1.2倍から1.5倍に" asks for 1.5); a
+negated clause forbids its value without requiring it. The same check is the
+normal-mode guard `explicit_value`, never bypassed in YOLO. Plan steps are checked
+for contradictions only, and `plan_drops_stated` requires the plan as a whole to
+carry every stated value. A conflict keeps the guard's question.
 
 Per-operation negations may also be regexes (`negative_patterns`), used where the
 target must be named: restores block on "動画3には戻さない" / "第2版には戻さない" but
