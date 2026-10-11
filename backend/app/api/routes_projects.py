@@ -16,6 +16,7 @@ from typing import TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -151,6 +152,17 @@ def _project_detail(project: Project, recovery_context: RecoveryContext) -> Proj
     )
 
 
+def _artifact_url(project_id: int, kind: str, index: int, stored: str | None) -> str | None:
+    """Artifact route with a content version, so a regenerated file is not served from cache."""
+    if not stored:
+        return None
+    url = f"/api/projects/{project_id}/artifacts/{kind}/{index}"
+    try:
+        return f"{url}?v={validate_artifact_path(stored).stat().st_mtime_ns}"
+    except (OSError, ValueError, HTTPException):
+        return url
+
+
 def _block_summary(block: Block) -> BlockSummary:
     """Map a block row to the response schema and artifact URLs.
 
@@ -171,9 +183,9 @@ def _block_summary(block: Block) -> BlockSummary:
         visual_type=block.visual_type.value,
         visual_plan=block.visual_plan_json,
         image_prompt=block.image_prompt,
-        image_url=f"/api/projects/{project_id}/artifacts/image/{block.index}" if block.image_path else None,
-        audio_url=f"/api/projects/{project_id}/artifacts/audio/{block.index}" if block.audio_path else None,
-        video_url=f"/api/projects/{project_id}/artifacts/video/{block.index}" if block.video_path else None,
+        image_url=_artifact_url(project_id, "image", block.index, block.image_path),
+        audio_url=_artifact_url(project_id, "audio", block.index, block.audio_path),
+        video_url=_artifact_url(project_id, "video", block.index, block.video_path),
         duration_ms=block.duration_ms,
         display_duration_ms=block.display_duration_ms,
         status_split=block.status_split.value,
@@ -215,9 +227,9 @@ def _provisional_title(script: str) -> str:
     return "無題の台本"
 
 
-def _or_default(value: _T | None, default: _T) -> _T:
-    """Return ``value`` unless it is ``None`` (zero stays a real choice)."""
-    return default if value is None else value
+def _or_default(payload: BaseModel, field: str, default: _T) -> _T:
+    """Return the request's value, or ``default`` when the request omitted it."""
+    return getattr(payload, field) if field in payload.model_fields_set else default
 
 
 @router.post("/quick", response_model=QuickCreateResponse, status_code=201)
@@ -257,8 +269,8 @@ async def quick_create(
         id=allocate_project_id(db),
         title=(payload.title or _provisional_title(script)),
         source_script=script,
-        voicevox_url=payload.voicevox_url or settings.voicevox_url,
-        voicevox_speaker_id=_or_default(payload.voicevox_speaker_id, settings.voicevox_speaker_id),
+        voicevox_url=_or_default(payload, "voicevox_url", settings.voicevox_url),
+        voicevox_speaker_id=_or_default(payload, "voicevox_speaker_id", settings.voicevox_speaker_id),
         voicevox_speed_scale=settings.voicevox_speed_scale,
         narration_sentence_pause_seconds=settings.narration_sentence_pause_seconds,
         use_fake_providers=payload.use_fake_providers,
@@ -318,14 +330,14 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         id=allocate_project_id(db),
         title=payload.title,
         source_script=payload.source_script,
-        voicevox_url=payload.voicevox_url or settings.voicevox_url,
-        voicevox_speaker_id=_or_default(payload.voicevox_speaker_id, settings.voicevox_speaker_id),
-        voicevox_speed_scale=_or_default(payload.voicevox_speed_scale, settings.voicevox_speed_scale),
-        voicevox_pitch_scale=_or_default(payload.voicevox_pitch_scale, settings.voicevox_pitch_scale),
+        voicevox_url=_or_default(payload, "voicevox_url", settings.voicevox_url),
+        voicevox_speaker_id=_or_default(payload, "voicevox_speaker_id", settings.voicevox_speaker_id),
+        voicevox_speed_scale=_or_default(payload, "voicevox_speed_scale", settings.voicevox_speed_scale),
+        voicevox_pitch_scale=_or_default(payload, "voicevox_pitch_scale", settings.voicevox_pitch_scale),
         voicevox_intonation_scale=_or_default(
-            payload.voicevox_intonation_scale, settings.voicevox_intonation_scale
+            payload, "voicevox_intonation_scale", settings.voicevox_intonation_scale
         ),
-        voicevox_volume_scale=_or_default(payload.voicevox_volume_scale, settings.voicevox_volume_scale),
+        voicevox_volume_scale=_or_default(payload, "voicevox_volume_scale", settings.voicevox_volume_scale),
         subtitle_enabled=payload.subtitle_enabled,
         subtitle_font_size=payload.subtitle_font_size,
         subtitle_position=payload.subtitle_position,
@@ -336,7 +348,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         pre_margin_seconds=payload.pre_margin_seconds,
         post_margin_seconds=payload.post_margin_seconds,
         narration_sentence_pause_seconds=_or_default(
-            payload.narration_sentence_pause_seconds, settings.narration_sentence_pause_seconds
+            payload, "narration_sentence_pause_seconds", settings.narration_sentence_pause_seconds
         ),
         max_slides_per_block=payload.max_slides_per_block,
         visual_focus_enabled=payload.visual_focus_enabled,

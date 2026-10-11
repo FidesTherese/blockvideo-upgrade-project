@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.core.config import Settings, get_settings
+from app.core.provider_errors import ProviderError
 from app.core.security import SecretBundle, secret_store
 from app.models.project import Project
 from app.providers.image import ImageProvider
@@ -101,7 +102,8 @@ def build_providers_for_project(project: Project) -> ProviderBundle:
         A ``ProviderBundle`` containing fake clients or configured real clients.
 
     Raises:
-        RuntimeError: If a real LLM lacks an API key, base URL, or model.
+        ProviderError: If a real LLM lacks an API key, base URL, or model
+            (a RuntimeError subclass with a user-facing message).
 
     Side Effects:
         Constructs async HTTP clients for real providers.  It does not call a
@@ -128,9 +130,11 @@ def build_providers_for_project(project: Project) -> ProviderBundle:
     llm_model = llm_credential.model
 
     if not (llm_api_key and llm_base_url and llm_model):
-        raise RuntimeError(
-            "LLM API設定が不足しています。プロジェクトのAPIキーノート画面で "
-            "API key / base URL / model を入力してください。"
+        # Safe for users: the job record shows this message as the failure reason.
+        raise ProviderError(
+            "LLM API設定が不足しています。backend/.env の LLM_API_KEY / LLM_BASE_URL / LLM_MODEL を設定するか、"
+            "詳細作成でAPIキーを入力してください（接続先だけを指定した場合、サーバーのキーは送りません）。",
+            safe=True,
         )
 
     extra_headers = _openrouter_headers(llm_base_url, settings)

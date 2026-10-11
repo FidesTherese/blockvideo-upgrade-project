@@ -153,14 +153,14 @@ class ProjectCreate(QualitySettings):
     # Required project input.
     title: str = Field(min_length=1, max_length=255)
     source_script: str = Field(min_length=1, max_length=100_000)
-    # VOICEVOX endpoint and synthesis controls. ``None`` takes the server's
-    # VOICEVOX_* default from the environment.
-    voicevox_url: str | None = Field(default=None)
-    voicevox_speaker_id: int | None = Field(default=None, ge=0)
-    voicevox_speed_scale: float | None = Field(default=None, ge=0.5, le=2.0)
-    voicevox_pitch_scale: float | None = Field(default=None, ge=-1.0, le=1.0)
-    voicevox_intonation_scale: float | None = Field(default=None, ge=0.0, le=2.0)
-    voicevox_volume_scale: float | None = Field(default=None, ge=0.0, le=2.0)
+    # VOICEVOX endpoint and synthesis controls. A field the request omits is
+    # filled from the server's VOICEVOX_* settings by the create route.
+    voicevox_url: str = Field(default="http://127.0.0.1:50021")
+    voicevox_speaker_id: int = Field(default=1, ge=0)
+    voicevox_speed_scale: float = Field(default=1.0, ge=0.5, le=2.0)
+    voicevox_pitch_scale: float = Field(default=0.0, ge=-1.0, le=1.0)
+    voicevox_intonation_scale: float = Field(default=1.0, ge=0.0, le=2.0)
+    voicevox_volume_scale: float = Field(default=1.0, ge=0.0, le=2.0)
     # Subtitle presentation controls.
     subtitle_enabled: bool = Field(default=True)
     subtitle_font_size: int = Field(default=48, ge=16, le=120)
@@ -173,8 +173,8 @@ class ProjectCreate(QualitySettings):
     pre_margin_seconds: float = Field(default=0.15, ge=0.0, le=5.0)
     post_margin_seconds: float = Field(default=1.5, ge=0.0, le=5.0)
     min_display_seconds: float = Field(default=2.0, ge=0.5, le=10.0)
-    # ``None`` takes NARRATION_SENTENCE_PAUSE_SECONDS from the environment.
-    narration_sentence_pause_seconds: float | None = Field(default=None, ge=0.0, le=5.0)
+    # Omitted: NARRATION_SENTENCE_PAUSE_SECONDS from the environment.
+    narration_sentence_pause_seconds: float = Field(default=1.5, ge=0.0, le=5.0)
     max_slides_per_block: int = Field(default=1, ge=1, le=9)
     # Provider selection and optional request-scoped credentials.
     use_fake_providers: bool = Field(default=False)
@@ -242,9 +242,9 @@ class QuickCreate(QualitySettings):
 
     source_script: str = Field(min_length=1, max_length=100_000)
     title: str | None = Field(default=None, max_length=255)
-    # ``None`` takes the server's VOICEVOX_URL / VOICEVOX_SPEAKER_ID.
-    voicevox_url: str | None = Field(default=None)
-    voicevox_speaker_id: int | None = Field(default=None, ge=0)
+    # Omitted: the server's VOICEVOX_URL / VOICEVOX_SPEAKER_ID.
+    voicevox_url: str = Field(default="http://127.0.0.1:50021")
+    voicevox_speaker_id: int = Field(default=1, ge=0)
     use_fake_providers: bool = Field(default=False)
 
     # Pacing. ``None`` means "leave the project default alone", so the UI can

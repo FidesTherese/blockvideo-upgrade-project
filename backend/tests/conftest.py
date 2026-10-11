@@ -7,6 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from app.core import config as _config
+
+# Tests never read the developer's backend/.env: real paid keys must not be
+# loaded into the suite, and a documented .env value must not change results.
+_config.Settings.model_config["env_file"] = None
+_config.reset_settings_cache()
+
 
 @pytest.fixture(scope="session")
 def event_loop():
