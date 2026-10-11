@@ -32,6 +32,12 @@ STORAGE_ROOT = REPO_ROOT / "storage"
 SAMPLES_ROOT = REPO_ROOT / "samples"
 
 
+def _env_file() -> str | None:
+    """The ``.env`` path to read, or ``None`` when BLOCKVIDEO_ENV_FILE is "none"."""
+    chosen = os.environ.get("BLOCKVIDEO_ENV_FILE", str(PROJECT_ROOT / ".env"))
+    return None if chosen.strip().lower() in {"", "none"} else chosen
+
+
 class Settings(BaseSettings):
     """Typed application settings loaded from environment and ``.env``.
 
@@ -54,7 +60,10 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=str(PROJECT_ROOT / ".env"),
+        # BLOCKVIDEO_ENV_FILE overrides the file; "none" disables it (the test
+        # suite, including the child processes it starts, never reads .env).
+        # Windows drops empty variables from child environments, hence "none".
+        env_file=_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
