@@ -12,6 +12,7 @@ instead of blocking until media encoding finishes.
 """
 from __future__ import annotations
 
+from typing import TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
@@ -25,6 +26,7 @@ from app.api.utils import (
     ensure_render_assets_ready,
     validate_artifact_path,
 )
+from app.core.config import get_settings
 from app.core.logging import log
 from app.core.security import SecretBundle, secret_store
 from app.db import get_db
@@ -65,6 +67,9 @@ from app.workers.job_runner import (
 
 
 # Mounted below the application-level ``/api`` prefix.
+# Value type for ``_or_default``.
+_T = TypeVar("_T")
+
 router = APIRouter(prefix="/projects")
 
 
@@ -210,6 +215,11 @@ def _provisional_title(script: str) -> str:
     return "無題の台本"
 
 
+def _or_default(value: _T | None, default: _T) -> _T:
+    """Return ``value`` unless it is ``None`` (zero stays a real choice)."""
+    return default if value is None else value
+
+
 @router.post("/quick", response_model=QuickCreateResponse, status_code=201)
 async def quick_create(
     payload: QuickCreate, db: Session = Depends(get_db)
@@ -241,13 +251,16 @@ async def quick_create(
     if not script:
         raise HTTPException(status_code=422, detail="source_script is empty")
 
+    settings = get_settings()
     begin_write(db)
     project = Project(
         id=allocate_project_id(db),
         title=(payload.title or _provisional_title(script)),
         source_script=script,
-        voicevox_url=payload.voicevox_url,
-        voicevox_speaker_id=payload.voicevox_speaker_id,
+        voicevox_url=payload.voicevox_url or settings.voicevox_url,
+        voicevox_speaker_id=_or_default(payload.voicevox_speaker_id, settings.voicevox_speaker_id),
+        voicevox_speed_scale=settings.voicevox_speed_scale,
+        narration_sentence_pause_seconds=settings.narration_sentence_pause_seconds,
         use_fake_providers=payload.use_fake_providers,
         visual_focus_enabled=payload.visual_focus_enabled,
         subtitle_mode=payload.subtitle_mode,
@@ -265,6 +278,8 @@ async def quick_create(
         value = getattr(payload, field)
         if value is not None:
             setattr(project, field, value)
+    # A failed create may have left BYOK values under this reused id.
+    secret_store.drop(project.id)
     db.add(project)
     db.flush()
     record_settings(db, project)
@@ -297,17 +312,20 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         job is queued.
 
     """
+    settings = get_settings()
     begin_write(db)
     project = Project(
         id=allocate_project_id(db),
         title=payload.title,
         source_script=payload.source_script,
-        voicevox_url=payload.voicevox_url,
-        voicevox_speaker_id=payload.voicevox_speaker_id,
-        voicevox_speed_scale=payload.voicevox_speed_scale,
-        voicevox_pitch_scale=payload.voicevox_pitch_scale,
-        voicevox_intonation_scale=payload.voicevox_intonation_scale,
-        voicevox_volume_scale=payload.voicevox_volume_scale,
+        voicevox_url=payload.voicevox_url or settings.voicevox_url,
+        voicevox_speaker_id=_or_default(payload.voicevox_speaker_id, settings.voicevox_speaker_id),
+        voicevox_speed_scale=_or_default(payload.voicevox_speed_scale, settings.voicevox_speed_scale),
+        voicevox_pitch_scale=_or_default(payload.voicevox_pitch_scale, settings.voicevox_pitch_scale),
+        voicevox_intonation_scale=_or_default(
+            payload.voicevox_intonation_scale, settings.voicevox_intonation_scale
+        ),
+        voicevox_volume_scale=_or_default(payload.voicevox_volume_scale, settings.voicevox_volume_scale),
         subtitle_enabled=payload.subtitle_enabled,
         subtitle_font_size=payload.subtitle_font_size,
         subtitle_position=payload.subtitle_position,
@@ -317,7 +335,9 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         subtitle_max_chars_per_line=payload.subtitle_max_chars_per_line,
         pre_margin_seconds=payload.pre_margin_seconds,
         post_margin_seconds=payload.post_margin_seconds,
-        narration_sentence_pause_seconds=payload.narration_sentence_pause_seconds,
+        narration_sentence_pause_seconds=_or_default(
+            payload.narration_sentence_pause_seconds, settings.narration_sentence_pause_seconds
+        ),
         max_slides_per_block=payload.max_slides_per_block,
         visual_focus_enabled=payload.visual_focus_enabled,
         subtitle_mode=payload.subtitle_mode,
@@ -329,6 +349,10 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
     db.add(project)
     db.flush()
     record_settings(db, project)
+    db.commit()
+    # Keys are stored only once the project exists, so a failed create never
+    # leaves them for the next project that receives the same id.
+    secret_store.drop(project.id)
     if payload.providers.model_dump(exclude_none=True):
         secret_store.set(
             project.id,
@@ -341,7 +365,6 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
                 image_model=payload.providers.image_model,
             ),
         )
-    db.commit()
     db.refresh(project)
     ensure_project_layout(project.id)
     recovery_context = build_recovery_contexts(db, [project.id])[project.id]

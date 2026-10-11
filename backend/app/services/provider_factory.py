@@ -3,7 +3,9 @@
 Resolution order:
     1. ``use_fake_providers`` selects deterministic fake clients immediately.
     2. For real clients, project-scoped in-memory BYOK values override
-       environment-level fallback settings.
+       environment-level fallback settings.  A key is only paired with its
+       owner's endpoint (``provider_credentials``): the ``.env`` key is never
+       sent to a base URL the project supplied.
     3. Missing required LLM settings raise; image generation is optional and
        becomes ``None`` when no image key is configured.
 
@@ -26,6 +28,7 @@ from app.providers.llm import LLMProvider
 from app.providers.llm_fake import FakeLLMProvider
 from app.providers.llm_openai import OpenAICompatibleProvider
 from app.providers.voicevox import FakeVoicevoxClient, VoicevoxClient, VoicevoxSettings
+from app.services.provider_credentials import resolve_image_credential, resolve_llm_credential
 
 
 @dataclass
@@ -119,9 +122,10 @@ def build_providers_for_project(project: Project) -> ProviderBundle:
             use_fake=True,
         )
 
-    llm_api_key = (secrets.llm_api_key if secrets else None) or settings.llm_api_key
-    llm_base_url = (secrets.llm_base_url if secrets else None) or settings.llm_base_url
-    llm_model = (secrets.llm_model if secrets else None) or settings.llm_model
+    llm_credential = resolve_llm_credential(secrets, settings)
+    llm_api_key = llm_credential.api_key
+    llm_base_url = llm_credential.base_url
+    llm_model = llm_credential.model
 
     if not (llm_api_key and llm_base_url and llm_model):
         raise RuntimeError(
@@ -148,9 +152,10 @@ def build_providers_for_project(project: Project) -> ProviderBundle:
             extra_headers=extra_headers,
         )
 
-    image_api_key = (secrets.image_api_key if secrets else None) or settings.image_api_key
-    image_base_url = (secrets.image_base_url if secrets else None) or "https://api.openai.com/v1"
-    image_model = (secrets.image_model if secrets else None) or settings.image_model or "gpt-image-1"
+    image_credential = resolve_image_credential(secrets, settings)
+    image_api_key = image_credential.api_key
+    image_base_url = image_credential.base_url
+    image_model = image_credential.model
 
     image: ImageProvider | None = None
     if image_api_key:
