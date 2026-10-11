@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.colors import normalize_color
 from app.core.provider_errors import ProviderError
 from app.services.pronunciation import normalize_overrides
 
@@ -109,6 +110,17 @@ class QualitySettings(BaseModel):
     subtitle_mode: Literal["sentence", "packed"] = "sentence"
     narration_pacing_mode: Literal["adaptive", "fixed"] = "adaptive"
     pronunciation_overrides: list[PronunciationOverride] = Field(default_factory=list, max_length=100)
+
+    @field_validator("subtitle_text_color", "subtitle_outline_color", check_fields=False)
+    @classmethod
+    def _normalize_subtitle_color(cls, value: str | None) -> str | None:
+        """Accept ``#RGB``/``#RRGGBB`` or a common colour name; store ``#RRGGBB``."""
+        if value is None:
+            return value
+        color = normalize_color(value)
+        if color is None:
+            raise ValueError("字幕の色は #RRGGBB 形式か、白・黒・赤などの色名で指定してください")
+        return color
 
     @field_validator("pronunciation_overrides")
     @classmethod

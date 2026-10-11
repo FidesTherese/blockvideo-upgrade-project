@@ -18,6 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -160,6 +161,12 @@ class Settings(BaseSettings):
     # Subtitle burn-in band layout: the slide is scaled into the upper
     # (height - band) region and the lower band hosts burned-in subtitles.
     subtitle_band_height: int = 200
+
+    @field_validator("output_width", "output_height", "subtitle_band_height")
+    @classmethod
+    def _round_down_to_even(cls, value: int) -> int:
+        """Keep frame and band sizes even: yuv420p/libx264 and the slide pad need it."""
+        return value - (value % 2)
 
 
 @lru_cache

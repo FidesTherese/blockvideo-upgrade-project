@@ -834,7 +834,12 @@ def _snap_to_boundaries(
             b for b in boundaries
             if b not in cuts and previous + MIN_SLIDE_MS <= b <= latest
         ]
-        cut = min(usable, key=lambda b: abs(b - ideal)) if usable else ideal
+        if usable:
+            cut = min(usable, key=lambda b: abs(b - ideal))
+        else:
+            # An earlier cut may have snapped past this ideal point: keep the
+            # cuts ordered so no slide gets a negative or zero duration.
+            cut = min(max(ideal, previous + MIN_SLIDE_MS), max(latest, previous + 1))
         cuts.append(cut)
         previous = cut
     return cuts
